@@ -72,9 +72,28 @@ export function addMinutesToTime(time: string, minutes: number): string {
   return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
 }
 
+/** "HH:MM" → seconds since midnight. */
+export function timeToSec(time: string): number {
+  const [hh, mm] = time.split(":").map(Number);
+  return hh * 3600 + mm * 60;
+}
+
+/** Seconds since midnight → "HH:MM" (wraps defensively at 24h). */
+export function secToTime(sec: number): string {
+  const wrapped = ((Math.round(sec) % 86400) + 86400) % 86400;
+  const h = Math.floor(wrapped / 3600);
+  const m = Math.floor((wrapped % 3600) / 60);
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+}
+
 // Pace slider bounds (internal sec/km): 3:30/km (fast) to 12:00/km (slow).
 export const PACE_MIN_SEC_PER_KM = 210; // 3:30
 export const PACE_MAX_SEC_PER_KM = 720; // 12:00
+
+// Sensible defaults when a participant leaves a field unconstrained.
+export const DEFAULT_PACE_SEC_PER_KM = 360; // 6:00 /km
+export const DEFAULT_DEPARTURE = "07:00";
+export const DEFAULT_LOOP_DISTANCE_KM = 5;
 
 // Distance slider bounds (internal km).
 export const DISTANCE_MIN_KM = 1;

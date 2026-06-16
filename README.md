@@ -5,10 +5,10 @@ their own start, pace, distance and time constraints, and Flock works out routes
 that maximise the time any two people spend running together. No accounts, one
 shared link per flock, everything publicly accessible.
 
-This repo currently implements **build steps 1–4** of the spec (scaffolding, map
-shell, participant form, polling) plus a name-keyed edit token. Steps 5–10 (ORS
-route generation, together-time analysis, schedule view, GPX export, landing
-polish) are scaffolded but not yet built.
+This repo implements **all ten build steps** of the spec: scaffolding, map shell,
+participant form, polling, ORS route generation, multi-participant routes, the
+together-time analysis with its glowing overlay, the schedule view, plan locking +
+GPX export, and the landing/error/mobile polish — plus a name-keyed edit token.
 
 ## Stack
 
@@ -51,6 +51,25 @@ Open http://localhost:3000 and click **Start a flock →**.
   form draft is never clobbered.
 - `GET /api/geocode?q=` proxies Nominatim with the required `User-Agent` (client
   debounces 1s).
+- `POST /api/routes/calculate` runs the route engine: builds a shared "fly together"
+  corridor from the group's start points, routes everyone through it via ORS
+  foot-hiking (parallel, cached), times each route by pace, runs the together-time
+  analysis (≤50m + ≤10min proximity → clustered stretches), builds per-participant
+  schedules, and persists the result. The browser auto-triggers it (debounced 2s)
+  whenever constraints change.
+- `GET /api/gpx/[flockId]/[participantId]` returns a schema-valid GPX 1.1 file with
+  the route as `<rtept>`s and together-stretch / rest stops as annotated `<wpt>`s.
+
+### The "fly together" engine
+
+The signature feature is produced by `src/lib/routeEngine.ts` + `src/lib/together.ts`:
+everyone converges onto a shared corridor (the spec's "candidate shared waypoint"),
+flies together along it, then diverges home — giving the solo → together → solo
+pattern in the schedule. The together-time analysis only counts overlap that is close
+in **both space and time**. A distance guard falls back to independent loops / direct
+routes when a runner is too far from the corridor, and that pair is reported as too
+far apart. Tuning knobs: `CORRIDOR_KM`, `MAX_ANCHOR_DETOUR_KM` (engine) and
+`PROXIMITY_M`, `TIME_WINDOW_SEC`, `CLUSTER_GAP_M` (analysis).
 
 ### Edit tokens
 

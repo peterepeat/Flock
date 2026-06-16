@@ -19,6 +19,34 @@ export const fromORS = (coord: [number, number]): LatLng => ({
 /** Flock LatLng → Leaflet [lat, lng] tuple. */
 export const toLeaflet = (ll: LatLng): [number, number] => [ll.lat, ll.lng];
 
+/** Initial bearing from a → b, in radians. */
+export function bearingRad(a: LatLng, b: LatLng): number {
+  const φ1 = (a.lat * Math.PI) / 180;
+  const φ2 = (b.lat * Math.PI) / 180;
+  const Δλ = ((b.lng - a.lng) * Math.PI) / 180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return Math.atan2(y, x);
+}
+
+/** Point reached by travelling `distKm` from `from` along `bearing` (radians). */
+export function destinationPoint(from: LatLng, bearing: number, distKm: number): LatLng {
+  const R = 6371;
+  const δ = distKm / R;
+  const φ1 = (from.lat * Math.PI) / 180;
+  const λ1 = (from.lng * Math.PI) / 180;
+  const φ2 = Math.asin(
+    Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(bearing),
+  );
+  const λ2 =
+    λ1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(δ) * Math.cos(φ1),
+      Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2),
+    );
+  return { lat: (φ2 * 180) / Math.PI, lng: (λ2 * 180) / Math.PI };
+}
+
 /** Haversine distance between two points, in metres. */
 export function distanceMeters(a: LatLng, b: LatLng): number {
   const R = 6371000;

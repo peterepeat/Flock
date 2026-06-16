@@ -87,6 +87,8 @@ export default function MapCanvas() {
 
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
+  const sharedSegments = session?.sharedSegments ?? [];
+  const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
 
   // Collect every point that should influence the viewport.
   const allPoints = useMemo(() => {
@@ -118,16 +120,70 @@ export default function MapCanvas() {
         <ClickHandler />
         <FitBounds points={allPoints} />
 
-        {/* Routes (populated from build step 5+). */}
+        {/* Together overlay — the signature glowing underlay where the flock flies
+            together (rendered BENEATH the routes). A wide soft halo + a brighter
+            animated core. */}
+        {sharedSegments.map((seg, i) => {
+          const positions = seg.geometry.coordinates.map(
+            ([lng, lat]) => [lat, lng] as [number, number],
+          );
+          const names = seg.participantIds.map(nameOf);
+          const label = `${names.join(" + ")} fly together here for ~${Math.round(
+            seg.overlapMinutes,
+          )} min`;
+          return (
+            <Polyline
+              key={`together-halo-${i}`}
+              positions={positions}
+              pathOptions={{
+                color: "var(--together)",
+                weight: 14,
+                opacity: 0.28,
+                lineCap: "round",
+                lineJoin: "round",
+                className: "together-glow",
+              }}
+            >
+              <Tooltip sticky>{label}</Tooltip>
+            </Polyline>
+          );
+        })}
+        {sharedSegments.map((seg, i) => (
+          <Polyline
+            key={`together-core-${i}`}
+            positions={seg.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
+            pathOptions={{
+              color: "var(--together)",
+              weight: 4,
+              opacity: 0.95,
+              lineCap: "round",
+              lineJoin: "round",
+            }}
+            interactive={false}
+          />
+        ))}
+
+        {/* Individual routes */}
         {routes.map((r) => {
-          const color = participants.find((p) => p.id === r.participantId)?.color ?? "#fff";
+          const p = participants.find((x) => x.id === r.participantId);
+          const color = p?.color ?? "#fff";
           const dim = hovered && hovered !== r.participantId;
           return (
             <Polyline
               key={r.participantId}
               positions={r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
-              pathOptions={{ color, weight: 3, opacity: dim ? 0.25 : hovered === r.participantId ? 1 : 0.6 }}
-            />
+              pathOptions={{ color, weight: 3, opacity: dim ? 0.2 : hovered === r.participantId ? 1 : 0.6 }}
+              eventHandlers={{
+                mouseover: () => useFlockStore.getState().setHovered(r.participantId),
+                mouseout: () => useFlockStore.getState().setHovered(null),
+              }}
+            >
+              <Tooltip sticky>
+                <span className="mono">{p?.name}</span> ·{" "}
+                {formatDistance(r.distanceKm, session!.unitPreference)} · {r.departureTime}–
+                {r.arrivalTime}
+              </Tooltip>
+            </Polyline>
           );
         })}
 

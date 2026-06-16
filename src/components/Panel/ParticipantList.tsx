@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import ScheduleView from "@/components/Panel/ScheduleView";
 import { initial } from "@/lib/colors";
 import { ownsParticipant } from "@/lib/editTokens";
 import { formatDistance } from "@/lib/units";
@@ -12,6 +13,8 @@ export default function ParticipantList() {
   const session = useFlockStore((s) => s.session);
   const openEditForm = useFlockStore((s) => s.openEditForm);
   const setHovered = useFlockStore((s) => s.setHovered);
+  const expandedId = useFlockStore((s) => s.expandedParticipantId);
+  const setExpanded = useFlockStore((s) => s.setExpanded);
   const locked = session?.lockedAt != null;
 
   // ownsParticipant reads localStorage — compute client-side after mount.
@@ -36,43 +39,76 @@ export default function ParticipantList() {
       {session.participants.map((p) => {
         const route = session.computedRoutes?.find((r) => r.participantId === p.id);
         const isOwn = owned[p.id];
+        const isExpanded = expandedId === p.id;
         return (
           <li key={p.id}>
-            <button
-              type="button"
+            <div
               onMouseEnter={() => setHovered(p.id)}
               onMouseLeave={() => setHovered(null)}
-              onClick={() => isOwn && !locked && openEditForm(p.id)}
-              className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-surface-lift ${
-                isOwn && !locked ? "cursor-pointer" : "cursor-default"
-              }`}
+              className="rounded-lg transition hover:bg-surface-lift"
             >
-              <span
-                className="mono flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs text-[#15151a]"
-                style={{ background: p.color }}
-              >
-                {initial(p.name)}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-2">
-                  <span className="truncate text-sm text-text">{p.name}</span>
-                  {isOwn && (
-                    <span className="rounded bg-surface-lift px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-fog">
-                      you
-                    </span>
-                  )}
-                </span>
-                {route && (
-                  <span className="mono block text-xs text-fog">
-                    {formatDistance(route.distanceKm, session.unitPreference)} ·{" "}
-                    {route.departureTime}–{route.arrivalTime}
+              <div className="flex items-center gap-3 px-2 py-2">
+                <button
+                  type="button"
+                  onClick={() => setExpanded(isExpanded ? null : p.id)}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  aria-expanded={isExpanded}
+                >
+                  <span
+                    className="mono flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs text-[#15151a]"
+                    style={{ background: p.color }}
+                  >
+                    {initial(p.name)}
                   </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-2">
+                      <span className="truncate text-sm text-text">{p.name}</span>
+                      {isOwn && (
+                        <span className="rounded bg-surface-lift px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-fog">
+                          you
+                        </span>
+                      )}
+                    </span>
+                    {route && (
+                      <span className="mono block text-xs text-fog">
+                        {formatDistance(route.distanceKm, session.unitPreference)} ·{" "}
+                        {route.departureTime}–{route.arrivalTime}
+                      </span>
+                    )}
+                  </span>
+                </button>
+                {isOwn && !locked && (
+                  <button
+                    type="button"
+                    onClick={() => openEditForm(p.id)}
+                    className="shrink-0 text-xs text-fog hover:text-text"
+                  >
+                    edit
+                  </button>
                 )}
-              </span>
-              {isOwn && !locked && (
-                <span className="text-xs text-fog">edit</span>
+                {locked && route && (
+                  <a
+                    href={`/api/gpx/${flockId}/${p.id}`}
+                    className="shrink-0 rounded-full bg-together px-2.5 py-1 text-[11px] font-medium text-[#0c1413] hover:brightness-110"
+                  >
+                    Download
+                  </a>
+                )}
+              </div>
+              {isExpanded && (
+                <div className="px-2 pb-2">
+                  <ScheduleView participantId={p.id} />
+                  {locked && route && (
+                    <a
+                      href={`/api/gpx/${flockId}/${p.id}`}
+                      className="mt-2 block rounded-full bg-together px-4 py-2 text-center text-sm font-medium text-[#0c1413] hover:brightness-110"
+                    >
+                      Download your route
+                    </a>
+                  )}
+                </div>
               )}
-            </button>
+            </div>
           </li>
         );
       })}

@@ -53,6 +53,7 @@ export interface ScheduleSegment {
   endLocation: LatLng;
   paceSecPerKm: number | null; // null for rest
   companionIds: string[]; // who else is running this segment simultaneously
+  distanceKm: number; // 0 for rest — convenience for the schedule view
 }
 
 export interface ComputedRoute {

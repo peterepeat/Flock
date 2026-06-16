@@ -1,8 +1,10 @@
 import { create } from "zustand";
 
+import type { CalcWarning } from "@/lib/routing-types";
 import type { FlockSession, LatLng } from "@/lib/types";
 
 export type FlockStatus = "loading" | "ready" | "notfound" | "error";
+export type CalcStatus = "idle" | "working" | "error";
 
 interface FlockState {
   flockId: string | null;
@@ -19,6 +21,10 @@ interface FlockState {
   pendingStart: LatLng | null; // the open form's current start, shown live on the map (form → map)
   placingPin: boolean; // map is in "click to place start" mode
 
+  // Route calculation feedback
+  calcStatus: CalcStatus;
+  calcWarnings: CalcWarning[];
+
   setFlockId: (id: string) => void;
   setStatus: (status: FlockStatus) => void;
   /** Replace session if the incoming one is newer (or forced after a local write). */
@@ -32,6 +38,8 @@ interface FlockState {
   setDraftStart: (ll: LatLng | null) => void;
   setPendingStart: (ll: LatLng | null) => void;
   setPlacingPin: (placing: boolean) => void;
+  setCalcStatus: (status: CalcStatus) => void;
+  setCalcWarnings: (warnings: CalcWarning[]) => void;
 }
 
 export const useFlockStore = create<FlockState>((set, get) => ({
@@ -47,6 +55,9 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   draftStart: null,
   pendingStart: null,
   placingPin: false,
+
+  calcStatus: "idle",
+  calcWarnings: [],
 
   setFlockId: (id) => set({ flockId: id }),
   setStatus: (status) => set({ status }),
@@ -80,4 +91,6 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setDraftStart: (ll) => set({ draftStart: ll }),
   setPendingStart: (ll) => set({ pendingStart: ll }),
   setPlacingPin: (placing) => set({ placingPin: placing }),
+  setCalcStatus: (status) => set({ calcStatus: status }),
+  setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
 }));
