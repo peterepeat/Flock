@@ -53,9 +53,10 @@ body {
   font-family: var(--font-inter), sans-serif;
 }
 
-/* Subtle dawn tint + de-saturation on the OSM tiles so the map reads dark. */
+/* Dawn tint + de-saturation on the OSM tiles so the map reads dark and the
+   route colours / together-glow pop against it. */
 .flock-tiles {
-  filter: brightness(0.72) contrast(1.05) saturate(0.78) hue-rotate(-6deg);
+  filter: brightness(0.58) contrast(1.12) saturate(0.62) hue-rotate(-6deg);
 }
 
 .leaflet-bar a,

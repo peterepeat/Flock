@@ -29,6 +29,10 @@ export const PROXIMITY_M = 50;
 export const TIME_WINDOW_SEC = 10 * 60;
 export const CLUSTER_GAP_M = 100;
 const MIN_STRETCH_POINTS = 2;
+// Fragments of the same convergence (brief scan drop-outs) get merged so each
+// together-period is a single stretch with one convergence + one divergence.
+const MERGE_TIME_SEC = 120;
+const MERGE_GAP_M = 300;
 
 export interface TogetherResult {
   shared: SharedSegment[];
@@ -72,8 +76,9 @@ export function analyzeTogether(routes: TimedRoute[]): TogetherResult {
         continue;
       }
 
-      // 2. cluster into stretches
-      const stretches = clusterStretches(A, candidates, plog);
+      // 2. cluster into stretches, then merge fragments of the same convergence
+      const clustered = clusterStretches(A, candidates, plog);
+      const stretches = mergeStretches(A, clustered, plog);
 
       // 3. build shared segments + intervals + minutes
       const sharedPace = Math.max(A.paceSecPerKm, B.paceSecPerKm); // slower of the two
@@ -211,4 +216,33 @@ function clusterStretches(
 
   plog.debug("clustered", { stretches: stretches.length });
   return stretches.filter((s) => s.iaEnd > s.iaStart);
+}
+
+/**
+ * Merge consecutive stretches that are really one convergence split by a brief
+ * proximity-scan drop-out (small gap in both time and space). Genuinely separate
+ * convergences (e.g. an out-and-back with a solo turnaround) stay separate.
+ */
+function mergeStretches(
+  A: TimedRoute,
+  stretches: Stretch[],
+  plog: ReturnType<typeof log.child>,
+): Stretch[] {
+  if (stretches.length <= 1) return stretches;
+  const merged: Stretch[] = [stretches[0]];
+  for (let i = 1; i < stretches.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = stretches[i];
+    const timeGap = A.points[cur.iaStart].clockSec - A.points[prev.iaEnd].clockSec;
+    const spaceGap = distanceMeters(A.points[prev.iaEnd].ll, A.points[cur.iaStart].ll);
+    if (timeGap <= MERGE_TIME_SEC && spaceGap <= MERGE_GAP_M) {
+      prev.iaEnd = cur.iaEnd;
+      prev.ibStart = Math.min(prev.ibStart, cur.ibStart);
+      prev.ibEnd = Math.max(prev.ibEnd, cur.ibEnd);
+    } else {
+      merged.push(cur);
+    }
+  }
+  plog.debug("merged", { before: stretches.length, after: merged.length });
+  return merged;
 }

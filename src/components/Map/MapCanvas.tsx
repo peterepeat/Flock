@@ -39,6 +39,19 @@ function divMarker(color: string, label: string, kind: MarkerKind): L.DivIcon {
   });
 }
 
+/** A small glowing diamond marking where the flock converges. */
+function meetIcon(): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html:
+      `<div style="width:14px;height:14px;transform:rotate(45deg);` +
+      `background:var(--together);border:2px solid #0b1413;` +
+      `box-shadow:0 0 10px var(--together);"></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+}
+
 /** Click-to-place handler for the start pin while the form is open. */
 function ClickHandler() {
   const placingPin = useFlockStore((s) => s.placingPin);
@@ -163,16 +176,43 @@ export default function MapCanvas() {
           />
         ))}
 
-        {/* Individual routes */}
+        {/* Route casings — a dark outline under every route so the colours read
+            clearly against busy map tiles. */}
+        {routes.map((r) => {
+          const dim = hovered && hovered !== r.participantId;
+          return (
+            <Polyline
+              key={`casing-${r.participantId}`}
+              positions={r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
+              pathOptions={{
+                color: "#0b0b0e",
+                weight: 8,
+                opacity: dim ? 0.25 : 0.75,
+                lineCap: "round",
+                lineJoin: "round",
+              }}
+              interactive={false}
+            />
+          );
+        })}
+
+        {/* Individual routes (colour cores) */}
         {routes.map((r) => {
           const p = participants.find((x) => x.id === r.participantId);
           const color = p?.color ?? "#fff";
-          const dim = hovered && hovered !== r.participantId;
+          const isHover = hovered === r.participantId;
+          const dim = hovered && !isHover;
           return (
             <Polyline
               key={r.participantId}
               positions={r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
-              pathOptions={{ color, weight: 3, opacity: dim ? 0.2 : hovered === r.participantId ? 1 : 0.6 }}
+              pathOptions={{
+                color,
+                weight: isHover ? 6 : 4.5,
+                opacity: dim ? 0.3 : 1,
+                lineCap: "round",
+                lineJoin: "round",
+              }}
               eventHandlers={{
                 mouseover: () => useFlockStore.getState().setHovered(r.participantId),
                 mouseout: () => useFlockStore.getState().setHovered(null),
@@ -184,6 +224,26 @@ export default function MapCanvas() {
                 {r.arrivalTime}
               </Tooltip>
             </Polyline>
+          );
+        })}
+
+        {/* Meeting points — only where the flock converges (start of each
+            together-period). */}
+        {sharedSegments.map((seg, i) => {
+          const first = seg.geometry.coordinates[0];
+          if (!first) return null;
+          const names = seg.participantIds.map(nameOf);
+          return (
+            <Marker
+              key={`meet-${i}`}
+              position={[first[1], first[0]]}
+              icon={meetIcon()}
+              zIndexOffset={500}
+            >
+              <Tooltip direction="top" offset={[0, -10]}>
+                {names.join(" + ")} meet here · ~{seg.startTime}
+              </Tooltip>
+            </Marker>
           );
         })}
 

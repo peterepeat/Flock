@@ -52,19 +52,30 @@ export function buildGpx(session: FlockSession, participantId: string): GpxResul
 
   const waypoints: string[] = [];
 
-  // Together-stretch start points → "Meet [name] here".
+  // Each together-period gets a convergence ("Meet … here") and a divergence
+  // ("Part ways …") waypoint — one pair per period, at the actual transitions.
   for (const seg of session.sharedSegments ?? []) {
     if (!seg.participantIds.includes(participantId)) continue;
     const others = seg.participantIds.filter((id) => id !== participantId).map(nameOf);
-    const coord = seg.geometry.coordinates[0];
-    if (!coord) continue;
-    const km = lineLengthKm(seg.geometry.coordinates);
+    const coords = seg.geometry.coordinates;
+    const start = coords[0];
+    const end = coords[coords.length - 1];
+    if (!start) continue;
+    const km = lineLengthKm(coords);
     waypoints.push(
-      `  <wpt lat="${coord[1]}" lon="${coord[0]}">\n` +
+      `  <wpt lat="${start[1]}" lon="${start[0]}">\n` +
         `    <name>Meet ${xmlEscape(others.join(" + "))} here</name>\n` +
-        `    <desc>~${seg.startTime}. You'll run together for about ${km.toFixed(1)}km.</desc>\n` +
+        `    <desc>~${seg.startTime}. You'll fly together for about ${km.toFixed(1)}km.</desc>\n` +
         `  </wpt>`,
     );
+    if (end && coords.length > 2) {
+      waypoints.push(
+        `  <wpt lat="${end[1]}" lon="${end[0]}">\n` +
+          `    <name>Part ways with ${xmlEscape(others.join(" + "))}</name>\n` +
+          `    <desc>You go your own way from here.</desc>\n` +
+          `  </wpt>`,
+      );
+    }
   }
 
   // Rest stop → "Stop — [place]".

@@ -45,8 +45,22 @@ const log = createLogger("route-engine");
 
 // Distance guard: don't detour more than this to reach the shared corridor.
 const MAX_ANCHOR_DETOUR_KM = 12;
-// Length of the shared "fly together" corridor.
-const CORRIDOR_KM = 1.6;
+// Shared corridor length is sized off the smallest target distance in the group
+// (so a short-distance runner isn't forced over budget), clamped to this range.
+const CORRIDOR_MIN_KM = 0.6;
+const CORRIDOR_MAX_KM = 2.0;
+// Crow-flies → on-path distance estimate, used to seed the distance correction.
+const ROAD_FACTOR = 1.3;
+// Accept a route whose length is within this fraction of the target distance.
+const DISTANCE_TOLERANCE = 0.12;
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const round2 = (v: number) => Number(v.toFixed(2));
+const crowKm = (a: LatLng, b: LatLng) => distanceMeters(a, b) / 1000;
+const midpoint = (a: LatLng, b: LatLng): LatLng => ({
+  lat: (a.lat + b.lat) / 2,
+  lng: (a.lng + b.lng) / 2,
+});
 
 /** The shared corridor everyone converges onto, then diverges from. */
 interface Corridor {
@@ -54,7 +68,7 @@ interface Corridor {
   far: LatLng; // turnaround point of the shared leg
 }
 
-function buildCorridor(starts: LatLng[]): Corridor {
+function buildCorridor(starts: LatLng[], corridorKm: number): Corridor {
   const anchor = centroid(starts);
   // Orient the corridor along the spread of starts (SW corner → NE corner) so it
   // sits inside the group's area rather than off in an arbitrary direction.
@@ -63,9 +77,45 @@ function buildCorridor(starts: LatLng[]): Corridor {
   const maxLat = Math.max(...starts.map((s) => s.lat));
   const maxLng = Math.max(...starts.map((s) => s.lng));
   const bearing = bearingRad({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng });
-  const near = destinationPoint(anchor, bearing + Math.PI, CORRIDOR_KM / 2);
-  const far = destinationPoint(anchor, bearing, CORRIDOR_KM / 2);
+  const near = destinationPoint(anchor, bearing + Math.PI, corridorKm / 2);
+  const far = destinationPoint(anchor, bearing, corridorKm / 2);
   return { near, far };
+}
+
+/** Target distance for a participant (km), respecting any hard cap. */
+function targetDistanceKm(p: Participant): number {
+  let t = p.preferredDistance ?? p.maxDistance ?? DEFAULT_LOOP_DISTANCE_KM;
+  if (p.maxDistance != null) t = Math.min(t, p.maxDistance);
+  return t;
+}
+
+/**
+ * A detour point that, inserted between `from` and `to`, adds ~addKm of
+ * crow-flies distance (perpendicular triangle bump at the midpoint).
+ */
+function paddingDetour(from: LatLng, to: LatLng, addKm: number): LatLng {
+  const L = crowKm(from, to);
+  if (L < 0.05) {
+    return destinationPoint(from, 0, addKm / 2); // degenerate: poke north
+  }
+  const half = L / 2;
+  const newHalf = (L + addKm) / 2;
+  const h = Math.sqrt(Math.max(0, newHalf * newHalf - half * half));
+  return destinationPoint(midpoint(from, to), bearingRad(from, to) + Math.PI / 2, h);
+}
+
+function corridorWaypoints(
+  start: LatLng,
+  corridor: Corridor,
+  home: LatLng,
+  paddingKm: number,
+  restLoc: LatLng | null,
+): LatLng[] {
+  const wp: LatLng[] = [start, corridor.near, corridor.far];
+  if (paddingKm > 0.2) wp.push(paddingDetour(corridor.far, home, paddingKm));
+  if (restLoc) wp.push(restLoc);
+  wp.push(home);
+  return wp;
 }
 
 export interface CalcResult {
@@ -206,44 +256,82 @@ async function generateForParticipant(
 ): Promise<BuiltRoute> {
   const start = participant.startLocation;
   const finish = participant.finishLocation;
+  const home = finish ?? start;
   const isLoop = finish == null;
+  const restLoc = participant.restStop?.location ?? null;
+  const target = targetDistanceKm(participant);
 
   // Decide whether to route through the shared corridor.
   let useCorridor = false;
   if (corridor) {
-    const detourKm = distanceMeters(start, corridor.near) / 1000;
+    const detourKm = crowKm(start, corridor.near);
     useCorridor = detourKm <= MAX_ANCHOR_DETOUR_KM;
     log.debug("corridor decision", {
       participantId: participant.id,
-      detourKm: Number(detourKm.toFixed(2)),
+      detourKm: round2(detourKm),
+      target,
       useCorridor,
     });
   }
 
   let ors: OrsRoute;
   if (useCorridor && corridor) {
-    // Converge → fly together along near→far → diverge.
-    // start → near → far → (rest) → finish/start.
-    const waypoints: LatLng[] = [start, corridor.near, corridor.far];
-    if (participant.restStop?.location) waypoints.push(participant.restStop.location);
-    waypoints.push(finish ?? start);
-    const key = `p2p:${waypoints.map(round5).join(";")}`;
-    ors = await cachedRoute(key, () => getRoute(waypoints));
+    ors = await routeThroughCorridorToTarget(participant, corridor, home, target);
   } else if (isLoop) {
-    // Independent loop sized to the preferred distance.
-    const lengthKm = participant.preferredDistance ?? DEFAULT_LOOP_DISTANCE_KM;
-    const key = `loop:${round5(start)}:${lengthKm}`;
-    ors = await cachedRoute(key, () => getRoundTrip(start, lengthKm));
+    // Independent loop sized to the target distance (ORS round-trip is exact).
+    const key = `loop:${round5(start)}:${target}`;
+    ors = await cachedRoute(key, () => getRoundTrip(start, target));
   } else {
     // Direct point-to-point (with rest stop if specific).
     const waypoints: LatLng[] = [start];
-    if (participant.restStop?.location) waypoints.push(participant.restStop.location);
-    waypoints.push(finish!);
+    if (restLoc) waypoints.push(restLoc);
+    waypoints.push(home);
     const key = `p2p:${waypoints.map(round5).join(";")}`;
     ors = await cachedRoute(key, () => getRoute(waypoints));
   }
 
   return timeRoute(participant, ors);
+}
+
+/**
+ * Route through the shared corridor and pad the homeward leg to hit the target
+ * distance. One linear correction (using the measured length) lands it within
+ * tolerance; capped at 2 ORS calls per participant.
+ */
+async function routeThroughCorridorToTarget(
+  participant: Participant,
+  corridor: Corridor,
+  home: LatLng,
+  target: number,
+): Promise<OrsRoute> {
+  const start = participant.startLocation;
+  const restLoc = participant.restStop?.location ?? null;
+  const baseStraight =
+    crowKm(start, corridor.near) + crowKm(corridor.near, corridor.far) + crowKm(corridor.far, home);
+
+  let padding = Math.max(0, target - baseStraight * ROAD_FACTOR);
+  let ors: OrsRoute | null = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const waypoints = corridorWaypoints(start, corridor, home, padding, restLoc);
+    const key = `corr:${waypoints.map(round5).join(";")}`;
+    ors = await cachedRoute(key, () => getRoute(waypoints));
+    const actual = ors.distanceKm;
+    const off = Math.abs(actual - target) / target;
+    log.debug("corridor distance pass", {
+      participantId: participant.id,
+      attempt,
+      target,
+      actual: round2(actual),
+      padding: round2(padding),
+      offPct: Math.round(off * 100),
+    });
+    if (attempt === 1 || off <= DISTANCE_TOLERANCE) break;
+    // Linear correction: padding moves road distance ~ROAD_FACTOR:1.
+    padding = Math.max(0, padding + (target - actual) / ROAD_FACTOR);
+  }
+
+  return ors!;
 }
 
 // --- Warnings ----------------------------------------------------------------
@@ -297,11 +385,17 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     };
   }
 
-  // Shared corridor only makes sense with ≥2 participants.
-  const corridor = withStart.length >= 2 ? buildCorridor(withStart.map((p) => p.startLocation)) : null;
+  // Shared corridor only makes sense with ≥2 participants. Size it off the
+  // smallest target distance so a short-distance runner isn't pushed over budget.
+  const minTarget = Math.min(...withStart.map(targetDistanceKm));
+  const corridorKm = clamp(0.3 * minTarget, CORRIDOR_MIN_KM, CORRIDOR_MAX_KM);
+  const corridor =
+    withStart.length >= 2 ? buildCorridor(withStart.map((p) => p.startLocation), corridorKm) : null;
   log.info("calculating", {
     flockId: session.id,
     participants: withStart.length,
+    minTarget,
+    corridorKm: round2(corridorKm),
     corridor: corridor ? `${round5(corridor.near)}→${round5(corridor.far)}` : null,
   });
 
