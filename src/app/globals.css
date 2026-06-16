@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Surfaces */
+  --surface: #17171a;
+  --surface-mid: #222228;
+  --surface-lift: #32323a;
+
+  /* Text */
+  --text: #f0ebe1;
+  --text-dim: rgba(240, 235, 225, 0.5);
+  --fog: #5c6370;
+
+  /* Brand */
+  --together: #3abfb0;
+  --together-glow: rgba(58, 191, 176, 0.18);
+  --accent: #e8612a;
+
+  /* Participant route colours */
+  --p1: #e8855a;
+  --p2: #4abfb0;
+  --p3: #d4a847;
+  --p4: #8b6fc4;
+  --p5: #4a8fc4;
+  --p6: #c44a7a;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+/* Numeric running data uses the mono face. */
+.mono,
+.tabular {
+  font-family: var(--font-dm-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Leaflet theming (dark canvas) ------------------------------------- */
+.leaflet-container {
+  background: #0e0e10;
+  font-family: var(--font-inter), sans-serif;
+}
+
+/* Subtle dawn tint + de-saturation on the OSM tiles so the map reads dark. */
+.flock-tiles {
+  filter: brightness(0.72) contrast(1.05) saturate(0.78) hue-rotate(-6deg);
+}
+
+.leaflet-bar a,
+.leaflet-control-zoom a {
+  background: var(--surface-mid);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.leaflet-bar a:hover {
+  background: var(--surface-lift);
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-tooltip {
+  background: var(--surface-mid);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.leaflet-tooltip {
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.leaflet-tooltip-top:before,
+.leaflet-tooltip-bottom:before,
+.leaflet-tooltip-left:before,
+.leaflet-tooltip-right:before {
+  border-top-color: var(--surface-mid);
+  border-bottom-color: var(--surface-mid);
+}
+.leaflet-popup-tip {
+  background: var(--surface-mid);
+}
+
+/* Custom participant markers (divIcon) */
+.flock-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-dm-mono), monospace;
+  font-weight: 500;
+  font-size: 13px;
+  color: #15151a;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.flock-marker--start {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+}
+.flock-marker--finish {
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+}
+.flock-marker--rest {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+/* --- Form controls ----------------------------------------------------- */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-lift);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-lift);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -7px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--accent);
+}
+
+/* Scrollbars in panels */
+.flock-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.flock-scroll::-webkit-scrollbar-thumb {
+  background: var(--surface-lift);
+  border-radius: 999px;
+}
+
+/* Together glow animation for map overlays (used from step 7). */
+@keyframes together-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+.together-glow {
+  animation: together-pulse 3.2s ease-in-out infinite;
+}
