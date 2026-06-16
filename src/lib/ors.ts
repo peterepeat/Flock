@@ -85,22 +85,26 @@ interface CallBody {
 }
 
 async function call(body: CallBody, meta: Record<string, unknown>): Promise<OrsRoute> {
+  // Nudge toward nicer running: skip stairs and ferries. (The public ORS
+  // foot-hiking profile already favours paths/trails; there is no "green"
+  // preference on the standard API, so this is the available lever.)
+  const options: Record<string, unknown> = { avoid_features: ["steps", "ferries"] };
+  if (body.roundTrip) {
+    options.round_trip = {
+      length: body.roundTrip.lengthMeters,
+      points: body.roundTrip.points ?? 4,
+      seed: body.roundTrip.seed ?? 1,
+    };
+  }
+
   const payload: Record<string, unknown> = {
     coordinates: body.coordinates,
     preference: "recommended",
     units: "km",
     instructions: false,
     elevation: false,
+    options,
   };
-  if (body.roundTrip) {
-    payload.options = {
-      round_trip: {
-        length: body.roundTrip.lengthMeters,
-        points: body.roundTrip.points ?? 4,
-        seed: body.roundTrip.seed ?? 1,
-      },
-    };
-  }
 
   const done = log.time("directions", meta);
   let lastErr: RouteError | null = null;
