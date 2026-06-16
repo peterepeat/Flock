@@ -78,14 +78,13 @@ export function buildGpx(session: FlockSession, participantId: string): GpxResul
     }
   }
 
-  // Rest stop → "Stop — [place]".
-  const rest = route.schedule.find((s) => s.type === "rest");
-  if (rest && participant.restStop) {
-    const place = participant.restStop.locationAddress || "your stop";
+  // Shared stops → "Stop — [place]" (one per rest in the schedule).
+  for (const rest of route.schedule.filter((s) => s.type === "rest")) {
+    const place = rest.label || "your stop";
     waypoints.push(
       `  <wpt lat="${rest.startLocation.lat}" lon="${rest.startLocation.lng}">\n` +
         `    <name>Stop — ${xmlEscape(place)}</name>\n` +
-        `    <desc>Arrive ~${rest.startTime}. ${participant.restStop.durationMinutes} min stop. Leave ~${rest.endTime}.</desc>\n` +
+        `    <desc>Arrive ~${rest.startTime}. Leave ~${rest.endTime}.</desc>\n` +
         `  </wpt>`,
     );
   }

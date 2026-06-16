@@ -21,6 +21,19 @@ export interface RestStopPreference {
   locationAddress: string | null;
 }
 
+/**
+ * A waypoint nominated for the whole flock — everyone's route passes through it,
+ * in order. Optionally the flock stops there for `stopMinutes`. This replaces the
+ * old per-participant rest stop: stops are now shared, like the route.
+ */
+export interface FlockWaypoint {
+  id: string;
+  location: LatLng;
+  address: string;
+  name: string; // user label, falls back to address
+  stopMinutes: number; // 0 = pass through, >0 = everyone stops
+}
+
 export interface Participant {
   id: string;
   name: string;
@@ -54,6 +67,7 @@ export interface ScheduleSegment {
   paceSecPerKm: number | null; // null for rest
   companionIds: string[]; // who else is running this segment simultaneously
   distanceKm: number; // 0 for rest — convenience for the schedule view
+  label?: string; // for rest segments: the waypoint/stop name
 }
 
 export interface ComputedRoute {
@@ -81,6 +95,7 @@ export interface FlockSession {
   lockedAt: string | null; // set when group locks the plan
   unitPreference: Unit; // set by first participant, shown to all
   participants: Participant[];
+  waypoints: FlockWaypoint[]; // shared waypoints everyone routes through
   computedRoutes: ComputedRoute[] | null; // null until first calculation
   sharedSegments: SharedSegment[] | null;
 }
@@ -114,6 +129,10 @@ export type PatchAction =
     }
   | { action: "removeParticipant"; participantId: string; editToken: string }
   | { action: "setRoutes"; computedRoutes: ComputedRoute[]; sharedSegments: SharedSegment[] }
+  // Shared waypoints are universal — anyone can manage them (no edit token).
+  | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id"> }
+  | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
+  | { action: "removeWaypoint"; waypointId: string }
   | { action: "lock" }
   | { action: "unlock" };
 

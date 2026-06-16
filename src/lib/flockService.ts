@@ -9,10 +9,11 @@
 
 import { createLogger } from "./logger";
 import { nextColor } from "./colors";
-import { newFlockId, newParticipantId } from "./ids";
+import { newFlockId, newParticipantId, newWaypointId } from "./ids";
 import { getStore, hashToken } from "./store";
 import type {
   FlockSession,
+  FlockWaypoint,
   Participant,
   PatchAction,
   Unit,
@@ -43,6 +44,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     lockedAt: null,
     unitPreference,
     participants: [],
+    waypoints: [],
     computedRoutes: null,
     sharedSegments: null,
   };
@@ -52,7 +54,10 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
 }
 
 export async function getFlock(id: string): Promise<FlockSession | null> {
-  return getStore().getFlock(id);
+  const session = await getStore().getFlock(id);
+  // Normalise sessions created before shared waypoints existed.
+  if (session && !session.waypoints) session.waypoints = [];
+  return session;
 }
 
 function isValidLatLng(v: unknown): v is { lat: number; lng: number } {
@@ -71,15 +76,19 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     log.warn("patch on missing flock", { id, action: action.action });
     return { ok: false, status: 404, error: "Flock not found" };
   }
+  if (!session.waypoints) session.waypoints = [];
 
   const locked = session.lockedAt != null;
-  const mutatesParticipants =
+  const mutatesPlan =
     action.action === "addParticipant" ||
     action.action === "updateParticipant" ||
     action.action === "removeParticipant" ||
-    action.action === "setUnit";
+    action.action === "setUnit" ||
+    action.action === "addWaypoint" ||
+    action.action === "updateWaypoint" ||
+    action.action === "removeWaypoint";
 
-  if (locked && mutatesParticipants) {
+  if (locked && mutatesPlan) {
     log.info("rejected mutation on locked flock", { id, action: action.action });
     return { ok: false, status: 409, error: "The plan is locked." };
   }
@@ -192,6 +201,52 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         routes: action.computedRoutes.length,
         shared: action.sharedSegments.length,
       });
+      break;
+    }
+
+    case "addWaypoint": {
+      const w = action.waypoint;
+      if (!isValidLatLng(w?.location))
+        return { ok: false, status: 400, error: "A waypoint location is required" };
+      const waypoint: FlockWaypoint = {
+        id: newWaypointId(),
+        location: w.location,
+        address: w.address ?? "",
+        name: w.name?.trim() || w.address || "Waypoint",
+        stopMinutes: Math.max(0, w.stopMinutes ?? 0),
+      };
+      session.waypoints.push(waypoint);
+      session.computedRoutes = null;
+      session.sharedSegments = null;
+      log.info("waypoint added", { id, waypointId: waypoint.id, stopMinutes: waypoint.stopMinutes });
+      break;
+    }
+
+    case "updateWaypoint": {
+      const idx = session.waypoints.findIndex((w) => w.id === action.waypointId);
+      if (idx === -1) return { ok: false, status: 404, error: "Waypoint not found" };
+      const cur = session.waypoints[idx];
+      const u = action.updates;
+      session.waypoints[idx] = {
+        ...cur,
+        location: isValidLatLng(u.location) ? u.location : cur.location,
+        address: u.address ?? cur.address,
+        name: u.name?.trim() || cur.name,
+        stopMinutes: u.stopMinutes != null ? Math.max(0, u.stopMinutes) : cur.stopMinutes,
+      };
+      session.computedRoutes = null;
+      session.sharedSegments = null;
+      log.info("waypoint updated", { id, waypointId: action.waypointId });
+      break;
+    }
+
+    case "removeWaypoint": {
+      const exists = session.waypoints.some((w) => w.id === action.waypointId);
+      if (!exists) return { ok: false, status: 404, error: "Waypoint not found" };
+      session.waypoints = session.waypoints.filter((w) => w.id !== action.waypointId);
+      session.computedRoutes = null;
+      session.sharedSegments = null;
+      log.info("waypoint removed", { id, waypointId: action.waypointId });
       break;
     }
 

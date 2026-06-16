@@ -5,6 +5,7 @@ import { useState } from "react";
 import ParticipantForm from "@/components/Panel/ParticipantForm";
 import ParticipantList from "@/components/Panel/ParticipantList";
 import TogetherStat from "@/components/Panel/TogetherStat";
+import WaypointsSection from "@/components/Panel/WaypointsSection";
 import { useFlockStore } from "@/store/flockStore";
 
 export default function FlockPanel() {
@@ -81,6 +82,8 @@ export default function FlockPanel() {
             )}
 
             <ParticipantList />
+
+            {session && session.participants.length > 0 && <WaypointsSection />}
 
             {/* Gentle constraint / routing warnings */}
             {calcWarnings.length > 0 && (

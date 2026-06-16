@@ -13,6 +13,10 @@ export function newParticipantId(): string {
   return nanoid(12);
 }
 
+export function newWaypointId(): string {
+  return nanoid(10);
+}
+
 /** Long, unguessable secret used as a per-participant edit token. */
 export function newEditToken(): string {
   return nanoid(32);

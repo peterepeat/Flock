@@ -39,6 +39,22 @@ function divMarker(color: string, label: string, kind: MarkerKind): L.DivIcon {
   });
 }
 
+/** A numbered pin for a shared waypoint (☕ if it has a stop). */
+function waypointIcon(order: number, hasStop: boolean): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html:
+      `<div style="display:flex;align-items:center;justify-content:center;` +
+      `width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);` +
+      `background:var(--text);border:2px solid var(--accent);` +
+      `box-shadow:0 2px 8px rgba(0,0,0,0.5);">` +
+      `<span style="transform:rotate(45deg);font-size:12px;font-weight:600;color:#15151a;">` +
+      `${hasStop ? "☕" : order}</span></div>`,
+    iconSize: [26, 26],
+    iconAnchor: [13, 24],
+  });
+}
+
 /** A small glowing diamond marking where the flock converges. */
 function meetIcon(): L.DivIcon {
   return L.divIcon({
@@ -52,16 +68,23 @@ function meetIcon(): L.DivIcon {
   });
 }
 
-/** Click-to-place handler for the start pin while the form is open. */
+/** Click-to-place handler for the start pin or a shared waypoint. */
 function ClickHandler() {
   const placingPin = useFlockStore((s) => s.placingPin);
   const formOpen = useFlockStore((s) => s.formOpen);
   const setDraftStart = useFlockStore((s) => s.setDraftStart);
+  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
+  const setWaypointPin = useFlockStore((s) => s.setWaypointPin);
 
   useMapEvents({
     click(e) {
+      const ll: LatLng = { lat: e.latlng.lat, lng: e.latlng.lng };
+      if (placingWaypoint) {
+        log.debug("map click → waypoint", { lat: ll.lat, lng: ll.lng });
+        setWaypointPin(ll);
+        return;
+      }
       if (formOpen && placingPin) {
-        const ll: LatLng = { lat: e.latlng.lat, lng: e.latlng.lng };
         log.debug("map click → start pin", { lat: ll.lat, lng: ll.lng });
         setDraftStart(ll);
       }
@@ -97,10 +120,12 @@ export default function MapCanvas() {
   const hovered = useFlockStore((s) => s.hoveredParticipantId);
   const pendingStart = useFlockStore((s) => s.pendingStart);
   const placingPin = useFlockStore((s) => s.placingPin);
+  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
 
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
   const sharedSegments = session?.sharedSegments ?? [];
+  const waypoints = session?.waypoints ?? [];
   const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
 
   // Collect every point that should influence the viewport.
@@ -109,11 +134,11 @@ export default function MapCanvas() {
     for (const p of participants) {
       pts.push(p.startLocation);
       if (p.finishLocation) pts.push(p.finishLocation);
-      if (p.restStop?.location) pts.push(p.restStop.location);
     }
+    for (const w of waypoints) pts.push(w.location);
     if (pendingStart) pts.push(pendingStart);
     return pts;
-  }, [participants, pendingStart]);
+  }, [participants, waypoints, pendingStart]);
 
   return (
     <div className="relative h-full w-full">
@@ -122,7 +147,7 @@ export default function MapCanvas() {
         zoom={DEFAULT_ZOOM}
         zoomControl={false}
         className="h-full w-full"
-        style={{ cursor: placingPin ? "crosshair" : "" }}
+        style={{ cursor: placingPin || placingWaypoint ? "crosshair" : "" }}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -276,15 +301,20 @@ export default function MapCanvas() {
               icon={divMarker(p.color, initial(p.name), "finish")}
             />
           ))}
-        {participants
-          .filter((p) => p.restStop?.location)
-          .map((p) => (
-            <Marker
-              key={`rest-${p.id}`}
-              position={toLeaflet(p.restStop!.location!)}
-              icon={divMarker(p.color, "☕", "rest")}
-            />
-          ))}
+        {/* Shared waypoints everyone routes through */}
+        {waypoints.map((w, i) => (
+          <Marker
+            key={`wp-${w.id}`}
+            position={toLeaflet(w.location)}
+            icon={waypointIcon(i + 1, w.stopMinutes > 0)}
+            zIndexOffset={400}
+          >
+            <Tooltip direction="top" offset={[0, -22]}>
+              <span className="mono">{w.name}</span>
+              {w.stopMinutes > 0 ? ` · ${w.stopMinutes} min stop` : ""}
+            </Tooltip>
+          </Marker>
+        ))}
 
         {/* In-progress start pin from the open form */}
         {pendingStart && (

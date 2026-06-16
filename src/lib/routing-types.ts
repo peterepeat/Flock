@@ -7,13 +7,20 @@ export interface TimedPoint {
   clockSec: number; // absolute seconds since midnight (includes rest offsets)
 }
 
+/** A stop inserted at a point index along the route. */
+export interface RouteStop {
+  idx: number; // vertex index where the stop happens
+  durationSec: number;
+  name: string;
+  location: LatLng;
+}
+
 /** A participant's route after timing has been applied. */
 export interface TimedRoute {
   participantId: string;
   paceSecPerKm: number;
   points: TimedPoint[];
-  restInsertedAtIdx: number | null; // index after which a rest stop occurs
-  restDurationSec: number;
+  stops: RouteStop[]; // shared-waypoint stops, ascending by idx
 }
 
 /** A run of contiguous points on one participant's route spent with a companion. */

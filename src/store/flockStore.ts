@@ -21,6 +21,10 @@ interface FlockState {
   pendingStart: LatLng | null; // the open form's current start, shown live on the map (form → map)
   placingPin: boolean; // map is in "click to place start" mode
 
+  // Shared-waypoint placement
+  placingWaypoint: boolean; // map is in "click to place a shared waypoint" mode
+  waypointPin: LatLng | null; // location chosen for the waypoint being added (map → form)
+
   // Route calculation feedback
   calcStatus: CalcStatus;
   calcWarnings: CalcWarning[];
@@ -38,6 +42,8 @@ interface FlockState {
   setDraftStart: (ll: LatLng | null) => void;
   setPendingStart: (ll: LatLng | null) => void;
   setPlacingPin: (placing: boolean) => void;
+  setPlacingWaypoint: (placing: boolean) => void;
+  setWaypointPin: (ll: LatLng | null) => void;
   setCalcStatus: (status: CalcStatus) => void;
   setCalcWarnings: (warnings: CalcWarning[]) => void;
 }
@@ -55,6 +61,8 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   draftStart: null,
   pendingStart: null,
   placingPin: false,
+  placingWaypoint: false,
+  waypointPin: null,
 
   calcStatus: "idle",
   calcWarnings: [],
@@ -91,6 +99,8 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setDraftStart: (ll) => set({ draftStart: ll }),
   setPendingStart: (ll) => set({ pendingStart: ll }),
   setPlacingPin: (placing) => set({ placingPin: placing }),
+  setPlacingWaypoint: (placing) => set({ placingWaypoint: placing }),
+  setWaypointPin: (ll) => set({ waypointPin: ll }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
 }));

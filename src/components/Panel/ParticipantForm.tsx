@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Field from "@/components/ui/Field";
 import RangeSlider from "@/components/ui/RangeSlider";
-import Slider from "@/components/ui/Slider";
 import TimeField from "@/components/ui/TimeField";
 import Toggle from "@/components/ui/Toggle";
 import {
@@ -44,11 +43,6 @@ interface Draft {
   paceOn: boolean;
   maxPace: number; // faster (lower sec/km)
   preferredPace: number; // slower (higher sec/km)
-  restOn: boolean;
-  restDuration: number;
-  restLocationMode: "anywhere" | "specific";
-  restLocation: LatLng | null;
-  restLocationAddress: string | null;
 }
 
 function emptyDraft(): Draft {
@@ -67,11 +61,6 @@ function emptyDraft(): Draft {
     paceOn: false,
     maxPace: 300, // 5:00 /km
     preferredPace: 360, // 6:00 /km
-    restOn: false,
-    restDuration: 30,
-    restLocationMode: "anywhere",
-    restLocation: null,
-    restLocationAddress: null,
   };
 }
 
@@ -125,11 +114,6 @@ export default function ParticipantForm() {
         paceOn: existing.preferredPace != null,
         maxPace: existing.maxPace ?? 300,
         preferredPace: existing.preferredPace ?? 360,
-        restOn: existing.restStop?.wantsStop ?? false,
-        restDuration: existing.restStop?.durationMinutes ?? 30,
-        restLocationMode: existing.restStop?.location ? "specific" : "anywhere",
-        restLocation: existing.restStop?.location ?? null,
-        restLocationAddress: existing.restStop?.locationAddress ?? null,
       });
     }
   }, [existing]);
@@ -167,14 +151,7 @@ export default function ParticipantForm() {
       maxPace: d.paceOn ? d.maxPace : null,
       preferredDistance: d.distanceOn ? d.preferredDistance : null,
       maxDistance: d.distanceOn ? d.maxDistance : null,
-      restStop: d.restOn
-        ? {
-            wantsStop: true,
-            durationMinutes: d.restDuration,
-            location: d.restLocationMode === "specific" ? d.restLocation : null,
-            locationAddress: d.restLocationMode === "specific" ? d.restLocationAddress : null,
-          }
-        : null,
+      restStop: null, // stops are now shared waypoints, set by the flock
     };
   }
 
@@ -413,50 +390,10 @@ export default function ParticipantForm() {
             />
           </Field>
 
-          {/* Rest stop */}
-          <Field label="Do you want to stop along the way?">
-            <Toggle
-              options={[
-                { value: "no", label: "No" },
-                { value: "yes", label: "Yes" },
-              ]}
-              value={draft.restOn ? "yes" : "no"}
-              onChange={(v) => set("restOn", v === "yes")}
-            />
-            {draft.restOn && (
-              <div className="mt-3 space-y-3">
-                <div>
-                  <span className="text-xs text-text-dim">How long?</span>
-                  <Slider
-                    min={15}
-                    max={90}
-                    step={5}
-                    value={draft.restDuration}
-                    onChange={(v) => set("restDuration", v)}
-                    format={(v) => `${v} min`}
-                  />
-                </div>
-                <Toggle
-                  options={[
-                    { value: "anywhere", label: "Anywhere that works" },
-                    { value: "specific", label: "Somewhere specific" },
-                  ]}
-                  value={draft.restLocationMode}
-                  onChange={(v) => set("restLocationMode", v as "anywhere" | "specific")}
-                />
-                {draft.restLocationMode === "specific" && (
-                  <AddressSearch
-                    initialValue={draft.restLocationAddress ?? ""}
-                    placeholder="Where would you like to stop?"
-                    onSelect={(r) => {
-                      set("restLocation", { lat: r.lat, lng: r.lng });
-                      set("restLocationAddress", r.shortName);
-                    }}
-                  />
-                )}
-              </div>
-            )}
-          </Field>
+          <p className="rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
+            Want to stop for coffee or meet somewhere? Add a shared waypoint for
+            the whole flock from the panel — everyone’s route runs through it.
+          </p>
         </div>
       )}
 

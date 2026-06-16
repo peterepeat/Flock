@@ -1,15 +1,21 @@
 // ---------------------------------------------------------------------------
 // Route engine — orchestrates the whole calculate pipeline (build steps 5–7).
 //
-//   validate → build waypoints → ORS (parallel, cached) → time each route →
-//   together-time analysis → per-participant schedules → summary
+//   validate → build the shared "spine" → ORS (parallel, cached) → time each
+//   route → together-time analysis → per-participant schedules → summary
 //
-// To make the signature "fly together" moment actually happen, loop/again-style
-// runners are routed through a shared meeting point (the centroid of everyone's
-// start). This is the spec's "candidate shared waypoint". A distance guard keeps
-// the detour sane; when it would be excessive we fall back to an independent
-// round-trip (loop) or a direct route (point-to-point), and the pair is honestly
-// reported as too far apart.
+// The shared spine is what the flock flies together along:
+//   • If the flock nominated waypoints, the spine IS those waypoints (in order),
+//     and any with a stop time become shared stops everyone pauses at.
+//   • Otherwise a sensible auto-corridor is synthesised from everyone's starts.
+//
+// Each route is start → spine → (loop-forming return detour) → home, so it comes
+// back as a LOOP rather than retracing an out-and-back. The return detour is
+// also where homeward distance is padded to hit a runner's target distance.
+//
+// A runner with NO distance preference is treated as "happy to stay with the
+// flock": no padding, no target — their route simply follows the whole spine,
+// which maximises their time flying together.
 //
 // Every stage is logged with sizes + timings for fast fault diagnosis.
 // ---------------------------------------------------------------------------
@@ -30,6 +36,7 @@ import type {
   CalcWarning,
   CompanionInterval,
   PairSummary,
+  RouteStop,
   TimedPoint,
   TimedRoute,
 } from "./routing-types";
@@ -43,12 +50,15 @@ import {
 
 const log = createLogger("route-engine");
 
-// Distance guard: don't detour more than this to reach the shared corridor.
+// Distance guard: don't auto-route someone more than this to reach the corridor.
 const MAX_ANCHOR_DETOUR_KM = 12;
-// Shared corridor length is sized off the smallest target distance in the group
-// (so a short-distance runner isn't forced over budget), clamped to this range.
-const CORRIDOR_MIN_KM = 0.6;
-const CORRIDOR_MAX_KM = 2.0;
+// Auto-corridor length is sized off the smallest *constrained* target distance
+// so a short-distance runner isn't forced over budget, clamped to this range.
+const CORRIDOR_MIN_KM = 0.8;
+const CORRIDOR_MAX_KM = 4.0;
+// Minimum distance the loop-forming return detour adds — enough that the way
+// home is a different path from the way out (a real loop, not an out-and-back).
+const MIN_LOOP_ADD_KM = 0.7;
 // Crow-flies → on-path distance estimate, used to seed the distance correction.
 const ROAD_FACTOR = 1.3;
 // Accept a route whose length is within this fraction of the target distance.
@@ -62,16 +72,30 @@ const midpoint = (a: LatLng, b: LatLng): LatLng => ({
   lng: (a.lng + b.lng) / 2,
 });
 
-/** The shared corridor everyone converges onto, then diverges from. */
-interface Corridor {
-  near: LatLng; // where the flock comes together
-  far: LatLng; // turnaround point of the shared leg
+/** A shared stop everyone pauses at (derived from a waypoint with a stop time). */
+interface SharedStop {
+  location: LatLng;
+  durationSec: number;
+  name: string;
 }
 
-function buildCorridor(starts: LatLng[], corridorKm: number): Corridor {
+/** Target distance (km) respecting any hard cap, or null if unconstrained. */
+function targetDistanceKm(p: Participant): number | null {
+  if (p.preferredDistance == null && p.maxDistance == null) return null;
+  let t = p.preferredDistance ?? p.maxDistance ?? DEFAULT_LOOP_DISTANCE_KM;
+  if (p.maxDistance != null) t = Math.min(t, p.maxDistance);
+  return t;
+}
+
+function centroid(points: LatLng[]): LatLng {
+  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
+  const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
+  return { lat, lng };
+}
+
+/** Auto-corridor (near→far) the flock converges onto when no waypoints exist. */
+function buildCorridor(starts: LatLng[], corridorKm: number): [LatLng, LatLng] {
   const anchor = centroid(starts);
-  // Orient the corridor along the spread of starts (SW corner → NE corner) so it
-  // sits inside the group's area rather than off in an arbitrary direction.
   const minLat = Math.min(...starts.map((s) => s.lat));
   const minLng = Math.min(...starts.map((s) => s.lng));
   const maxLat = Math.max(...starts.map((s) => s.lat));
@@ -79,24 +103,18 @@ function buildCorridor(starts: LatLng[], corridorKm: number): Corridor {
   const bearing = bearingRad({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng });
   const near = destinationPoint(anchor, bearing + Math.PI, corridorKm / 2);
   const far = destinationPoint(anchor, bearing, corridorKm / 2);
-  return { near, far };
-}
-
-/** Target distance for a participant (km), respecting any hard cap. */
-function targetDistanceKm(p: Participant): number {
-  let t = p.preferredDistance ?? p.maxDistance ?? DEFAULT_LOOP_DISTANCE_KM;
-  if (p.maxDistance != null) t = Math.min(t, p.maxDistance);
-  return t;
+  return [near, far];
 }
 
 /**
  * A detour point that, inserted between `from` and `to`, adds ~addKm of
- * crow-flies distance (perpendicular triangle bump at the midpoint).
+ * crow-flies distance (perpendicular triangle bump at the midpoint). This is what
+ * turns the way home into a loop instead of a retrace.
  */
 function paddingDetour(from: LatLng, to: LatLng, addKm: number): LatLng {
   const L = crowKm(from, to);
   if (L < 0.05) {
-    return destinationPoint(from, 0, addKm / 2); // degenerate: poke north
+    return destinationPoint(from, Math.PI / 2, addKm / 2); // degenerate: poke east
   }
   const half = L / 2;
   const newHalf = (L + addKm) / 2;
@@ -104,18 +122,10 @@ function paddingDetour(from: LatLng, to: LatLng, addKm: number): LatLng {
   return destinationPoint(midpoint(from, to), bearingRad(from, to) + Math.PI / 2, h);
 }
 
-function corridorWaypoints(
-  start: LatLng,
-  corridor: Corridor,
-  home: LatLng,
-  paddingKm: number,
-  restLoc: LatLng | null,
-): LatLng[] {
-  const wp: LatLng[] = [start, corridor.near, corridor.far];
-  if (paddingKm > 0.2) wp.push(paddingDetour(corridor.far, home, paddingKm));
-  if (restLoc) wp.push(restLoc);
-  wp.push(home);
-  return wp;
+function spineStraightKm(start: LatLng, spine: LatLng[], home: LatLng): number {
+  let km = crowKm(start, spine[0]) + crowKm(spine[spine.length - 1], home);
+  for (let i = 1; i < spine.length; i++) km += crowKm(spine[i - 1], spine[i]);
+  return km;
 }
 
 export interface CalcResult {
@@ -126,7 +136,7 @@ export interface CalcResult {
     pairwiseSummary: PairSummary[];
   };
   warnings: CalcWarning[];
-  skipped: boolean; // true when there was nothing to compute
+  skipped: boolean;
 }
 
 // --- ORS result cache (per warm instance) -----------------------------------
@@ -148,26 +158,24 @@ async function cachedRoute(key: string, fn: () => Promise<OrsRoute>): Promise<Or
   return route;
 }
 
-// --- Geometry / timing -------------------------------------------------------
-
-function centroid(points: LatLng[]): LatLng {
-  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
-  const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
-  return { lat, lng };
-}
+// --- Timing ------------------------------------------------------------------
 
 interface BuiltRoute {
   computed: ComputedRoute;
   timed: TimedRoute;
 }
 
-/** Apply pace + departure timing (and a rest stop) to an ORS geometry. */
-function timeRoute(participant: Participant, ors: OrsRoute): BuiltRoute {
+/** Apply pace + (aligned) departure timing and shared stops to an ORS geometry. */
+function timeRoute(
+  participant: Participant,
+  ors: OrsRoute,
+  sharedStops: SharedStop[],
+  departSec: number,
+): BuiltRoute {
   const pace = participant.preferredPace ?? DEFAULT_PACE_SEC_PER_KM;
-  const departSec = timeToSec(participant.earliestStartTime ?? DEFAULT_DEPARTURE);
   const coords = ors.geometry.coordinates as [number, number][];
 
-  // Build cumulative-distance points.
+  // Cumulative-distance points (clock times added after stops are placed).
   const points: TimedPoint[] = [];
   let cumKm = 0;
   for (let i = 0; i < coords.length; i++) {
@@ -176,62 +184,59 @@ function timeRoute(participant: Participant, ors: OrsRoute): BuiltRoute {
       const prev = { lat: coords[i - 1][1], lng: coords[i - 1][0] };
       cumKm += distanceMeters(prev, ll) / 1000;
     }
-    points.push({ ll, cumKm, clockSec: departSec + cumKm * pace });
+    points.push({ ll, cumKm, clockSec: 0 });
   }
 
-  // Optional rest stop: place at the nearest vertex to a specific location, else
-  // near the route midpoint. Shift all subsequent clock times by its duration.
-  let restInsertedAtIdx: number | null = null;
-  let restDurationSec = 0;
-  if (participant.restStop?.wantsStop) {
-    restDurationSec = (participant.restStop.durationMinutes ?? 30) * 60;
-    if (participant.restStop.location) {
+  // Snap each shared stop to its nearest vertex on this route.
+  const stops: RouteStop[] = sharedStops
+    .map((s) => {
       let best = 0;
       let bestD = Infinity;
       for (let i = 0; i < points.length; i++) {
-        const d = distanceMeters(points[i].ll, participant.restStop.location);
+        const d = distanceMeters(points[i].ll, s.location);
         if (d < bestD) {
           bestD = d;
           best = i;
         }
       }
-      restInsertedAtIdx = best;
-    } else {
-      const halfKm = cumKm / 2;
-      restInsertedAtIdx = points.findIndex((p) => p.cumKm >= halfKm);
-      if (restInsertedAtIdx < 0) restInsertedAtIdx = Math.floor(points.length / 2);
-    }
-    for (let i = restInsertedAtIdx + 1; i < points.length; i++) {
-      points[i].clockSec += restDurationSec;
-    }
+      return { idx: best, durationSec: s.durationSec, name: s.name, location: points[best].ll };
+    })
+    .sort((a, b) => a.idx - b.idx);
+
+  // Clock time at each point = depart + moving time + duration of stops passed.
+  for (let i = 0; i < points.length; i++) {
+    let restBefore = 0;
+    for (const st of stops) if (st.idx < i) restBefore += st.durationSec;
+    points[i].clockSec = departSec + points[i].cumKm * pace + restBefore;
   }
 
+  const totalRestSec = stops.reduce((s, st) => s + st.durationSec, 0);
   const distanceKm = cumKm;
   const movingSec = distanceKm * pace;
-  const arrivalSec = departSec + movingSec + restDurationSec;
+  const arrivalSec = departSec + movingSec + totalRestSec;
 
-  // Display waypoints: start, rest (if specific), finish.
-  const waypoints: LatLng[] = [participant.startLocation];
-  if (participant.restStop?.location) waypoints.push(participant.restStop.location);
-  waypoints.push(participant.finishLocation ?? participant.startLocation);
+  const displayWaypoints: LatLng[] = [
+    participant.startLocation,
+    ...stops.map((s) => s.location),
+    participant.finishLocation ?? participant.startLocation,
+  ];
 
   const computed: ComputedRoute = {
     participantId: participant.id,
-    waypoints,
+    waypoints: displayWaypoints,
     geometry: ors.geometry,
     distanceKm: Number(distanceKm.toFixed(2)),
     estimatedDurationMinutes: Math.round(movingSec / 60),
     departureTime: secToTime(departSec),
     arrivalTime: secToTime(arrivalSec),
-    schedule: [], // filled in after together-analysis
+    schedule: [],
   };
 
   const timed: TimedRoute = {
     participantId: participant.id,
     paceSecPerKm: pace,
     points,
-    restInsertedAtIdx,
-    restDurationSec,
+    stops,
   };
 
   log.debug("route timed", {
@@ -241,7 +246,7 @@ function timeRoute(participant: Participant, ors: OrsRoute): BuiltRoute {
     orsDistanceKm: Number(ors.distanceKm.toFixed(2)),
     departure: computed.departureTime,
     arrival: computed.arrivalTime,
-    rest: restInsertedAtIdx != null,
+    stops: stops.length,
     points: points.length,
   });
 
@@ -250,85 +255,99 @@ function timeRoute(participant: Participant, ors: OrsRoute): BuiltRoute {
 
 // --- Per-participant route generation ---------------------------------------
 
-async function generateForParticipant(
+async function generateRoute(
   participant: Participant,
-  corridor: Corridor | null,
-): Promise<BuiltRoute> {
+  spine: LatLng[] | null,
+  isAutoCorridor: boolean,
+): Promise<OrsRoute> {
   const start = participant.startLocation;
   const finish = participant.finishLocation;
   const home = finish ?? start;
   const isLoop = finish == null;
-  const restLoc = participant.restStop?.location ?? null;
   const target = targetDistanceKm(participant);
 
-  // Decide whether to route through the shared corridor.
-  let useCorridor = false;
-  if (corridor) {
-    const detourKm = crowKm(start, corridor.near);
-    useCorridor = detourKm <= MAX_ANCHOR_DETOUR_KM;
-    log.debug("corridor decision", {
-      participantId: participant.id,
-      detourKm: round2(detourKm),
-      target,
-      useCorridor,
-    });
+  // The auto-corridor is skipped for runners too far from it; explicit waypoints
+  // are always honoured (the flock chose them).
+  let useSpine = spine != null;
+  if (useSpine && spine && isAutoCorridor) {
+    const detourKm = crowKm(start, spine[0]);
+    if (detourKm > MAX_ANCHOR_DETOUR_KM) {
+      useSpine = false;
+      log.debug("skipping auto-corridor (too far)", {
+        participantId: participant.id,
+        detourKm: round2(detourKm),
+      });
+    }
   }
 
-  let ors: OrsRoute;
-  if (useCorridor && corridor) {
-    ors = await routeThroughCorridorToTarget(participant, corridor, home, target);
-  } else if (isLoop) {
-    // Independent loop sized to the target distance (ORS round-trip is exact).
-    const key = `loop:${round5(start)}:${target}`;
-    ors = await cachedRoute(key, () => getRoundTrip(start, target));
-  } else {
-    // Direct point-to-point (with rest stop if specific).
-    const waypoints: LatLng[] = [start];
-    if (restLoc) waypoints.push(restLoc);
-    waypoints.push(home);
-    const key = `p2p:${waypoints.map(round5).join(";")}`;
-    ors = await cachedRoute(key, () => getRoute(waypoints));
+  if (useSpine && spine) {
+    return routeThroughSpine(participant, spine, home, target);
   }
+  if (isLoop) {
+    const len = target ?? DEFAULT_LOOP_DISTANCE_KM;
+    const key = `loop:${round5(start)}:${len}`;
+    return cachedRoute(key, () => getRoundTrip(start, len));
+  }
+  const key = `p2p:${round5(start)};${round5(home)}`;
+  return cachedRoute(key, () => getRoute([start, home]));
+}
 
-  return timeRoute(participant, ors);
+/** Cumulative distance (km) along a geometry to the vertex nearest `target`. */
+function approachKmTo(geometry: GeoJSON.LineString, target: LatLng): number {
+  const coords = geometry.coordinates as [number, number][];
+  let cumKm = 0;
+  let bestCum = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const ll: LatLng = { lat: coords[i][1], lng: coords[i][0] };
+    if (i > 0) cumKm += distanceMeters({ lat: coords[i - 1][1], lng: coords[i - 1][0] }, ll) / 1000;
+    const d = distanceMeters(ll, target);
+    if (d < bestD) {
+      bestD = d;
+      bestCum = cumKm;
+    }
+  }
+  return bestCum;
 }
 
 /**
- * Route through the shared corridor and pad the homeward leg to hit the target
- * distance. One linear correction (using the measured length) lands it within
- * tolerance; capped at 2 ORS calls per participant.
+ * Route start → spine → loop-forming detour → home. The detour both makes the
+ * route a loop and pads homeward distance toward the target. When the runner is
+ * unconstrained (target null) we just use the minimum loop detour and let the
+ * distance fall where it may. One linear correction lands a target within
+ * tolerance; capped at 2 ORS calls.
  */
-async function routeThroughCorridorToTarget(
+async function routeThroughSpine(
   participant: Participant,
-  corridor: Corridor,
+  spine: LatLng[],
   home: LatLng,
-  target: number,
+  target: number | null,
 ): Promise<OrsRoute> {
   const start = participant.startLocation;
-  const restLoc = participant.restStop?.location ?? null;
-  const baseStraight =
-    crowKm(start, corridor.near) + crowKm(corridor.near, corridor.far) + crowKm(corridor.far, home);
+  const spineEnd = spine[spine.length - 1];
+  const baseStraight = spineStraightKm(start, spine, home);
 
-  let padding = Math.max(0, target - baseStraight * ROAD_FACTOR);
+  let addKm = MIN_LOOP_ADD_KM;
+  if (target != null) addKm = Math.max(MIN_LOOP_ADD_KM, target - baseStraight * ROAD_FACTOR);
+
   let ors: OrsRoute | null = null;
-
   for (let attempt = 0; attempt < 2; attempt++) {
-    const waypoints = corridorWaypoints(start, corridor, home, padding, restLoc);
-    const key = `corr:${waypoints.map(round5).join(";")}`;
+    const detour = paddingDetour(spineEnd, home, addKm);
+    const waypoints = [start, ...spine, detour, home];
+    const key = `spine:${waypoints.map(round5).join(";")}`;
     ors = await cachedRoute(key, () => getRoute(waypoints));
     const actual = ors.distanceKm;
-    const off = Math.abs(actual - target) / target;
-    log.debug("corridor distance pass", {
+    log.debug("spine distance pass", {
       participantId: participant.id,
       attempt,
       target,
       actual: round2(actual),
-      padding: round2(padding),
-      offPct: Math.round(off * 100),
+      addKm: round2(addKm),
+      offPct: target ? Math.round((Math.abs(actual - target) / target) * 100) : null,
     });
-    if (attempt === 1 || off <= DISTANCE_TOLERANCE) break;
-    // Linear correction: padding moves road distance ~ROAD_FACTOR:1.
-    padding = Math.max(0, padding + (target - actual) / ROAD_FACTOR);
+    if (target == null || attempt === 1) break;
+    if (Math.abs(actual - target) / target <= DISTANCE_TOLERANCE) break;
+    addKm = Math.max(MIN_LOOP_ADD_KM, addKm + (target - actual) / ROAD_FACTOR);
   }
 
   return ors!;
@@ -340,9 +359,9 @@ function buildWarnings(participant: Participant, computed: ComputedRoute): CalcW
   const warnings: CalcWarning[] = [];
   const pace = participant.preferredPace ?? DEFAULT_PACE_SEC_PER_KM;
 
-  // Impossible time budget.
   if (participant.earliestStartTime && participant.latestFinishTime) {
-    const availableMin = (timeToSec(participant.latestFinishTime) - timeToSec(participant.earliestStartTime)) / 60;
+    const availableMin =
+      (timeToSec(participant.latestFinishTime) - timeToSec(participant.earliestStartTime)) / 60;
     const requiredMin = (computed.distanceKm * pace) / 60;
     if (availableMin > 0 && requiredMin > availableMin + 1) {
       warnings.push({
@@ -354,8 +373,7 @@ function buildWarnings(participant: Participant, computed: ComputedRoute): CalcW
     }
   }
 
-  // Over the hard distance cap.
-  if (participant.maxDistance != null && computed.distanceKm > participant.maxDistance + 0.5) {
+  if (participant.maxDistance != null && computed.distanceKm > participant.maxDistance + 0.6) {
     warnings.push({
       participantId: participant.id,
       message: `This route comes out at ${computed.distanceKm.toFixed(
@@ -372,6 +390,7 @@ function buildWarnings(participant: Participant, computed: ComputedRoute): CalcW
 export async function calculateRoutes(session: FlockSession): Promise<CalcResult> {
   const done = log.time("calculate", { flockId: session.id });
   const withStart = session.participants.filter((p) => p.startLocation);
+  const waypoints = session.waypoints ?? [];
 
   if (withStart.length === 0) {
     log.info("nothing to compute (no participants with a start)", { flockId: session.id });
@@ -385,32 +404,46 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     };
   }
 
-  // Shared corridor only makes sense with ≥2 participants. Size it off the
-  // smallest target distance so a short-distance runner isn't pushed over budget.
-  const minTarget = Math.min(...withStart.map(targetDistanceKm));
-  const corridorKm = clamp(0.3 * minTarget, CORRIDOR_MIN_KM, CORRIDOR_MAX_KM);
-  const corridor =
-    withStart.length >= 2 ? buildCorridor(withStart.map((p) => p.startLocation), corridorKm) : null;
+  // Shared stops come from waypoints that have a stop time.
+  const sharedStops: SharedStop[] = waypoints
+    .filter((w) => w.stopMinutes > 0)
+    .map((w) => ({ location: w.location, durationSec: w.stopMinutes * 60, name: w.name }));
+
+  // Build the shared spine: explicit waypoints, else an auto-corridor.
+  let spine: LatLng[] | null = null;
+  let isAutoCorridor = false;
+  if (waypoints.length > 0) {
+    spine = waypoints.map((w) => w.location);
+  } else if (withStart.length >= 2) {
+    const constrained = withStart
+      .map(targetDistanceKm)
+      .filter((t): t is number => t != null);
+    const sizingBasis = constrained.length ? Math.min(...constrained) : DEFAULT_LOOP_DISTANCE_KM;
+    const corridorKm = clamp(0.4 * sizingBasis, CORRIDOR_MIN_KM, CORRIDOR_MAX_KM);
+    spine = buildCorridor(withStart.map((p) => p.startLocation), corridorKm);
+    isAutoCorridor = true;
+    log.info("auto-corridor", { flockId: session.id, sizingBasis, corridorKm: round2(corridorKm) });
+  }
+
   log.info("calculating", {
     flockId: session.id,
     participants: withStart.length,
-    minTarget,
-    corridorKm: round2(corridorKm),
-    corridor: corridor ? `${round5(corridor.near)}→${round5(corridor.far)}` : null,
+    waypoints: waypoints.length,
+    sharedStops: sharedStops.length,
+    spine: spine ? `${spine.length} pts` : "none",
   });
 
-  // ORS calls in parallel; a failure for one participant becomes a warning.
   const settled = await Promise.allSettled(
-    withStart.map((p) => generateForParticipant(p, corridor)),
+    withStart.map((p) => generateRoute(p, spine, isAutoCorridor)),
   );
 
-  const built: BuiltRoute[] = [];
+  // Collect successful raw routes; failures become warnings.
+  const raw: { participant: Participant; ors: OrsRoute }[] = [];
   const warnings: CalcWarning[] = [];
   settled.forEach((r, i) => {
     const participant = withStart[i];
     if (r.status === "fulfilled") {
-      built.push(r.value);
-      warnings.push(...buildWarnings(participant, r.value.computed));
+      raw.push({ participant, ors: r.value });
     } else {
       const err = r.reason;
       const code = err instanceof RouteError ? err.code : "ors-error";
@@ -425,6 +458,41 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     }
   });
 
+  // Departure alignment — the key to maximising together-time. Stagger who leaves
+  // when so everyone reaches the shared spine's start at the same moment, then
+  // flies it in sync. The longest approach leaves at their earliest time; the
+  // others leave later (never earlier than their own earliest).
+  const departById = new Map<string, number>();
+  const spineStart = spine?.[0] ?? null;
+  const approaches = raw.map(({ participant, ors }) => {
+    const pace = participant.preferredPace ?? DEFAULT_PACE_SEC_PER_KM;
+    const earliest = timeToSec(participant.earliestStartTime ?? DEFAULT_DEPARTURE);
+    const usesSpine =
+      spineStart != null &&
+      (!isAutoCorridor || crowKm(participant.startLocation, spineStart) <= MAX_ANCHOR_DETOUR_KM);
+    const approachSec = usesSpine && spineStart ? approachKmTo(ors.geometry, spineStart) * pace : 0;
+    return { id: participant.id, earliest, approachSec, usesSpine };
+  });
+  const aligning = approaches.filter((a) => a.usesSpine);
+  if (aligning.length >= 2) {
+    const T = Math.max(...aligning.map((a) => a.earliest + a.approachSec));
+    for (const a of approaches) {
+      departById.set(a.id, a.usesSpine ? T - a.approachSec : a.earliest);
+    }
+    log.info("departure alignment", {
+      arriveAtSpine: secToTime(T),
+      departures: approaches.map((a) => ({ id: a.id.slice(0, 4), at: secToTime(departById.get(a.id)!) })),
+    });
+  } else {
+    for (const a of approaches) departById.set(a.id, a.earliest);
+  }
+
+  const built: BuiltRoute[] = raw.map(({ participant, ors }) => {
+    const b = timeRoute(participant, ors, sharedStops, departById.get(participant.id)!);
+    warnings.push(...buildWarnings(participant, b.computed));
+    return b;
+  });
+
   // Together-time analysis (needs ≥2 routes).
   let sharedSegments: SharedSegment[] = [];
   let pairwiseSummary: PairSummary[] = [];
@@ -437,11 +505,13 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     pairwiseSummary = result.pairwise;
     totalTogetherMinutes = result.totalTogetherMinutes;
     for (const b of built) {
-      intervalsByParticipant.set(b.timed.participantId, result.companionIntervals.get(b.timed.participantId) ?? []);
+      intervalsByParticipant.set(
+        b.timed.participantId,
+        result.companionIntervals.get(b.timed.participantId) ?? [],
+      );
     }
   }
 
-  // Build per-participant schedules.
   for (const b of built) {
     const intervals = intervalsByParticipant.get(b.timed.participantId) ?? [];
     b.computed.schedule = buildSchedule(b.timed, intervals);

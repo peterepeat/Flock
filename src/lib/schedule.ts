@@ -30,7 +30,7 @@ export function buildSchedule(
   }
 
   const sig = (i: number) => [...companionsAt[i]].sort().join(",");
-  const restIdx = route.restInsertedAtIdx;
+  const stopByIdx = new Map(route.stops.map((s) => [s.idx, s]));
   const segments: ScheduleSegment[] = [];
 
   const emitRun = (sIdx: number, eIdx: number) => {
@@ -51,15 +51,18 @@ export function buildSchedule(
   };
 
   const emitRest = (idx: number) => {
+    const stop = stopByIdx.get(idx);
+    if (!stop) return;
     segments.push({
       type: "rest",
       startTime: secToTime(pts[idx].clockSec),
-      endTime: secToTime(pts[idx].clockSec + route.restDurationSec),
+      endTime: secToTime(pts[idx].clockSec + stop.durationSec),
       startLocation: pts[idx].ll,
       endLocation: pts[idx].ll,
       paceSecPerKm: null,
       companionIds: [],
       distanceKm: 0,
+      label: stop.name,
     });
   };
 
@@ -67,7 +70,7 @@ export function buildSchedule(
   for (let i = 0; i < n - 1; i++) {
     const sigHere = sig(i);
     const sigNext = i + 1 <= n - 2 ? sig(i + 1) : null;
-    const restBreakAtNext = restIdx != null && restIdx === i + 1;
+    const restBreakAtNext = stopByIdx.has(i + 1);
 
     if (sigNext === null || sigNext !== sigHere || restBreakAtNext) {
       emitRun(segStart, i + 1);
@@ -79,7 +82,7 @@ export function buildSchedule(
   log.debug("schedule built", {
     participantId: route.participantId,
     segments: segments.length,
-    rest: restIdx != null,
+    stops: route.stops.length,
   });
   return segments;
 }

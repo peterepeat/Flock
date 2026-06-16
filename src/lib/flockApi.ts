@@ -10,6 +10,7 @@ import { createToken, getToken } from "./editTokens";
 import { newParticipantId } from "./ids";
 import type {
   FlockSession,
+  FlockWaypoint,
   ParticipantConstraints,
   PatchAction,
   Unit,
@@ -94,6 +95,28 @@ export async function removeParticipant(
     participantId,
     editToken,
   });
+  return session;
+}
+
+export async function addWaypoint(
+  flockId: string,
+  waypoint: Omit<FlockWaypoint, "id">,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "addWaypoint", waypoint });
+  return session;
+}
+
+export async function updateWaypoint(
+  flockId: string,
+  waypointId: string,
+  updates: Partial<Omit<FlockWaypoint, "id">>,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "updateWaypoint", waypointId, updates });
+  return session;
+}
+
+export async function removeWaypoint(flockId: string, waypointId: string): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "removeWaypoint", waypointId });
   return session;
 }
 
