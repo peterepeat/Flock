@@ -34,7 +34,10 @@ export default function ScheduleView({ participantId }: { participantId: string 
 
   // Narrative framing: which solo legs are the approach / the way home, whether
   // there's any company at all, how much of the run is shared, and whether the
-  // flock accelerates (its pace can only drop as slower runners peel off).
+  // flock accelerates. Pace usually only drops as slower runners peel off, but a
+  // slower runner can also JOIN mid-route (entry is a free variable), so only
+  // call it "quickening from peel-offs" when the together paces are monotonically
+  // non-increasing AND net faster — otherwise the phrasing would mislead.
   const runIdxs = route.schedule.flatMap((s, i) => (s.type === "run" ? [i] : []));
   const firstRunIdx = runIdxs[0] ?? -1;
   const lastRunIdx = runIdxs[runIdxs.length - 1] ?? -1;
@@ -45,7 +48,9 @@ export default function ScheduleView({ participantId }: { participantId: string 
   const togetherPaces = route.schedule
     .filter((s) => s.companionIds.length > 0 && s.paceSecPerKm)
     .map((s) => s.paceSecPerKm as number);
-  const accelerates = togetherPaces.length >= 2 && togetherPaces[0] > togetherPaces[togetherPaces.length - 1] + 1;
+  const monotonic = togetherPaces.every((p, i) => i === 0 || p <= togetherPaces[i - 1] + 1);
+  const accelerates =
+    togetherPaces.length >= 2 && monotonic && togetherPaces[0] > togetherPaces[togetherPaces.length - 1] + 1;
 
   const summary = hasCompany
     ? `${formatDistance(route.distanceKm, unit)} in ${formatDuration(route.estimatedDurationMinutes)} — ${formatDistance(togetherKm, unit)} of it with the flock.`

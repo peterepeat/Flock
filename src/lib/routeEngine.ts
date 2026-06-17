@@ -241,6 +241,10 @@ function posAtTime(pts: TimedPt[], t: number): LatLng | null {
 
 /** Contiguous spans where feeder `fa` is within OPP_OVERLAP_M of `fb` at the same instant. */
 function feederRuns(fa: TimedPt[], fb: TimedPt[]): { startSec: number; endSec: number; geom: LatLng[] }[] {
+  // Sample at the UNION of both feeders' vertex times (deduped, ascending) so the
+  // result is symmetric regardless of which side has denser ORS geometry — a
+  // closest-approach at either runner's vertex is caught.
+  const times = [...fa, ...fb].map((p) => p.sec).sort((x, y) => x - y);
   const runs: { startSec: number; endSec: number; geom: LatLng[] }[] = [];
   let cur: TimedPt[] = [];
   const flush = () => {
@@ -249,9 +253,14 @@ function feederRuns(fa: TimedPt[], fb: TimedPt[]): { startSec: number; endSec: n
     }
     cur = [];
   };
-  for (const a of fa) {
-    const bp = posAtTime(fb, a.sec);
-    if (bp && distanceMeters(a.ll, bp) <= OPP_OVERLAP_M) cur.push(a);
+  let lastT = NaN;
+  for (const t of times) {
+    if (t === lastT) continue;
+    lastT = t;
+    const pa = posAtTime(fa, t);
+    const pb = posAtTime(fb, t);
+    const d = pa && pb ? distanceMeters(pa, pb) : Infinity;
+    if (Number.isFinite(d) && d <= OPP_OVERLAP_M) cur.push({ ll: pa as LatLng, sec: t });
     else flush();
   }
   flush();
