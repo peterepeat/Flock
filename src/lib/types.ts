@@ -139,6 +139,7 @@ export type PatchAction =
   | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id"> }
   | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
   | { action: "removeWaypoint"; waypointId: string }
+  | { action: "reorderWaypoints"; waypointIds: string[] }
   | { action: "lock" }
   | { action: "unlock" };
 

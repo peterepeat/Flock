@@ -120,6 +120,14 @@ export async function removeWaypoint(flockId: string, waypointId: string): Promi
   return session;
 }
 
+export async function reorderWaypoints(
+  flockId: string,
+  waypointIds: string[],
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "reorderWaypoints", waypointIds });
+  return session;
+}
+
 export async function lockFlock(flockId: string): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "lock" });
   return session;

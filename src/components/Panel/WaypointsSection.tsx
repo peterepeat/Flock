@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
-import { addWaypoint, FlockApiError, removeWaypoint } from "@/lib/flockApi";
+import { addWaypoint, FlockApiError, removeWaypoint, reorderWaypoints } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import { useFlockStore } from "@/store/flockStore";
@@ -29,6 +29,8 @@ export default function WaypointsSection() {
   const [stopMinutes, setStopMinutes] = useState(20);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
 
   const locked = session?.lockedAt != null;
   const waypoints = session?.waypoints ?? [];
@@ -88,6 +90,23 @@ export default function WaypointsSection() {
     }
   }
 
+  // Drop the dragged waypoint into the target's slot; persist the new order.
+  async function handleReorder(targetId: string) {
+    if (!dragId || dragId === targetId) return;
+    const ids = waypoints.map((w) => w.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    try {
+      const updated = await reorderWaypoints(flockId, ids);
+      applyServerSession(updated, true);
+      log.info("waypoints reordered", { order: ids.map((s) => s.slice(0, 4)) });
+    } catch (err) {
+      log.error("reorder failed", { error: String(err) });
+    }
+  }
+
   if (locked && waypoints.length === 0) return null;
 
   return (
@@ -105,32 +124,62 @@ export default function WaypointsSection() {
 
       {waypoints.length > 0 && (
         <ul className="space-y-1.5">
-          {waypoints.map((w, i) => (
-            <li
-              key={w.id}
-              className="flex items-center gap-2 rounded-lg bg-surface-mid px-2.5 py-2"
-            >
-              <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-lift text-[11px] text-text">
-                {i + 1}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm text-text">{w.name}</span>
-                {w.stopMinutes > 0 && (
-                  <span className="mono block text-xs text-together">☕ {w.stopMinutes} min stop</span>
+          {waypoints.map((w, i) => {
+            const canReorder = !locked && waypoints.length > 1;
+            return (
+              <li
+                key={w.id}
+                draggable={canReorder}
+                onDragStart={() => setDragId(w.id)}
+                onDragEnter={() => canReorder && setOverId(w.id)}
+                onDragOver={(e) => {
+                  if (canReorder) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  void handleReorder(w.id);
+                  setDragId(null);
+                  setOverId(null);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setOverId(null);
+                }}
+                className={`flex items-center gap-2 rounded-lg bg-surface-mid px-2.5 py-2 transition ${
+                  dragId === w.id ? "opacity-40" : ""
+                } ${overId === w.id && dragId !== w.id ? "ring-1 ring-accent/70" : ""}`}
+              >
+                {canReorder && (
+                  <span
+                    className="shrink-0 cursor-grab text-fog active:cursor-grabbing"
+                    aria-hidden
+                    title="Drag to reorder"
+                  >
+                    <GripIcon />
+                  </span>
                 )}
-              </span>
-              {!locked && (
-                <button
-                  type="button"
-                  onClick={() => handleRemove(w.id)}
-                  className="shrink-0 text-fog hover:text-accent"
-                  aria-label="Remove waypoint"
-                >
-                  ×
-                </button>
-              )}
-            </li>
-          ))}
+                <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-lift text-[11px] text-text">
+                  {i + 1}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-text">{w.name}</span>
+                  {w.stopMinutes > 0 && (
+                    <span className="mono block text-xs text-together">☕ {w.stopMinutes} min stop</span>
+                  )}
+                </span>
+                {!locked && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(w.id)}
+                    className="shrink-0 text-fog hover:text-accent"
+                    aria-label="Remove waypoint"
+                  >
+                    ×
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -219,5 +268,19 @@ export default function WaypointsSection() {
         </div>
       )}
     </div>
+  );
+}
+
+/** The little six-dot drag handle. */
+function GripIcon() {
+  return (
+    <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden="true">
+      <circle cx="2" cy="3" r="1.3" />
+      <circle cx="8" cy="3" r="1.3" />
+      <circle cx="2" cy="8" r="1.3" />
+      <circle cx="8" cy="8" r="1.3" />
+      <circle cx="2" cy="13" r="1.3" />
+      <circle cx="8" cy="13" r="1.3" />
+    </svg>
   );
 }

@@ -254,6 +254,20 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       break;
     }
 
+    case "reorderWaypoints": {
+      // Reorder by the given id list; any waypoint not named keeps its relative
+      // order, appended after (defensive against a stale client list).
+      const byId = new Map(session.waypoints.map((w) => [w.id, w]));
+      const named = action.waypointIds
+        .map((wid) => byId.get(wid))
+        .filter((w): w is FlockWaypoint => w != null);
+      const rest = session.waypoints.filter((w) => !action.waypointIds.includes(w.id));
+      session.waypoints = [...named, ...rest];
+      clearComputed(session);
+      log.info("waypoints reordered", { id, order: session.waypoints.map((w) => w.id.slice(0, 4)) });
+      break;
+    }
+
     case "lock": {
       session.lockedAt = now();
       log.info("flock locked", { id });
