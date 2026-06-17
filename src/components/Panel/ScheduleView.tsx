@@ -32,9 +32,37 @@ export default function ScheduleView({ participantId }: { participantId: string 
     );
   }
 
+  // Narrative framing: which solo legs are the approach / the way home, whether
+  // there's any company at all, how much of the run is shared, and whether the
+  // flock accelerates (its pace can only drop as slower runners peel off).
+  const runIdxs = route.schedule.flatMap((s, i) => (s.type === "run" ? [i] : []));
+  const firstRunIdx = runIdxs[0] ?? -1;
+  const lastRunIdx = runIdxs[runIdxs.length - 1] ?? -1;
+  const hasCompany = route.schedule.some((s) => s.companionIds.length > 0);
+  const togetherKm = route.schedule
+    .filter((s) => s.companionIds.length > 0)
+    .reduce((sum, s) => sum + s.distanceKm, 0);
+  const togetherPaces = route.schedule
+    .filter((s) => s.companionIds.length > 0 && s.paceSecPerKm)
+    .map((s) => s.paceSecPerKm as number);
+  const accelerates = togetherPaces.length >= 2 && togetherPaces[0] > togetherPaces[togetherPaces.length - 1] + 1;
+
+  const summary = hasCompany
+    ? `${formatDistance(route.distanceKm, unit)} in ${formatDuration(route.estimatedDurationMinutes)} — ${formatDistance(togetherKm, unit)} of it with the flock.`
+    : `${formatDistance(route.distanceKm, unit)} in ${formatDuration(route.estimatedDurationMinutes)}, solo today.`;
+
+  const soloLabel = (i: number) => {
+    if (!hasCompany) return "Running solo";
+    if (i === firstRunIdx) return "Head out to meet the flock";
+    if (i === lastRunIdx) return "Head home";
+    return "Your own stretch";
+  };
+
   return (
     <div className="mt-2 space-y-1.5 rounded-lg bg-surface px-3 py-3">
-      <Line time={route.departureTime} text="Leave home" emphasis />
+      <p className="px-1 pb-1 text-xs leading-snug text-text-dim">{summary}</p>
+
+      <Line time={route.departureTime} text={hasCompany ? "Set off from home" : "Leave home"} emphasis />
 
       {route.schedule.map((seg, i) => {
         if (seg.type === "rest") {
@@ -79,7 +107,7 @@ export default function ScheduleView({ participantId }: { participantId: string 
                   Flocking with <span style={{ color: tint }}>{who}</span>
                 </span>
               ) : (
-                <span className="text-text-dim">Running solo</span>
+                <span className="text-text-dim">{soloLabel(i)}</span>
               )}
             </div>
           </div>
@@ -93,6 +121,12 @@ export default function ScheduleView({ participantId }: { participantId: string 
         )} moving`}
         emphasis
       />
+
+      {accelerates && (
+        <p className="px-1 pt-1 text-xs leading-snug text-together">
+          The flock quickens as runners peel off home.
+        </p>
+      )}
     </div>
   );
 }

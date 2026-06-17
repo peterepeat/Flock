@@ -17,6 +17,11 @@ export default function TogetherStat() {
   const stretches = shared.length;
   const withDetails = session.participants.filter((p) => p.startLocation).length;
 
+  // Staggered starts: everyone leaves home at their own time so they converge on
+  // the flock together. Only worth saying when departures actually differ.
+  const routes = session.computedRoutes ?? [];
+  const staggered = new Set(routes.map((r) => r.departureTime)).size > 1;
+
   if (totalMinutes === 0) {
     return (
       <div className="rounded-xl bg-surface p-4">
@@ -38,6 +43,11 @@ export default function TogetherStat() {
       <div className="mt-1 text-xs text-fog">
         {stretches} {stretches === 1 ? "stretch" : "stretches"} together
       </div>
+      {staggered && (
+        <p className="mt-2 border-t border-together/15 pt-2 text-xs leading-snug text-fog">
+          Staggered starts — you each set off at your own time to meet up together.
+        </p>
+      )}
     </div>
   );
 }
