@@ -6,6 +6,7 @@ import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import { addWaypoint, FlockApiError, removeWaypoint, reorderWaypoints } from "@/lib/flockApi";
+import { buildFlockGpx } from "@/lib/flockGpx";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import { useFlockStore } from "@/store/flockStore";
@@ -89,6 +90,21 @@ export default function WaypointsSection() {
     } catch (err) {
       log.error("remove failed", { error: String(err) });
     }
+  }
+
+  function handleExport() {
+    if (!session) return;
+    const result = buildFlockGpx(session);
+    if (!result) return;
+    const url = URL.createObjectURL(new Blob([result.xml], { type: "application/gpx+xml" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = result.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    log.info("route exported", { waypoints: waypoints.length });
   }
 
   // Drop the dragged waypoint into the target's slot; persist the new order.
@@ -273,6 +289,14 @@ export default function WaypointsSection() {
               {busy ? "Adding…" : "Add waypoint"}
             </button>
           </div>
+        </div>
+      )}
+
+      {waypoints.length > 0 && (
+        <div className="flex items-center gap-4 border-t border-white/5 pt-3 text-xs">
+          <button type="button" onClick={handleExport} className="text-fog hover:text-text">
+            Export GPX
+          </button>
         </div>
       )}
     </div>

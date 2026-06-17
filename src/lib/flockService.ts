@@ -57,6 +57,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     sharedSegments: null,
     flockRoute: null,
     waypointEtas: null,
+    gpxPassthrough: null,
   };
   await store.createFlock(session);
   log.info("flock created", { id: session.id, unit: unitPreference, backend: store.backend });
@@ -97,7 +98,8 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     action.action === "addWaypoint" ||
     action.action === "updateWaypoint" ||
     action.action === "removeWaypoint" ||
-    action.action === "reorderWaypoints";
+    action.action === "reorderWaypoints" ||
+    action.action === "importRoute";
 
   if (locked && mutatesPlan) {
     log.info("rejected mutation on locked flock", { id, action: action.action });
@@ -270,6 +272,34 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.waypoints = [...named, ...rest];
       clearComputed(session);
       log.info("waypoints reordered", { id, order: session.waypoints.map((w) => w.id.slice(0, 4)) });
+      break;
+    }
+
+    case "importRoute": {
+      // Replace the whole route from an imported GPX. Server assigns fresh ids;
+      // per-waypoint gpxExtra + doc-level gpxPassthrough carry foreign data
+      // through unchanged for lossless re-export.
+      const imported: FlockWaypoint[] = (action.waypoints ?? [])
+        .filter((w) => isValidLatLng(w?.location))
+        .map((w) => ({
+          id: newWaypointId(),
+          location: w.location,
+          address: w.address ?? "",
+          name: w.name?.trim() || w.address || "Waypoint",
+          stopMinutes: Math.max(0, w.stopMinutes ?? 0),
+          ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
+        }));
+      if (imported.length === 0)
+        return { ok: false, status: 400, error: "That GPX had no usable route points." };
+      session.waypoints = imported;
+      session.gpxPassthrough = action.gpxPassthrough ?? null;
+      clearComputed(session);
+      log.info("route imported", {
+        id,
+        waypoints: imported.length,
+        stops: imported.filter((w) => w.stopMinutes > 0).length,
+        passthroughBytes: action.gpxPassthrough?.length ?? 0,
+      });
       break;
     }
 

@@ -32,6 +32,10 @@ export interface FlockWaypoint {
   address: string;
   name: string; // user label, falls back to address
   stopMinutes: number; // 0 = pass through, >0 = everyone stops
+  // GPX round-trip: verbatim XML children of the source <rtept> we didn't model
+  // (elevation, time, foreign extensions, …), re-emitted on export. Undefined
+  // for waypoints created in-app.
+  gpxExtra?: string;
 }
 
 export interface Participant {
@@ -100,6 +104,10 @@ export interface FlockSession {
   sharedSegments: SharedSegment[] | null;
   flockRoute: GeoJSON.LineString | null; // the shared backbone spine, for the map
   waypointEtas: Record<string, string> | null; // waypointId → "HH:MM" the flock passes
+  // GPX round-trip: verbatim top-level elements from an imported GPX that we
+  // didn't consume (foreign metadata, extra tracks/routes, POI waypoints, gpx
+  // extensions), re-emitted on export so nothing is lost. Null when never imported.
+  gpxPassthrough: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +150,12 @@ export type PatchAction =
   | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
   | { action: "removeWaypoint"; waypointId: string }
   | { action: "reorderWaypoints"; waypointIds: string[] }
+  // Replace the whole route from an imported GPX (server assigns waypoint ids).
+  | {
+      action: "importRoute";
+      waypoints: Omit<FlockWaypoint, "id">[];
+      gpxPassthrough: string | null;
+    }
   | { action: "lock" }
   | { action: "unlock" };
 
