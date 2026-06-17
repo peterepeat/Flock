@@ -1,70 +1,83 @@
 #!/usr/bin/env bash
-# Flock — reproducible verification scenarios for the Together-Minutes engine.
+# Flock — verification scenario suite for the Together-Minutes engine.
 #
-# Seeds the canonical test flocks via the API and prints the calculated result
-# (per-runner distance + schedule + shared legs) so the engine can be re-verified
-# in one command after any change. Mirrors the scenarios in the design plan
-# (~/.claude/plans/i-ve-been-ruminating-*.md).
+# Seeds canonical flocks via the API, calculates routes, and asserts pass/fail
+# (scripts/_check.py). The one-command regression test after any engine change,
+# and the anti-regression artifact for picking up across sessions.
 #
-# Usage:   ./scripts/scenarios.sh [PORT] [a|b|d|all]
-#   PORT defaults to 3000.  Scenario defaults to "all".
+# Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
+#   PORT     defaults to 3000.
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc cct all   (default: all)
+#   SLEEP    seconds between scenarios in "all" (default 16) — the free ORS tier
+#            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
+#            must be paced or later scenarios get rate-limited (0 routes).
 #
-# Scenarios:
-#   a — Peter 18km + Collin unconstrained  → Collin runs ~his whole run with Peter.
-#   b — a + Dana capped 8km                → nested peel-off; Dana joins near home.
-#   d — Capital City Trail loop            → 2 anchors do the whole loop; joiners
-#                                            (Richmond/Parkville/Docklands) join the
-#                                            loop NEAR HOME, not the origin.
-set -euo pipefail
+# Coverage matrix ({1 person, 5 people} × {no / 1 / 3+ waypoints incl. a stop}):
+#   s1  1 person,  no waypoints
+#   s2  1 person,  one waypoint
+#   s3  1 person,  3 waypoints incl. a stop
+#   s4  5 people (disparate),  no waypoints     — also covers latest-finish + a far runner
+#   s5  5 people (disparate),  one waypoint
+#   s6  5 people (disparate),  3 waypoints incl. a stop
+# Augmented:
+#   pc  2 people: Peter (18km) + Collin (unconstrained)  — headline "together" regression
+#   cct Capital City Trail loop: 2 anchors + 3 drop-in joiners around the loop
+set -uo pipefail
 PORT="${1:-3000}"
 WHICH="${2:-all}"
+SLEEP="${3:-16}"
 BASE="http://localhost:${PORT}"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PASS=0; FAIL=0
 
 create() { curl -s -X POST "$BASE/api/flocks/create" -H 'Content-Type: application/json' -d '{}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])"; }
-patch()  { curl -s -X PATCH "$BASE/api/flocks/$1" -H 'Content-Type: application/json' -d "$2" -o /dev/null -w "  $3 %{http_code}\n"; }
-calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: application/json' -d "{\"flockId\":\"$1\"}" -o /dev/null -w "  calc %{http_code}\n"; }
-show()   {
-  curl -s "$BASE/api/flocks/$1" | python3 -c "
-import sys,json
-s=json.load(sys.stdin); names={p['id']:p['name'] for p in s['participants']}; cap={p['id']:p.get('maxDistance') for p in s['participants']}
-for r in s['computedRoutes'] or []:
-    c=cap[r['participantId']]; flag=' OVER CAP!' if c and r['distanceKm']>c+0.6 else ''
-    print(f\"  {names[r['participantId']]:7} {r['distanceKm']}km (cap {c}){flag}  {r['departureTime']}-{r['arrivalTime']}\")
-    for seg in r['schedule']:
-        comp=' + '.join(names.get(c2,c2) for c2 in seg['companionIds']) if seg['companionIds'] else 'solo'
-        tag='REST '+(seg.get('label') or '') if seg['type']=='rest' else f\"{seg['distanceKm']}km [{comp}]\"
-        print(f\"       {seg['startTime']}-{seg['endTime']} {tag}\")
-print('  shared legs:', *[ '%s(%.0fm)'%('+'.join(names[i] for i in ss['participantIds']), ss['overlapMinutes']) for ss in (s['sharedSegments'] or []) ])
-"
+patch()  { curl -s -X PATCH "$BASE/api/flocks/$1" -H 'Content-Type: application/json' -d "$2" -o /dev/null; }
+calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: application/json' -d "{\"flockId\":\"$1\"}" -o /dev/null; }
+# person NAME LAT LNG [extraJSON]
+person() { patch "$1" "{\"action\":\"addParticipant\",\"editToken\":\"$2\",\"participant\":{\"name\":\"$2\",\"startLocation\":{\"lat\":$3,\"lng\":$4},\"startAddress\":\"$2\",\"earliestStartTime\":\"07:00\",\"finishLocation\":null,\"finishAddress\":null,\"latestFinishTime\":${6:-null},\"preferredPace\":${7:-360},\"maxPace\":${8:-300},\"preferredDistance\":${5:-null},\"maxDistance\":${9:-null},\"restStop\":null}}" "$2"; }
+wp()     { patch "$1" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$2,\"lng\":$3},\"address\":\"$4\",\"name\":\"$4\",\"stopMinutes\":${5:-0}}}"; }
+# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP
+check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
+
+# 5 disparate people (shared across s4/s5/s6). args: FID
+add5() {
+  local F="$1"
+  # name token lat lng pref-dist latest pace maxpace maxdist
+  person "$F" Mara  -37.7700 144.9990 22   null    330 300 24    # long, fast, Northcote
+  person "$F" Cole  -37.8140 144.9630 null null    300 300 null  # unconstrained anchor, CBD
+  person "$F" Nia   -37.8240 145.0000 10   '"08:15"' 390 340 11  # short + tight deadline, Richmond
+  person "$F" Tom   -37.7670 144.9600 14   null    360 320 15    # mid, Brunswick
+  person "$F" Pippa -37.8060 145.0300 7    null    420 360 7     # short + far (Kew)
 }
 
-scenario_ab() {
-  local F; F=$(create); echo "Scenario a/b → $BASE/flock/$F"
-  patch "$F" '{"action":"addParticipant","editToken":"t1","participant":{"name":"Peter","startLocation":{"lat":-37.7700,"lng":144.9990},"startAddress":"Northcote","earliestStartTime":"07:00","preferredPace":360,"maxPace":300,"preferredDistance":18,"maxDistance":20,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Peter
-  patch "$F" '{"action":"addParticipant","editToken":"t2","participant":{"name":"Collin","startLocation":{"lat":-37.8110,"lng":144.9690},"startAddress":"Melbourne","earliestStartTime":"07:00","preferredPace":360,"maxPace":300,"preferredDistance":null,"maxDistance":null,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Collin
-  echo "[a]"; calc "$F"; show "$F"
-  patch "$F" '{"action":"addParticipant","editToken":"t3","participant":{"name":"Dana","startLocation":{"lat":-37.7980,"lng":144.9780},"startAddress":"Fitzroy North","earliestStartTime":"07:00","preferredPace":420,"maxPace":360,"preferredDistance":8,"maxDistance":8,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Dana
-  echo "[b]"; calc "$F"; show "$F"
+s1() { local F; F=$(create); echo "s1 → $BASE/flock/$F"; person "$F" Solo -37.8000 144.9670 8 null 360 300 9; check "$F" "s1 1p/no-wp" 1 0 0; }
+s2() { local F; F=$(create); echo "s2 → $BASE/flock/$F"; person "$F" Solo -37.8000 144.9670 8 null 360 300 9; wp "$F" -37.7840 144.9610 PrincesPark; check "$F" "s2 1p/1-wp" 1 0 0; }
+s3() { local F; F=$(create); echo "s3 → $BASE/flock/$F"; person "$F" Solo -37.8000 144.9670 10 null 360 300 12; wp "$F" -37.7840 144.9610 PrincesPark; wp "$F" -37.8050 144.9720 CarltonCafe 15; wp "$F" -37.7980 144.9780 Fitzroy; check "$F" "s3 1p/3-wp+stop" 1 0 1; }
+s4() { local F; F=$(create); echo "s4 → $BASE/flock/$F"; add5 "$F"; check "$F" "s4 5p/no-wp" 5 1 0; }
+s5() { local F; F=$(create); echo "s5 → $BASE/flock/$F"; add5 "$F"; wp "$F" -37.8050 144.9720 CarltonGardens; check "$F" "s5 5p/1-wp" 5 1 0; }
+s6() { local F; F=$(create); echo "s6 → $BASE/flock/$F"; add5 "$F"; wp "$F" -37.7840 144.9610 PrincesPark; wp "$F" -37.8050 144.9720 CarltonCafe 15; wp "$F" -37.8000 145.0050 Abbotsford; check "$F" "s6 5p/3-wp+stop" 5 1 1; }
+
+pc() { local F; F=$(create); echo "pc → $BASE/flock/$F"; person "$F" Peter -37.7700 144.9990 18 null 360 300 20; person "$F" Collin -37.8110 144.9690 null null 360 300 null; check "$F" "pc 2p Peter+Collin" 2 1 0; }
+
+cct() {
+  local F; F=$(create); echo "cct → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
+  wp "$F" -37.8190 144.9460 Docklands; wp "$F" -37.8230 144.9680 CBD;       wp "$F" -37.8250 144.9950 Richmond
+  wp "$F" -37.8230 145.0100 Burnley;   wp "$F" -37.8000 145.0050 Abbotsford;wp "$F" -37.7890 144.9950 CliftonHill
+  wp "$F" -37.7980 144.9785 FitzroyClose
+  person "$F" Anya -37.7980 144.9780 null null 330 300 null
+  person "$F" Arlo -37.7975 144.9790 30   null 345 300 32
+  person "$F" Remy -37.8240 145.0000 10   null 390 340 11
+  person "$F" Pia  -37.7830 144.9550 8    null 420 360 8
+  person "$F" Dev  -37.8170 144.9480 13   null 400 350 14
+  check "$F" "cct Capital City Trail" 5 1 0
 }
 
-scenario_d() {
-  local F; F=$(create); echo "Scenario d (Capital City Trail) → $BASE/flock/$F"
-  wp() { patch "$F" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$1,\"lng\":$2},\"address\":\"$3\",\"name\":\"$3\",\"stopMinutes\":0}}" "wp:$3"; }
-  wp -37.7980 144.9780 Fitzroy;   wp -37.7850 144.9520 Parkville; wp -37.8080 144.9450 NthMelb
-  wp -37.8190 144.9460 Docklands; wp -37.8230 144.9680 CBD;       wp -37.8250 144.9950 Richmond
-  wp -37.8230 145.0100 Burnley;   wp -37.8000 145.0050 Abbotsford;wp -37.7890 144.9950 CliftonHill
-  wp -37.7980 144.9785 FitzroyClose
-  patch "$F" '{"action":"addParticipant","editToken":"a1","participant":{"name":"Anya","startLocation":{"lat":-37.7980,"lng":144.9780},"startAddress":"Fitzroy","earliestStartTime":"07:00","preferredPace":330,"maxPace":300,"preferredDistance":null,"maxDistance":null,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Anya
-  patch "$F" '{"action":"addParticipant","editToken":"a2","participant":{"name":"Arlo","startLocation":{"lat":-37.7975,"lng":144.9790},"startAddress":"Fitzroy","earliestStartTime":"07:00","preferredPace":345,"maxPace":300,"preferredDistance":30,"maxDistance":32,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Arlo
-  patch "$F" '{"action":"addParticipant","editToken":"j1","participant":{"name":"Remy","startLocation":{"lat":-37.8240,"lng":145.0000},"startAddress":"Richmond","earliestStartTime":"07:00","preferredPace":390,"maxPace":340,"preferredDistance":10,"maxDistance":11,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Remy
-  patch "$F" '{"action":"addParticipant","editToken":"j2","participant":{"name":"Pia","startLocation":{"lat":-37.7830,"lng":144.9550},"startAddress":"Parkville","earliestStartTime":"07:00","preferredPace":420,"maxPace":360,"preferredDistance":8,"maxDistance":8,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Pia
-  patch "$F" '{"action":"addParticipant","editToken":"j3","participant":{"name":"Dev","startLocation":{"lat":-37.8170,"lng":144.9480},"startAddress":"Docklands","earliestStartTime":"07:00","preferredPace":400,"maxPace":350,"preferredDistance":13,"maxDistance":14,"finishLocation":null,"finishAddress":null,"latestFinishTime":null,"restStop":null}}' Dev
-  echo "[d]"; calc "$F"; show "$F"
-}
-
+curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
+echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  a|b) scenario_ab ;;
-  d)   scenario_d ;;
-  all) scenario_ab; echo; scenario_d ;;
-  *)   echo "unknown scenario: $WHICH (use a|b|d|all)"; exit 1 ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  *)   "$WHICH" ;;
 esac
+echo "── $PASS passed, $FAIL failed ──"
+exit $(( FAIL > 0 ? 1 : 0 ))
