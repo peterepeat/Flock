@@ -5,7 +5,7 @@ import { formatDistance, formatDuration, formatPaceShort } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
 
 /**
- * Per-participant plain-English schedule. Conversational throughout — "flying
+ * Per-participant plain-English schedule. Conversational throughout — "flocking
  * with [name]" for together stretches, "running solo" for the rest, never
  * "shared segment". Together stretches are tinted in the co-runner's colour.
  */
@@ -76,7 +76,7 @@ export default function ScheduleView({ participantId }: { participantId: string 
             <div className="mt-0.5 text-xs">
               {withSomeone ? (
                 <span className="text-text">
-                  Flying with <span style={{ color: tint }}>{who}</span>
+                  Flocking with <span style={{ color: tint }}>{who}</span>
                 </span>
               ) : (
                 <span className="text-text-dim">Running solo</span>

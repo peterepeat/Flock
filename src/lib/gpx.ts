@@ -65,7 +65,7 @@ export function buildGpx(session: FlockSession, participantId: string): GpxResul
     waypoints.push(
       `  <wpt lat="${start[1]}" lon="${start[0]}">\n` +
         `    <name>Meet ${xmlEscape(others.join(" + "))} here</name>\n` +
-        `    <desc>~${seg.startTime}. You'll fly together for about ${km.toFixed(1)}km.</desc>\n` +
+        `    <desc>~${seg.startTime}. You'll flock together for about ${km.toFixed(1)}km.</desc>\n` +
         `  </wpt>`,
     );
     if (end && coords.length > 2) {

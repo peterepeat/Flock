@@ -18,7 +18,7 @@ const dmMono = DM_Mono({
 export const metadata: Metadata = {
   title: "Flock — find your flock",
   description:
-    "Everyone starts somewhere different. Flock figures out the routes so you spend as much time running together as possible.",
+    "Everyone starts somewhere. Flock figures out the routes so you spend as much time running together as possible.",
 };
 
 export const viewport: Viewport = {

@@ -101,7 +101,7 @@ export default function FlockPanel() {
 
             {tooFarApart && (
               <div className="rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
-                Everyone’s a bit too far apart to fly together on this one.
+                Everyone’s a bit too far apart to flock together on this one.
               </div>
             )}
 

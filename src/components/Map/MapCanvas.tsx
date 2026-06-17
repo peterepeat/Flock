@@ -158,7 +158,7 @@ export default function MapCanvas() {
         <ClickHandler />
         <FitBounds points={allPoints} />
 
-        {/* Together overlay — the signature glowing underlay where the flock flies
+        {/* Together overlay — the signature glowing underlay where the flock runs
             together (rendered BENEATH the routes). A wide soft halo + a brighter
             animated core. */}
         {sharedSegments.map((seg, i) => {
@@ -166,7 +166,7 @@ export default function MapCanvas() {
             ([lng, lat]) => [lat, lng] as [number, number],
           );
           const names = seg.participantIds.map(nameOf);
-          const label = `${names.join(" + ")} fly together here for ~${Math.round(
+          const label = `${names.join(" + ")} flock together here for ~${Math.round(
             seg.overlapMinutes,
           )} min`;
           return (
@@ -355,7 +355,7 @@ function Legend() {
         ))}
       </ul>
       <div className="mono mt-2 border-t border-white/10 pt-2 text-fog">
-        {shared.length} together · {totalMin} min flying
+        {shared.length} together · {totalMin} min flocking
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Flock Route (the shared "backbone") — the 1-D track the flock flies together
+// Flock Route (the shared "backbone") — the 1-D track the flock runs together
 // along. Built ONCE from the nominated waypoints, or auto-generated when none.
 // Carries cumulative arc-length so a runner's participation reduces to a
 // [enterKm, exitKm] interval, and provides arc → point / slice helpers.

@@ -100,7 +100,7 @@ export default function WaypointsSection() {
       </div>
       <p className="text-xs text-text-dim">
         Add a shared waypoint — a café, a landmark, a meeting spot. Everyone’s route
-        runs through it, so you spend more time flying together.
+        runs through it, so you spend more time flocking together.
       </p>
 
       {waypoints.length > 0 && (

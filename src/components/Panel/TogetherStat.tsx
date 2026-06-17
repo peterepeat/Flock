@@ -4,7 +4,7 @@ import { formatDuration } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
 
 /**
- * The primary metric of the whole product: total minutes the flock flies
+ * The primary metric of the whole product: total minutes the flock spends
  * together. Populated from build step 7 onward; until then it shows a gentle
  * prompt once there are routes to compare.
  */
@@ -23,7 +23,7 @@ export default function TogetherStat() {
         <p className="text-sm text-text-dim">
           {withDetails < 2
             ? "Add another person to see where your routes overlap."
-            : "Working out where you fly together…"}
+            : "Working out where you flock together…"}
         </p>
       </div>
     );
@@ -34,7 +34,7 @@ export default function TogetherStat() {
       <div className="mono text-3xl font-medium text-together">
         {formatDuration(totalMinutes)}
       </div>
-      <div className="text-sm text-text">flying together</div>
+      <div className="text-sm text-text">flocking together</div>
       <div className="mt-1 text-xs text-fog">
         {stretches} {stretches === 1 ? "stretch" : "stretches"} together
       </div>
