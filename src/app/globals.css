@@ -156,6 +156,19 @@ input[type="range"]::-moz-range-thumb {
   border: 2px solid var(--accent);
 }
 
+/* Shaped sliders draw their own heart/square glyph overlay, so the native thumb
+   stays grabbable but invisible. */
+.range-shaped input[type="range"]::-webkit-slider-thumb {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.range-shaped input[type="range"]::-moz-range-thumb {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
 /* Scrollbars in panels */
 .flock-scroll::-webkit-scrollbar {
   width: 8px;

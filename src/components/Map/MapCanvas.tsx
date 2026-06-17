@@ -82,18 +82,22 @@ function meetIcon(): L.DivIcon {
 function CursorMode() {
   const map = useMap();
   const placingPin = useFlockStore((s) => s.placingPin);
+  const placingFinish = useFlockStore((s) => s.placingFinish);
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   useEffect(() => {
-    map.getContainer().style.cursor = placingPin || placingWaypoint ? "crosshair" : "";
-  }, [map, placingPin, placingWaypoint]);
+    map.getContainer().style.cursor =
+      placingPin || placingFinish || placingWaypoint ? "crosshair" : "";
+  }, [map, placingPin, placingFinish, placingWaypoint]);
   return null;
 }
 
-/** Click-to-place handler for the start pin or a shared waypoint. */
+/** Click-to-place handler for the start pin, finish pin, or a shared waypoint. */
 function ClickHandler() {
   const placingPin = useFlockStore((s) => s.placingPin);
+  const placingFinish = useFlockStore((s) => s.placingFinish);
   const formOpen = useFlockStore((s) => s.formOpen);
   const setDraftStart = useFlockStore((s) => s.setDraftStart);
+  const setDraftFinish = useFlockStore((s) => s.setDraftFinish);
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   const setWaypointPin = useFlockStore((s) => s.setWaypointPin);
 
@@ -103,6 +107,11 @@ function ClickHandler() {
       if (placingWaypoint) {
         log.debug("map click → waypoint", { lat: ll.lat, lng: ll.lng });
         setWaypointPin(ll);
+        return;
+      }
+      if (formOpen && placingFinish) {
+        log.debug("map click → finish pin", { lat: ll.lat, lng: ll.lng });
+        setDraftFinish(ll);
         return;
       }
       if (formOpen && placingPin) {
@@ -140,6 +149,7 @@ export default function MapCanvas() {
   const session = useFlockStore((s) => s.session);
   const hovered = useFlockStore((s) => s.hoveredParticipantId);
   const pendingStart = useFlockStore((s) => s.pendingStart);
+  const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
   const flockId = useFlockStore((s) => s.flockId);
   const applyServerSession = useFlockStore((s) => s.applyServerSession);
@@ -434,11 +444,17 @@ export default function MapCanvas() {
           </Marker>
         ))}
 
-        {/* In-progress start pin from the open form */}
+        {/* In-progress start / finish pins from the open form */}
         {pendingStart && (
           <Marker
             position={toLeaflet(pendingStart)}
             icon={divMarker("var(--accent)", "+", "start")}
+          />
+        )}
+        {pendingFinish && (
+          <Marker
+            position={toLeaflet(pendingFinish)}
+            icon={divMarker("var(--accent)", "⚑", "finish")}
           />
         )}
       </MapContainer>

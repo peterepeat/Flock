@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Field from "@/components/ui/Field";
 import RangeSlider from "@/components/ui/RangeSlider";
-import TimeField from "@/components/ui/TimeField";
 import Toggle from "@/components/ui/Toggle";
 import {
   addParticipant,
@@ -23,26 +22,35 @@ import {
   formatPace,
   PACE_MAX_SEC_PER_KM,
   PACE_MIN_SEC_PER_KM,
+  secToTime,
+  timeToSec,
 } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("participant-form");
 
+// Time-of-day window for the "time constraints" slider (minutes since midnight).
+const TIME_MIN = 4 * 60; // 04:00
+const TIME_MAX = 22 * 60; // 22:00
+const TIME_STEP = 15;
+const toMin = (t: string | null, fallback: number) => (t ? Math.round(timeToSec(t) / 60) : fallback);
+
 interface Draft {
   name: string;
   startLocation: LatLng | null;
   startAddress: string;
-  earliestStartTime: string | null;
   finishMode: "start" | "elsewhere";
   finishLocation: LatLng | null;
   finishAddress: string | null;
-  latestFinishTime: string | null;
   distanceOn: boolean;
   preferredDistance: number;
   maxDistance: number;
   paceOn: boolean;
   maxPace: number; // faster (lower sec/km)
   preferredPace: number; // slower (higher sec/km)
+  timeOn: boolean;
+  earliestMin: number; // can't leave before (minutes since midnight)
+  latestMin: number; // must be done by
 }
 
 function emptyDraft(): Draft {
@@ -50,17 +58,18 @@ function emptyDraft(): Draft {
     name: "",
     startLocation: null,
     startAddress: "",
-    earliestStartTime: "07:00",
     finishMode: "start",
     finishLocation: null,
     finishAddress: null,
-    latestFinishTime: null,
     distanceOn: false,
     preferredDistance: 8,
     maxDistance: 12,
     paceOn: false,
     maxPace: 300, // 5:00 /km
     preferredPace: 360, // 6:00 /km
+    timeOn: false,
+    earliestMin: 7 * 60, // 07:00
+    latestMin: 10 * 60, // 10:00
   };
 }
 
@@ -75,6 +84,11 @@ export default function ParticipantForm() {
   const draftStart = useFlockStore((s) => s.draftStart);
   const setDraftStart = useFlockStore((s) => s.setDraftStart);
   const setPendingStart = useFlockStore((s) => s.setPendingStart);
+  const placingFinish = useFlockStore((s) => s.placingFinish);
+  const setPlacingFinish = useFlockStore((s) => s.setPlacingFinish);
+  const draftFinish = useFlockStore((s) => s.draftFinish);
+  const setDraftFinish = useFlockStore((s) => s.setDraftFinish);
+  const setPendingFinish = useFlockStore((s) => s.setPendingFinish);
 
   const unit: Unit = session?.unitPreference ?? "km";
   const isFirstParticipant = (session?.participants.length ?? 0) === 0 && !editingId;
@@ -85,7 +99,6 @@ export default function ParticipantForm() {
   );
 
   const [draft, setDraft] = useState<Draft>(emptyDraft);
-  const [showMore, setShowMore] = useState(false);
   const [targetId, setTargetId] = useState<string | null>(editingId);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -98,44 +111,58 @@ export default function ParticipantForm() {
     initialised.current = true;
     if (existing) {
       setTargetId(existing.id);
-      setShowMore(true);
       setDraft({
         name: existing.name,
         startLocation: existing.startLocation,
         startAddress: existing.startAddress,
-        earliestStartTime: existing.earliestStartTime,
         finishMode: existing.finishLocation ? "elsewhere" : "start",
         finishLocation: existing.finishLocation,
         finishAddress: existing.finishAddress,
-        latestFinishTime: existing.latestFinishTime,
         distanceOn: existing.preferredDistance != null,
         preferredDistance: existing.preferredDistance ?? 8,
         maxDistance: existing.maxDistance ?? existing.preferredDistance ?? 12,
         paceOn: existing.preferredPace != null,
         maxPace: existing.maxPace ?? 300,
         preferredPace: existing.preferredPace ?? 360,
+        timeOn: existing.earliestStartTime != null || existing.latestFinishTime != null,
+        earliestMin: toMin(existing.earliestStartTime, 7 * 60),
+        latestMin: toMin(existing.latestFinishTime, 10 * 60),
       });
     }
   }, [existing]);
 
-  // Publish the draft's start to the map so the in-progress pin shows live.
+  // Publish the draft's start / finish to the map so the pins show live.
   useEffect(() => {
     setPendingStart(draft.startLocation);
   }, [draft.startLocation, setPendingStart]);
+  useEffect(() => {
+    setPendingFinish(draft.finishMode === "elsewhere" ? draft.finishLocation : null);
+  }, [draft.finishMode, draft.finishLocation, setPendingFinish]);
 
-  // When a start pin is dropped on the map, fold it into the draft.
+  // Fold a map-dropped start pin into the draft.
   useEffect(() => {
     if (draftStart) {
-      setDraft((d) => ({
-        ...d,
-        startLocation: draftStart,
-        startAddress: d.startAddress || "Dropped pin",
-      }));
+      setDraft((d) => ({ ...d, startLocation: draftStart, startAddress: d.startAddress || "Dropped pin" }));
       setPlacingPin(false);
       setDraftStart(null);
       log.debug("start pin dropped", { draftStart });
     }
   }, [draftStart, setPlacingPin, setDraftStart]);
+
+  // Fold a map-dropped finish pin into the draft.
+  useEffect(() => {
+    if (draftFinish) {
+      setDraft((d) => ({
+        ...d,
+        finishMode: "elsewhere",
+        finishLocation: draftFinish,
+        finishAddress: d.finishAddress || "Dropped pin",
+      }));
+      setPlacingFinish(false);
+      setDraftFinish(null);
+      log.debug("finish pin dropped", { draftFinish });
+    }
+  }, [draftFinish, setPlacingFinish, setDraftFinish]);
 
   function buildConstraints(d: Draft): ParticipantConstraints | null {
     if (!d.name.trim() || !d.startLocation) return null;
@@ -143,10 +170,10 @@ export default function ParticipantForm() {
       name: d.name.trim(),
       startLocation: d.startLocation,
       startAddress: d.startAddress || "Dropped pin",
-      earliestStartTime: d.earliestStartTime,
+      earliestStartTime: d.timeOn ? secToTime(d.earliestMin * 60) : null,
       finishLocation: d.finishMode === "elsewhere" ? d.finishLocation : null,
       finishAddress: d.finishMode === "elsewhere" ? d.finishAddress : null,
-      latestFinishTime: d.latestFinishTime,
+      latestFinishTime: d.timeOn ? secToTime(d.latestMin * 60) : null,
       preferredPace: d.paceOn ? d.preferredPace : null,
       maxPace: d.paceOn ? d.maxPace : null,
       preferredDistance: d.distanceOn ? d.preferredDistance : null,
@@ -216,6 +243,16 @@ export default function ParticipantForm() {
     setDraft((d) => ({ ...d, [key]: value }));
   }
 
+  // Start / finish pin placement are mutually exclusive map modes.
+  const toggleStartPin = () => {
+    setPlacingFinish(false);
+    setPlacingPin(!placingPin);
+  };
+  const toggleFinishPin = () => {
+    setPlacingPin(false);
+    setPlacingFinish(!placingFinish);
+  };
+
   return (
     <div className="space-y-6">
       {/* Units (first participant sets it for everyone) */}
@@ -266,7 +303,7 @@ export default function ParticipantForm() {
         <div className="mt-2 flex items-center gap-3">
           <button
             type="button"
-            onClick={() => setPlacingPin(!placingPin)}
+            onClick={toggleStartPin}
             className={`text-xs ${placingPin ? "text-accent" : "text-fog hover:text-text"}`}
           >
             {placingPin ? "Tap the map to drop your pin…" : "…or tap the map to drop a pin"}
@@ -279,123 +316,138 @@ export default function ParticipantForm() {
         </div>
       </Field>
 
-      {!showMore && (
-        <button
-          type="button"
-          onClick={() => setShowMore(true)}
-          className="text-sm text-accent hover:brightness-110"
-        >
-          + Add more details
-        </button>
-      )}
-
-      {showMore && (
-        <div className="space-y-6 border-t border-white/5 pt-6">
-          {/* Earliest start */}
-          <Field label="Earliest you can leave" optional>
-            <TimeField
-              value={draft.earliestStartTime}
-              onChange={(v) => set("earliestStartTime", v)}
+      {/* Finish — right below start */}
+      <Field label="Where are you finishing?">
+        <Toggle
+          options={[
+            { value: "start", label: "Back where I started" },
+            { value: "elsewhere", label: "Somewhere else" },
+          ]}
+          value={draft.finishMode}
+          onChange={(v) => set("finishMode", v as "start" | "elsewhere")}
+        />
+        {draft.finishMode === "elsewhere" && (
+          <div className="mt-3">
+            <AddressSearch
+              initialValue={draft.finishAddress === "Dropped pin" ? "" : draft.finishAddress ?? ""}
+              placeholder="Where are you finishing?"
+              onSelect={(r) => {
+                set("finishLocation", { lat: r.lat, lng: r.lng });
+                set("finishAddress", r.shortName);
+              }}
             />
-          </Field>
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={toggleFinishPin}
+                className={`text-xs ${placingFinish ? "text-accent" : "text-fog hover:text-text"}`}
+              >
+                {placingFinish ? "Tap the map to drop your pin…" : "…or tap the map to drop a pin"}
+              </button>
+              {draft.finishLocation && (
+                <span className="mono text-xs text-together">
+                  ✓ {draft.finishLocation.lat.toFixed(4)}, {draft.finishLocation.lng.toFixed(4)}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </Field>
 
-          {/* Distance */}
-          <Field label="How far do you want to run?" optional>
-            <Toggle
-              options={[
-                { value: "off", label: "No preference" },
-                { value: "on", label: "Set a range" },
-              ]}
-              value={draft.distanceOn ? "on" : "off"}
-              onChange={(v) => set("distanceOn", v === "on")}
+      {/* Distance */}
+      <Field label="How far do you want to run?" optional>
+        <Toggle
+          options={[
+            { value: "off", label: "No preference" },
+            { value: "on", label: "Set a range" },
+          ]}
+          value={draft.distanceOn ? "on" : "off"}
+          onChange={(v) => set("distanceOn", v === "on")}
+        />
+        {draft.distanceOn && (
+          <div className="mt-3">
+            <RangeSlider
+              min={DISTANCE_MIN_KM}
+              max={DISTANCE_MAX_KM}
+              low={draft.preferredDistance}
+              high={draft.maxDistance}
+              onChange={(low, high) => {
+                set("preferredDistance", low);
+                set("maxDistance", high);
+              }}
+              format={(v) => formatDistance(v, unit)}
+              leftThumb="heart"
+              rightThumb="square"
+              leftLabel="I'd love this far"
+              rightLabel="Up to this far"
             />
-            {draft.distanceOn && (
-              <div className="mt-3">
-                <RangeSlider
-                  min={DISTANCE_MIN_KM}
-                  max={DISTANCE_MAX_KM}
-                  low={draft.preferredDistance}
-                  high={draft.maxDistance}
-                  onChange={(low, high) => {
-                    set("preferredDistance", low);
-                    set("maxDistance", high);
-                  }}
-                  format={(v) => formatDistance(v, unit)}
-                  leftLabel="I'd love this far"
-                  rightLabel="Up to this far"
-                />
-              </div>
-            )}
-          </Field>
+          </div>
+        )}
+      </Field>
 
-          {/* Pace */}
-          <Field label="How fast do you run?" optional>
-            <Toggle
-              options={[
-                { value: "off", label: "No preference" },
-                { value: "on", label: "Set a pace" },
-              ]}
-              value={draft.paceOn ? "on" : "off"}
-              onChange={(v) => set("paceOn", v === "on")}
+      {/* Pace */}
+      <Field label="How fast do you run?" optional>
+        <Toggle
+          options={[
+            { value: "off", label: "No preference" },
+            { value: "on", label: "Set a pace" },
+          ]}
+          value={draft.paceOn ? "on" : "off"}
+          onChange={(v) => set("paceOn", v === "on")}
+        />
+        {draft.paceOn && (
+          <div className="mt-3">
+            <RangeSlider
+              min={PACE_MIN_SEC_PER_KM}
+              max={PACE_MAX_SEC_PER_KM}
+              step={5}
+              low={draft.maxPace}
+              high={draft.preferredPace}
+              onChange={(low, high) => {
+                set("maxPace", low);
+                set("preferredPace", high);
+              }}
+              format={(v) => formatPace(v, unit)}
+              leftThumb="square"
+              rightThumb="heart"
+              leftLabel="I can handle this pace"
+              rightLabel="I love this pace"
             />
-            {draft.paceOn && (
-              <div className="mt-3">
-                <RangeSlider
-                  min={PACE_MIN_SEC_PER_KM}
-                  max={PACE_MAX_SEC_PER_KM}
-                  step={5}
-                  low={draft.maxPace}
-                  high={draft.preferredPace}
-                  onChange={(low, high) => {
-                    set("maxPace", low);
-                    set("preferredPace", high);
-                  }}
-                  format={(v) => formatPace(v, unit)}
-                  leftLabel="Faster"
-                  rightLabel="Slower"
-                />
-              </div>
-            )}
-          </Field>
+          </div>
+        )}
+      </Field>
 
-          {/* Finish */}
-          <Field label="Where are you finishing?">
-            <Toggle
-              options={[
-                { value: "start", label: "Back where I started" },
-                { value: "elsewhere", label: "Somewhere else" },
-              ]}
-              value={draft.finishMode}
-              onChange={(v) => set("finishMode", v as "start" | "elsewhere")}
+      {/* Time constraints */}
+      <Field label="What are your time constraints?" optional>
+        <Toggle
+          options={[
+            { value: "off", label: "No preference" },
+            { value: "on", label: "Set a range" },
+          ]}
+          value={draft.timeOn ? "on" : "off"}
+          onChange={(v) => set("timeOn", v === "on")}
+        />
+        {draft.timeOn && (
+          <div className="mt-3">
+            <RangeSlider
+              min={TIME_MIN}
+              max={TIME_MAX}
+              step={TIME_STEP}
+              low={draft.earliestMin}
+              high={draft.latestMin}
+              onChange={(low, high) => {
+                set("earliestMin", low);
+                set("latestMin", high);
+              }}
+              format={(m) => secToTime(m * 60)}
+              leftThumb="square"
+              rightThumb="square"
+              leftLabel="Can't leave before"
+              rightLabel="Must be done by"
             />
-            {draft.finishMode === "elsewhere" && (
-              <div className="mt-3">
-                <AddressSearch
-                  initialValue={draft.finishAddress ?? ""}
-                  placeholder="Where are you finishing?"
-                  onSelect={(r) => {
-                    set("finishLocation", { lat: r.lat, lng: r.lng });
-                    set("finishAddress", r.shortName);
-                  }}
-                />
-              </div>
-            )}
-          </Field>
-
-          {/* Latest finish */}
-          <Field label="Latest you need to be done by" optional>
-            <TimeField
-              value={draft.latestFinishTime}
-              onChange={(v) => set("latestFinishTime", v)}
-            />
-          </Field>
-
-          <p className="rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
-            Want to stop for coffee or meet somewhere? Add a shared waypoint for
-            the whole flock from the panel — everyone’s route runs through it.
-          </p>
-        </div>
-      )}
+          </div>
+        )}
+      </Field>
 
       {errorMsg && <p className="text-sm text-accent">{errorMsg}</p>}
 

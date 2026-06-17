@@ -20,6 +20,9 @@ interface FlockState {
   draftStart: LatLng | null; // pin placed via map click while form open (map → form)
   pendingStart: LatLng | null; // the open form's current start, shown live on the map (form → map)
   placingPin: boolean; // map is in "click to place start" mode
+  draftFinish: LatLng | null; // finish pin placed via map click (map → form)
+  pendingFinish: LatLng | null; // the open form's current finish, shown live on the map (form → map)
+  placingFinish: boolean; // map is in "click to place finish" mode
 
   // Shared-waypoint placement
   placingWaypoint: boolean; // map is in "click to place a shared waypoint" mode
@@ -42,6 +45,9 @@ interface FlockState {
   setDraftStart: (ll: LatLng | null) => void;
   setPendingStart: (ll: LatLng | null) => void;
   setPlacingPin: (placing: boolean) => void;
+  setDraftFinish: (ll: LatLng | null) => void;
+  setPendingFinish: (ll: LatLng | null) => void;
+  setPlacingFinish: (placing: boolean) => void;
   setPlacingWaypoint: (placing: boolean) => void;
   setWaypointPin: (ll: LatLng | null) => void;
   setCalcStatus: (status: CalcStatus) => void;
@@ -61,6 +67,9 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   draftStart: null,
   pendingStart: null,
   placingPin: false,
+  draftFinish: null,
+  pendingFinish: null,
+  placingFinish: false,
   placingWaypoint: false,
   waypointPin: null,
 
@@ -93,12 +102,18 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       placingPin: false,
       draftStart: null,
       pendingStart: null,
+      placingFinish: false,
+      draftFinish: null,
+      pendingFinish: null,
     }),
   setHovered: (participantId) => set({ hoveredParticipantId: participantId }),
   setExpanded: (participantId) => set({ expandedParticipantId: participantId }),
   setDraftStart: (ll) => set({ draftStart: ll }),
   setPendingStart: (ll) => set({ pendingStart: ll }),
   setPlacingPin: (placing) => set({ placingPin: placing }),
+  setDraftFinish: (ll) => set({ draftFinish: ll }),
+  setPendingFinish: (ll) => set({ pendingFinish: ll }),
+  setPlacingFinish: (placing) => set({ placingFinish: placing }),
   setPlacingWaypoint: (placing) => set({ placingWaypoint: placing }),
   setWaypointPin: (ll) => set({ waypointPin: ll }),
   setCalcStatus: (status) => set({ calcStatus: status }),
