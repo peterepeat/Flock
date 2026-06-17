@@ -7,10 +7,11 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc cct all   (default: all)
-#   SLEEP    seconds between scenarios in "all" (default 16) — the free ORS tier
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc ext cct all   (default: all)
+#   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
-#            must be paced or later scenarios get rate-limited (0 routes).
+#            must be paced or later scenarios get rate-limited (0 routes). With 9
+#            scenarios now, 20s keeps the sliding-window rate comfortably under.
 #
 # Coverage matrix ({1 person, 5 people} × {no / 1 / 3+ waypoints incl. a stop}):
 #   s1  1 person,  no waypoints
@@ -21,11 +22,12 @@
 #   s6  5 people (disparate),  3 waypoints incl. a stop
 # Augmented:
 #   pc  2 people: Peter (18km) + Collin (unconstrained)  — headline "together" regression
+#   ext 3 clustered constrained runners — keenest solos a tail past the backbone
 #   cct Capital City Trail loop: 2 anchors + 3 drop-in joiners around the loop
 set -uo pipefail
 PORT="${1:-3000}"
 WHICH="${2:-all}"
-SLEEP="${3:-16}"
+SLEEP="${3:-20}"
 BASE="http://localhost:${PORT}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PASS=0; FAIL=0
@@ -59,6 +61,18 @@ s6() { local F; F=$(create); echo "s6 → $BASE/flock/$F"; add5 "$F"; wp "$F" -3
 
 pc() { local F; F=$(create); echo "pc → $BASE/flock/$F"; person "$F" Peter -37.7700 144.9990 18 null 360 300 20; person "$F" Collin -37.8110 144.9690 null null 360 300 null; check "$F" "pc 2p Peter+Collin" 2 1 0; }
 
+# Solo-extension: 3 clustered constrained runners, no unconstrained anchor and a
+# clear single longest. Backbone is sized to the 2nd-longest (Dana ~20km), so the
+# keenest (Peter, 30km) runs the whole backbone with the flock then solos the tail
+# to hit target. Asserts (expect_target=1) Peter reaches ~30km, not ~20km.
+ext() {
+  local F; F=$(create); echo "ext → $BASE/flock/$F"
+  person "$F" Peter -37.7980 144.9780 30 null 360 300 33   # keenest — solos the tail
+  person "$F" Dana  -37.8000 144.9700 20 null 360 300 22   # 2nd-longest sets backbone reach
+  person "$F" Eve   -37.7950 144.9750 16 null 360 300 18   # peels off earliest
+  check "$F" "ext solo-extension" 3 1 0 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -76,7 +90,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

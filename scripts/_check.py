@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Compact pass/fail checker for a calculated flock (reads flock JSON on stdin).
 
-argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1>
+argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1> [expect_target 0|1]
 Exits non-zero on any failed assertion. Prints one PASS/FAIL line.
+
+expect_target=1 asserts the longest-targeted runner reaches near their
+preferredDistance (within 2km) — the solo-extension guard: without it the keenest
+runner is cut short where the (capped) backbone turns around.
 """
 import sys, json
 
@@ -10,6 +14,7 @@ label = sys.argv[1]
 expect_routes = int(sys.argv[2])
 expect_together = int(sys.argv[3])
 expect_stop = int(sys.argv[4])
+expect_target = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
 s = json.load(sys.stdin)
 parts = {p["id"]: p for p in s["participants"]}
@@ -46,6 +51,17 @@ if not expect_together and len(routes) <= 1 and shared:
 has_stop = any(seg["type"] == "rest" for r in routes for seg in r["schedule"])
 if expect_stop and not has_stop:
     fails.append("expected a stop, none found")
+
+if expect_target:
+    targeted = [p for p in s["participants"] if p.get("preferredDistance")]
+    if not targeted:
+        fails.append("expect_target but no runner has a preferredDistance")
+    else:
+        keenest = max(targeted, key=lambda p: p["preferredDistance"])
+        dist = next((r["distanceKm"] for r in routes if r["participantId"] == keenest["id"]), 0)
+        want = keenest["preferredDistance"]
+        if dist < want - 2.0:
+            fails.append(f"{names[keenest['id']]} reached {dist}km, short of target {want}km (extension failed)")
 
 totkm = round(sum(r["distanceKm"] for r in routes), 1)
 status = "PASS" if not fails else "FAIL"

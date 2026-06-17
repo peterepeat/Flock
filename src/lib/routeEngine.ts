@@ -42,6 +42,10 @@ const log = createLogger("route-engine");
 const DEFAULT_BACKBONE_KM = 6;
 const ROAD_FACTOR = 1.3; // crow-flies → on-path estimate for approach/egress
 const EPS = 1e-6;
+// Solo extension: the backbone reaches only as far as the SECOND-longest runner
+// (the "never solo on the backbone" invariant). The single longest's surplus
+// distance — when it clears this margin — becomes a solo tail past the peel-off.
+const MIN_EXTENSION_KM = 1.5;
 
 const round2 = (v: number) => Number(v.toFixed(2));
 const crowKm = (a: LatLng, b: LatLng) => distanceMeters(a, b) / 1000;
@@ -100,6 +104,8 @@ interface RunnerBuild {
   departHomeSec: number;
   enterClockSec: number; // flock-clock secs at enter
   exitClockSec: number; // flock-clock secs at exit (incl. stops passed)
+  extensionKm: number; // solo distance run past the peel-off (0 = none)
+  extensionGeom: LatLng[]; // its geometry (a loop from the exit point back to it)
 }
 
 interface Leg {
@@ -354,6 +360,51 @@ async function soloLoop(b: RunnerBuild): Promise<ComputedRoute | null> {
   };
 }
 
+/**
+ * Give a runner a solo tail beyond the backbone so they reach their distance
+ * target. The flock peels off at this runner's exit (the backbone end); they
+ * keep going on a loop from that point, then egress home as before. The loop is
+ * sized to the exact shortfall and clamped by any latest-finish budget. Mutates
+ * the build's `extensionKm` / `extensionGeom`; one extra ORS call.
+ */
+async function applyExtension(b: RunnerBuild, backbone: Backbone, T0abs: number): Promise<void> {
+  const target = targetDistanceKm(b.p);
+  if (target == null) return;
+  const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+  let surplus = target - built;
+  if (surplus < MIN_EXTENSION_KM) return;
+
+  // Respect latest-finish: the tail + egress must still get home in time.
+  if (b.p.latestFinishTime) {
+    const exitAbs = T0abs + b.exitClockSec;
+    const availSec = timeToSec(b.p.latestFinishTime) - exitAbs - b.egressKm * b.ownPaceSec;
+    surplus = Math.min(surplus, availSec / b.ownPaceSec);
+  }
+  if (surplus < MIN_EXTENSION_KM) {
+    log.info("extension skipped (no time budget)", { participantId: b.p.id.slice(0, 4), target });
+    return;
+  }
+
+  let ors: OrsRoute;
+  try {
+    ors = await getRoundTrip(pointAtKm(backbone, b.exitKm), surplus);
+  } catch {
+    log.warn("extension ORS failed — runner stays short", { participantId: b.p.id.slice(0, 4) });
+    return;
+  }
+  b.extensionKm = ors.distanceKm;
+  b.extensionGeom = geomToLatLng(ors.geometry);
+  log.info("solo extension", {
+    participantId: b.p.id.slice(0, 4),
+    target,
+    backboneKm: round2(backbone.totalKm),
+    builtKm: round2(built),
+    surplusKm: round2(surplus),
+    extKm: round2(ors.distanceKm),
+    totalKm: round2(built + ors.distanceKm),
+  });
+}
+
 // --- public entry -----------------------------------------------------------
 
 export async function calculateRoutes(session: FlockSession): Promise<CalcResult> {
@@ -374,7 +425,10 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     if (t == null) return Infinity;
     return Math.max(0, t - 2 * crowKm(p.startLocation, rendezvous) * ROAD_FACTOR);
   };
-  const ests = runners.map(arcEstimate).sort((a, b) => b - a);
+  const estsById = runners
+    .map((p) => ({ id: p.id, est: arcEstimate(p) }))
+    .sort((a, b) => b.est - a.est);
+  const ests = estsById.map((e) => e.est);
   const finite = ests.filter((e) => Number.isFinite(e));
   let targetKm: number;
   if (ests.length >= 2 && Number.isFinite(ests[1])) targetKm = ests[1];
@@ -383,6 +437,14 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   targetKm = Math.max(1, targetKm);
 
   const backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
+
+  // Solo-extension candidate: the single runner whose reach clears the backbone.
+  // The backbone stops at the second-longest reach, so for an auto backbone only
+  // the keenest qualifies; for an explicit (longer) waypoint skeleton, possibly
+  // none. Their surplus distance becomes a solo tail past the flock's peel-off.
+  const top = estsById[0];
+  const extendCandidateId =
+    top && Number.isFinite(top.est) && top.est > backbone.totalKm + MIN_EXTENSION_KM ? top.id : null;
 
   // Best-response: choose each runner's [enter, exit] to maximise together-time.
   const windows = optimizeWindows(
@@ -429,6 +491,8 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
         departHomeSec: 0,
         enterClockSec: 0,
         exitClockSec: 0,
+        extensionKm: 0,
+        extensionGeom: [],
       });
     } else {
       const code = r.reason instanceof RouteError ? r.reason.code : "ors-error";
@@ -478,6 +542,11 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     b.departHomeSec = T0abs + b.enterClockSec - b.approachKm * b.ownPaceSec;
   }
 
+  // Solo extension: the keenest runner continues past the peel-off to make up
+  // the distance the (capped) backbone left short. Pure solo — no TM effect.
+  const candidate = extendCandidateId ? onBackbone.find((b) => b.p.id === extendCandidateId) : undefined;
+  if (candidate) await applyExtension(candidate, backbone, T0abs);
+
   const soloRoutes = (await Promise.all(stranded.map((b) => soloLoop(b)))).filter(
     (r): r is ComputedRoute => r != null,
   );
@@ -492,6 +561,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     flockId: session.id,
     onBackbone: onBackbone.length,
     solo: stranded.length,
+    extended: onBackbone.filter((b) => b.extensionKm > 0.02).length,
     legs: legs.length,
   });
 
@@ -548,11 +618,13 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
 
 function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: number): ComputedRoute {
   const backboneSlice = sliceKm(backbone, b.enterKm, b.exitKm);
-  const fullGeom = [...b.approachGeom, ...backboneSlice, ...b.egressGeom];
+  const exitPoint = pointAtKm(backbone, b.exitKm);
+  const fullGeom = [...b.approachGeom, ...backboneSlice, ...b.extensionGeom, ...b.egressGeom];
   const enterAbs = T0abs + b.enterClockSec;
   const exitAbs = T0abs + b.exitClockSec;
-  const arrival = exitAbs + b.egressKm * b.ownPaceSec;
-  const distanceKm = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+  const extEndAbs = exitAbs + b.extensionKm * b.ownPaceSec; // == exitAbs when no extension
+  const arrival = extEndAbs + b.egressKm * b.ownPaceSec;
+  const distanceKm = b.approachKm + (b.exitKm - b.enterKm) + b.extensionKm + b.egressKm;
 
   const schedule: ScheduleSegment[] = [];
 
@@ -598,12 +670,26 @@ function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: n
     }
   }
 
-  if (b.egressKm > 0.02) {
+  if (b.extensionKm > 0.02) {
+    // Solo tail: the flock has peeled off; this runner loops on past the exit.
     schedule.push({
       type: "run",
       startTime: secToTime(exitAbs),
+      endTime: secToTime(extEndAbs),
+      startLocation: exitPoint,
+      endLocation: exitPoint,
+      paceSecPerKm: b.ownPaceSec,
+      companionIds: [],
+      distanceKm: round2(b.extensionKm),
+    });
+  }
+
+  if (b.egressKm > 0.02) {
+    schedule.push({
+      type: "run",
+      startTime: secToTime(extEndAbs),
       endTime: secToTime(arrival),
-      startLocation: pointAtKm(backbone, b.exitKm),
+      startLocation: exitPoint,
       endLocation: b.home,
       paceSecPerKm: b.ownPaceSec,
       companionIds: [],
@@ -613,7 +699,7 @@ function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: n
 
   return {
     participantId: b.p.id,
-    waypoints: [b.home, pointAtKm(backbone, b.enterKm), pointAtKm(backbone, b.exitKm), b.home],
+    waypoints: [b.home, pointAtKm(backbone, b.enterKm), exitPoint, b.home],
     geometry: toLineString(fullGeom),
     distanceKm: round2(distanceKm),
     estimatedDurationMinutes: Math.round((arrival - b.departHomeSec) / 60),
@@ -625,9 +711,16 @@ function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: n
 
 function buildWarnings(b: RunnerBuild): CalcWarning[] {
   const out: CalcWarning[] = [];
-  const distanceKm = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+  const distanceKm = b.approachKm + (b.exitKm - b.enterKm) + b.extensionKm + b.egressKm;
   const target = targetDistanceKm(b.p);
   const arcKm = b.exitKm - b.enterKm;
+
+  if (b.extensionKm > 0.02) {
+    out.push({
+      participantId: b.p.id,
+      message: `You go further than the rest, so you'll run the last ${b.extensionKm.toFixed(1)}km solo — the flock peels off where it reaches its turnaround.`,
+    });
+  }
 
   if (b.p.earliestStartTime && b.p.latestFinishTime) {
     const availableMin = (timeToSec(b.p.latestFinishTime) - timeToSec(b.p.earliestStartTime)) / 60;
