@@ -39,6 +39,7 @@ function clearComputed(session: FlockSession): void {
   session.computedRoutes = null;
   session.sharedSegments = null;
   session.flockRoute = null;
+  session.waypointEtas = null;
 }
 
 export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSession> {
@@ -55,6 +56,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     computedRoutes: null,
     sharedSegments: null,
     flockRoute: null,
+    waypointEtas: null,
   };
   await store.createFlock(session);
   log.info("flock created", { id: session.id, unit: unitPreference, backend: store.backend });
@@ -202,11 +204,13 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.computedRoutes = action.computedRoutes;
       session.sharedSegments = action.sharedSegments;
       session.flockRoute = action.flockRoute;
+      session.waypointEtas = action.waypointEtas;
       log.info("routes updated", {
         id,
         routes: action.computedRoutes.length,
         shared: action.sharedSegments.length,
         flockRoute: action.flockRoute ? action.flockRoute.coordinates.length : 0,
+        etas: action.waypointEtas ? Object.keys(action.waypointEtas).length : 0,
       });
       break;
     }

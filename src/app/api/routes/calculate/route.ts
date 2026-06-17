@@ -41,6 +41,7 @@ export async function POST(request: Request) {
         computedRoutes: result.routes,
         sharedSegments: result.sharedSegments,
         flockRoute: result.flockRoute,
+        waypointEtas: result.waypointEtas,
       });
     }
 

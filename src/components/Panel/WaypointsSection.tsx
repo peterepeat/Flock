@@ -34,6 +34,7 @@ export default function WaypointsSection() {
 
   const locked = session?.lockedAt != null;
   const waypoints = session?.waypoints ?? [];
+  const waypointEtas = session?.waypointEtas ?? {};
 
   // Fold a map-dropped pin into the add form.
   useEffect(() => {
@@ -126,6 +127,7 @@ export default function WaypointsSection() {
         <ul className="space-y-1.5">
           {waypoints.map((w, i) => {
             const canReorder = !locked && waypoints.length > 1;
+            const eta = waypointEtas[w.id];
             return (
               <li
                 key={w.id}
@@ -163,8 +165,14 @@ export default function WaypointsSection() {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-text">{w.name}</span>
-                  {w.stopMinutes > 0 && (
-                    <span className="mono block text-xs text-together">☕ {w.stopMinutes} min stop</span>
+                  {(eta || w.stopMinutes > 0) && (
+                    <span className="mono block text-xs">
+                      {eta && <span className="text-fog">passes ~{eta}</span>}
+                      {eta && w.stopMinutes > 0 && <span className="text-fog"> · </span>}
+                      {w.stopMinutes > 0 && (
+                        <span className="text-together">☕ {w.stopMinutes} min stop</span>
+                      )}
+                    </span>
                   )}
                 </span>
                 {!locked && (

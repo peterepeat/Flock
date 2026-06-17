@@ -18,7 +18,7 @@
 
 import { distanceMeters } from "./geo";
 import { createLogger } from "./logger";
-import { buildBackbone, centroid, pointAtKm, sliceKm, type Backbone } from "./flockRoute";
+import { buildBackbone, centroid, nearestKm, pointAtKm, sliceKm, type Backbone } from "./flockRoute";
 import { getRoundTrip, getRoute, RouteError, type OrsRoute } from "./ors";
 import type {
   ComputedRoute,
@@ -64,6 +64,7 @@ export interface CalcResult {
   routes: ComputedRoute[];
   sharedSegments: SharedSegment[];
   flockRoute: GeoJSON.LineString | null; // the shared backbone spine, for the map
+  waypointEtas: Record<string, string> | null; // waypointId → "HH:MM" the flock passes
   summary: { totalTogetherMinutes: number; pairwiseSummary: PairSummary[] };
   warnings: CalcWarning[];
   skipped: boolean;
@@ -175,6 +176,20 @@ function tAtLegs(legs: Leg[], km: number): number {
     else if (km > lg.lo) best = Math.max(best, lg.startSec + (km - lg.lo) * lg.paceSec);
   }
   return best;
+}
+
+/**
+ * Flock-clock seconds when the flock first ARRIVES at `km` (before any stop
+ * there) — the "passes through" time for a waypoint. Unlike tAtLegs, a rest leg
+ * at km returns the arrival, not the post-stop departure. Returns null if no run
+ * leg reaches km (nobody runs that far).
+ */
+function arrivalAtKm(legs: Leg[], km: number): number | null {
+  for (const lg of legs) {
+    if (lg.paceSec == null) continue; // rests don't define arrival; the run leg reaching km does
+    if (km <= lg.hi + EPS) return lg.startSec + Math.max(0, km - lg.lo) * lg.paceSec;
+  }
+  return null;
 }
 
 // --- best-response window optimisation --------------------------------------
@@ -605,17 +620,30 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
 
   for (const b of onBackbone) warnings.push(...buildWarnings(b));
 
+  // Per-waypoint pass-through times: one flock clock → one time each. Omit any
+  // waypoint the flock never reaches (km beyond everyone's furthest exit).
+  const maxExit = Math.max(0, ...onBackbone.map((b) => b.exitKm));
+  const waypointEtas: Record<string, string> = {};
+  for (const w of waypoints) {
+    const km = nearestKm(backbone, w.location);
+    if (km > maxExit + 0.05) continue;
+    const sec = arrivalAtKm(legs, km);
+    if (sec != null) waypointEtas[w.id] = secToTime(T0abs + sec);
+  }
+
   done({
     routes: routes.length,
     sharedSegments: sharedSegments.length,
     togetherWallMin: round2(togetherWallMin),
     systemTogetherMinutes: round2(systemTM),
+    waypointEtas: Object.keys(waypointEtas).length,
   });
 
   return {
     routes,
     sharedSegments,
     flockRoute: toLineString(backbone.coords),
+    waypointEtas: Object.keys(waypointEtas).length ? waypointEtas : null,
     summary: { totalTogetherMinutes: round2(togetherWallMin), pairwiseSummary },
     warnings,
     skipped: false,
@@ -752,5 +780,5 @@ function buildWarnings(b: RunnerBuild): CalcWarning[] {
 }
 
 function empty(skipped: boolean): CalcResult {
-  return { routes: [], sharedSegments: [], flockRoute: null, summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], skipped };
+  return { routes: [], sharedSegments: [], flockRoute: null, waypointEtas: null, summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], skipped };
 }
