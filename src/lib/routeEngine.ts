@@ -187,7 +187,9 @@ function tAtLegs(legs: Leg[], km: number): number {
 function arrivalAtKm(legs: Leg[], km: number): number | null {
   for (const lg of legs) {
     if (lg.paceSec == null) continue; // rests don't define arrival; the run leg reaching km does
-    if (km <= lg.hi + EPS) return lg.startSec + Math.max(0, km - lg.lo) * lg.paceSec;
+    // km must actually fall WITHIN this run leg — otherwise (a leading gap where
+    // nobody covers km, or km past the last leg) there's no arrival to report.
+    if (km >= lg.lo - EPS && km <= lg.hi + EPS) return lg.startSec + (km - lg.lo) * lg.paceSec;
   }
   return null;
 }
@@ -408,6 +410,27 @@ async function applyExtension(b: RunnerBuild, backbone: Backbone, T0abs: number)
     log.warn("extension ORS failed — runner stays short", { participantId: b.p.id.slice(0, 4) });
     return;
   }
+
+  // getRoundTrip returns ~surplus km but can overshoot. The tail is a hard add-on
+  // (enforceConstraints already ran on the backbone arc, not this), so re-check the
+  // ACTUAL loop against both hard caps and drop it rather than bust them. Same
+  // tolerances as enforceConstraints (+0.4 km, +60 s).
+  const totalKm = built + ors.distanceKm;
+  const exitAbs = T0abs + b.exitClockSec;
+  const arrival = exitAbs + (ors.distanceKm + b.egressKm) * b.ownPaceSec;
+  const bustsDistance = b.p.maxDistance != null && totalKm > b.p.maxDistance + 0.4;
+  const bustsTime = b.p.latestFinishTime != null && arrival > timeToSec(b.p.latestFinishTime) + 60;
+  if (bustsDistance || bustsTime) {
+    log.info("extension rejected (ORS overshoot would bust a cap)", {
+      participantId: b.p.id.slice(0, 4),
+      reqKm: round2(surplus),
+      gotKm: round2(ors.distanceKm),
+      bustsDistance,
+      bustsTime,
+    });
+    return;
+  }
+
   b.extensionKm = ors.distanceKm;
   b.extensionGeom = geomToLatLng(ors.geometry);
   log.info("solo extension", {
@@ -417,7 +440,7 @@ async function applyExtension(b: RunnerBuild, backbone: Backbone, T0abs: number)
     builtKm: round2(built),
     surplusKm: round2(surplus),
     extKm: round2(ors.distanceKm),
-    totalKm: round2(built + ors.distanceKm),
+    totalKm: round2(totalKm),
   });
 }
 

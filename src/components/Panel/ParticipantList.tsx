@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import ScheduleView from "@/components/Panel/ScheduleView";
 import { initial } from "@/lib/colors";
@@ -121,21 +121,47 @@ export default function ParticipantList() {
 
 /**
  * Per-person notes (constraint/routing warnings) shown as a small amber
- * indicator on the tile. Hover on desktop, tap on mobile — both toggle the
- * popover. Sits OUTSIDE the expand button (no nested buttons), so a tap here
- * doesn't also open the schedule.
+ * indicator on the tile. Hover on desktop; tap on mobile (tap-away or Escape
+ * dismisses). Sits OUTSIDE the expand button (no nested buttons), so a tap here
+ * doesn't also open the schedule. The popover is position:fixed off the button's
+ * rect so the panel's overflow-y-auto can't clip it near the list's bottom.
  */
 function WarningBadge({ messages }: { messages: string[] }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const show = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const right = window.innerWidth - r.right;
+    // Flip above the badge when there isn't room below (e.g. the mobile sheet).
+    setPos(r.bottom + 140 > window.innerHeight ? { bottom: window.innerHeight - r.top + 6, right } : { top: r.bottom + 6, right });
+    setOpen(true);
+  };
+  const hide = () => setOpen(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") hide();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
   return (
-    <span className="relative shrink-0">
+    <span className="shrink-0">
       <button
+        ref={btnRef}
         type="button"
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onBlur={hide}
         onClick={(e) => {
           e.stopPropagation();
-          setOpen((v) => !v);
+          if (open) hide();
+          else show();
         }}
         className="flex h-5 w-5 items-center justify-center rounded-full text-accent hover:bg-accent/15"
         aria-label={`${messages.length} note${messages.length > 1 ? "s" : ""} about this runner`}
@@ -143,10 +169,11 @@ function WarningBadge({ messages }: { messages: string[] }) {
       >
         <WarnIcon />
       </button>
-      {open && (
+      {open && pos && (
         <span
           role="tooltip"
-          className="absolute right-0 top-7 z-50 w-56 space-y-1.5 rounded-lg border border-accent/30 bg-surface-mid px-3 py-2 text-left text-xs text-text shadow-panel"
+          style={{ position: "fixed", top: pos.top, bottom: pos.bottom, right: pos.right }}
+          className="z-[1100] w-56 space-y-1.5 rounded-lg border border-accent/30 bg-surface-mid px-3 py-2 text-left text-xs text-text shadow-panel"
         >
           {messages.map((m, i) => (
             <span key={i} className="block leading-snug">

@@ -96,7 +96,8 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     action.action === "setUnit" ||
     action.action === "addWaypoint" ||
     action.action === "updateWaypoint" ||
-    action.action === "removeWaypoint";
+    action.action === "removeWaypoint" ||
+    action.action === "reorderWaypoints";
 
   if (locked && mutatesPlan) {
     log.info("rejected mutation on locked flock", { id, action: action.action });

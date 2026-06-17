@@ -154,18 +154,23 @@ export default function MapCanvas() {
 
   // Drag-to-move: a waypoint (shared, anyone) or a start pin you own. Leaflet has
   // already moved the marker; we persist the drop and the server echo re-pins it.
-  async function moveWaypoint(id: string, ll: L.LatLng) {
+  // On failure we snap the marker back to `origin` (the store position) so the map
+  // never shows a phantom location the server doesn't have.
+  async function moveWaypoint(id: string, marker: L.Marker, origin: LatLng) {
     if (!flockId) return;
+    const ll = marker.getLatLng();
     try {
       const updated = await updateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
       applyServerSession(updated, true);
       log.info("waypoint moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
     } catch (err) {
-      log.error("waypoint move failed", { error: String(err) });
+      marker.setLatLng(toLeaflet(origin));
+      log.error("waypoint move failed — reverted", { error: String(err) });
     }
   }
-  async function moveStart(id: string, ll: L.LatLng) {
+  async function moveStart(id: string, marker: L.Marker, origin: LatLng) {
     if (!flockId) return;
+    const ll = marker.getLatLng();
     try {
       const updated = await updateParticipant(flockId, id, {
         startLocation: { lat: ll.lat, lng: ll.lng },
@@ -173,7 +178,8 @@ export default function MapCanvas() {
       applyServerSession(updated, true);
       log.info("start moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
     } catch (err) {
-      log.error("start move failed", { error: String(err) });
+      marker.setLatLng(toLeaflet(origin));
+      log.error("start move failed — reverted", { error: String(err) });
     }
   }
 
@@ -385,7 +391,7 @@ export default function MapCanvas() {
               eventHandlers={{
                 mouseover: () => useFlockStore.getState().setHovered(p.id),
                 mouseout: () => useFlockStore.getState().setHovered(null),
-                dragend: (e) => moveStart(p.id, (e.target as L.Marker).getLatLng()),
+                dragend: (e) => moveStart(p.id, e.target as L.Marker, p.startLocation),
               }}
             >
               <Tooltip direction="top" offset={[0, -16]}>
@@ -417,7 +423,7 @@ export default function MapCanvas() {
             draggable={!locked}
             zIndexOffset={400}
             eventHandlers={{
-              dragend: (e) => moveWaypoint(w.id, (e.target as L.Marker).getLatLng()),
+              dragend: (e) => moveWaypoint(w.id, e.target as L.Marker, w.location),
             }}
           >
             <Tooltip direction="top" offset={[0, -22]}>
