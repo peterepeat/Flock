@@ -46,6 +46,12 @@ const EPS = 1e-6;
 // (the "never solo on the backbone" invariant). The single longest's surplus
 // distance — when it clears this margin — becomes a solo tail past the peel-off.
 const MIN_EXTENSION_KM = 1.5;
+// Opportunistic overlap: two runners on their APPROACH/EGRESS feeder legs count
+// as together when within this distance at the same instant, for at least this
+// long (filters incidental crossings). The backbone clock already handles the
+// shared route; this catches neighbours who run to/from the flock together.
+const OPP_OVERLAP_M = 60;
+const OPP_MIN_SEC = 120;
 
 const round2 = (v: number) => Number(v.toFixed(2));
 const crowKm = (a: LatLng, b: LatLng) => distanceMeters(a, b) / 1000;
@@ -192,6 +198,97 @@ function arrivalAtKm(legs: Leg[], km: number): number | null {
     if (km >= lg.lo - EPS && km <= lg.hi + EPS) return lg.startSec + (km - lg.lo) * lg.paceSec;
   }
   return null;
+}
+
+// --- opportunistic overlap on feeder (approach/egress) legs -----------------
+
+interface TimedPt {
+  ll: LatLng;
+  sec: number; // absolute seconds the runner is at this vertex
+}
+interface OppRun {
+  a: string;
+  b: string;
+  startSec: number;
+  endSec: number;
+  geom: LatLng[];
+}
+
+/** A feeder polyline timestamped by constant-pace travel from `startSec`. */
+function feederPoints(geom: LatLng[], startSec: number, paceSec: number): TimedPt[] {
+  const out: TimedPt[] = [];
+  let cum = 0;
+  for (let i = 0; i < geom.length; i++) {
+    if (i > 0) cum += distanceMeters(geom[i - 1], geom[i]) / 1000;
+    out.push({ ll: geom[i], sec: startSec + cum * paceSec });
+  }
+  return out;
+}
+
+/** Where a timed feeder is at absolute time `t` (null if outside its window). */
+function posAtTime(pts: TimedPt[], t: number): LatLng | null {
+  if (pts.length === 0 || t < pts[0].sec - EPS || t > pts[pts.length - 1].sec + EPS) return null;
+  for (let i = 1; i < pts.length; i++) {
+    if (t <= pts[i].sec) {
+      const a = pts[i - 1];
+      const c = pts[i];
+      const f = c.sec > a.sec ? (t - a.sec) / (c.sec - a.sec) : 0;
+      return { lat: a.ll.lat + (c.ll.lat - a.ll.lat) * f, lng: a.ll.lng + (c.ll.lng - a.ll.lng) * f };
+    }
+  }
+  return pts[pts.length - 1].ll;
+}
+
+/** Contiguous spans where feeder `fa` is within OPP_OVERLAP_M of `fb` at the same instant. */
+function feederRuns(fa: TimedPt[], fb: TimedPt[]): { startSec: number; endSec: number; geom: LatLng[] }[] {
+  const runs: { startSec: number; endSec: number; geom: LatLng[] }[] = [];
+  let cur: TimedPt[] = [];
+  const flush = () => {
+    if (cur.length >= 2 && cur[cur.length - 1].sec - cur[0].sec >= OPP_MIN_SEC) {
+      runs.push({ startSec: cur[0].sec, endSec: cur[cur.length - 1].sec, geom: cur.map((p) => p.ll) });
+    }
+    cur = [];
+  };
+  for (const a of fa) {
+    const bp = posAtTime(fb, a.sec);
+    if (bp && distanceMeters(a.ll, bp) <= OPP_OVERLAP_M) cur.push(a);
+    else flush();
+  }
+  flush();
+  return runs;
+}
+
+/**
+ * Find together-time on feeder legs: runners whose approach (or way home) paths
+ * coincide in space AND time. Pure bonus on top of the backbone legs — feeders
+ * are solo by construction, so this never double-counts shared-route time.
+ */
+function opportunisticOverlap(builds: RunnerBuild[], T0abs: number): OppRun[] {
+  const feeders = builds.map((b) => {
+    const list: TimedPt[][] = [];
+    if (b.approachKm > 0.2 && b.approachGeom.length >= 2) {
+      list.push(feederPoints(b.approachGeom, b.departHomeSec, b.ownPaceSec));
+    }
+    if (b.egressKm > 0.2 && b.egressGeom.length >= 2) {
+      const egressStart = T0abs + b.exitClockSec + b.extensionKm * b.ownPaceSec;
+      list.push(feederPoints(b.egressGeom, egressStart, b.ownPaceSec));
+    }
+    return { id: b.p.id, list };
+  });
+
+  const out: OppRun[] = [];
+  for (let i = 0; i < feeders.length; i++) {
+    for (let j = i + 1; j < feeders.length; j++) {
+      for (const fa of feeders[i].list) {
+        for (const fb of feeders[j].list) {
+          for (const run of feederRuns(fa, fb)) {
+            out.push({ a: feeders[i].id, b: feeders[j].id, ...run });
+          }
+        }
+      }
+    }
+  }
+  return out;
 }
 
 // --- best-response window optimisation --------------------------------------
@@ -636,6 +733,25 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
         if (lg.paceSec != null) pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
       }
   }
+  // Opportunistic overlap: bonus together-time where feeder legs coincide
+  // (neighbours running to/from the flock together). Pairwise by nature, folded
+  // into the same tallies and surfaced as extra shared segments on the map.
+  const oppRuns = opportunisticOverlap(onBackbone, T0abs);
+  for (const run of oppRuns) {
+    const durMin = (run.endSec - run.startSec) / 60;
+    togetherWallMin += durMin;
+    systemTM += durMin * 2; // a pair: n·(n−1) = 2
+    const key = [run.a, run.b].sort().join("|");
+    pairMin.set(key, (pairMin.get(key) ?? 0) + durMin);
+    pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+    sharedSegments.push({
+      participantIds: [run.a, run.b],
+      geometry: toLineString(run.geom),
+      overlapMinutes: round2(durMin),
+      startTime: secToTime(run.startSec),
+    });
+  }
+
   const pairwiseSummary: PairSummary[] = [...pairMin.entries()].map(([key, min]) => {
     const [a, b] = key.split("|");
     return { participantA: a, participantB: b, togetherMinutes: round2(min), togetherStretchCount: pairCount.get(key) ?? 0 };
@@ -657,6 +773,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   done({
     routes: routes.length,
     sharedSegments: sharedSegments.length,
+    opportunistic: oppRuns.length,
     togetherWallMin: round2(togetherWallMin),
     systemTogetherMinutes: round2(systemTM),
     waypointEtas: Object.keys(waypointEtas).length,
