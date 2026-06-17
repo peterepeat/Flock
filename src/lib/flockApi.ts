@@ -128,6 +128,15 @@ export async function reorderWaypoints(
   return session;
 }
 
+export async function importRoute(
+  flockId: string,
+  waypoints: Omit<FlockWaypoint, "id">[],
+  gpxPassthrough: string | null,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "importRoute", waypoints, gpxPassthrough });
+  return session;
+}
+
 export async function lockFlock(flockId: string): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "lock" });
   return session;

@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
-import { addWaypoint, FlockApiError, removeWaypoint, reorderWaypoints } from "@/lib/flockApi";
-import { buildFlockGpx } from "@/lib/flockGpx";
+import {
+  addWaypoint,
+  FlockApiError,
+  importRoute,
+  removeWaypoint,
+  reorderWaypoints,
+} from "@/lib/flockApi";
+import { buildFlockGpx, parseFlockGpx } from "@/lib/flockGpx";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import { useFlockStore } from "@/store/flockStore";
@@ -32,6 +38,8 @@ export default function WaypointsSection() {
   const [busy, setBusy] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
+  const [ioMsg, setIoMsg] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const locked = session?.lockedAt != null;
   const waypoints = session?.waypoints ?? [];
@@ -105,6 +113,32 @@ export default function WaypointsSection() {
     a.remove();
     URL.revokeObjectURL(url);
     log.info("route exported", { waypoints: waypoints.length });
+  }
+
+  async function handleImport(file: File) {
+    setIoMsg(null);
+    try {
+      const parsed = parseFlockGpx(await file.text());
+      if (parsed.waypoints.length === 0) {
+        setIoMsg(parsed.warnings[0] ?? "No route points found in that GPX.");
+        return;
+      }
+      const updated = await importRoute(flockId, parsed.waypoints, parsed.gpxPassthrough);
+      applyServerSession(updated, true);
+      setIoMsg(
+        parsed.warnings.length
+          ? parsed.warnings.join(" ")
+          : `Imported ${parsed.waypoints.length} waypoints.`,
+      );
+      log.info("route imported", { waypoints: parsed.waypoints.length });
+    } catch (err) {
+      setIoMsg(
+        err instanceof FlockApiError || err instanceof Error
+          ? err.message
+          : "Could not import that GPX.",
+      );
+      log.error("import failed", { error: String(err) });
+    }
   }
 
   // Drop the dragged waypoint into the target's slot; persist the new order.
@@ -292,11 +326,36 @@ export default function WaypointsSection() {
         </div>
       )}
 
-      {waypoints.length > 0 && (
-        <div className="flex items-center gap-4 border-t border-white/5 pt-3 text-xs">
-          <button type="button" onClick={handleExport} className="text-fog hover:text-text">
-            Export GPX
-          </button>
+      {(waypoints.length > 0 || !locked) && (
+        <div className="space-y-2 border-t border-white/5 pt-3">
+          <div className="flex items-center gap-4 text-xs">
+            {!locked && (
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                className="text-fog hover:text-text"
+              >
+                Import GPX
+              </button>
+            )}
+            {waypoints.length > 0 && (
+              <button type="button" onClick={handleExport} className="text-fog hover:text-text">
+                Export GPX
+              </button>
+            )}
+          </div>
+          {ioMsg && <p className="text-xs text-text-dim">{ioMsg}</p>}
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".gpx,application/gpx+xml,application/xml"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleImport(f);
+              e.target.value = ""; // allow re-importing the same file
+            }}
+          />
         </div>
       )}
     </div>
