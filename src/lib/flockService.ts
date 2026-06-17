@@ -34,6 +34,13 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** Any change to people/waypoints invalidates the computed plan. */
+function clearComputed(session: FlockSession): void {
+  session.computedRoutes = null;
+  session.sharedSegments = null;
+  session.flockRoute = null;
+}
+
 export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSession> {
   const store = getStore();
   const ts = now();
@@ -47,6 +54,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     waypoints: [],
     computedRoutes: null,
     sharedSegments: null,
+    flockRoute: null,
   };
   await store.createFlock(session);
   log.info("flock created", { id: session.id, unit: unitPreference, backend: store.backend });
@@ -133,8 +141,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.participants.push(participant);
       await store.setTokenHash(id, pid, hashToken(action.editToken));
       // Routes are now stale.
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("participant added", {
         id,
         participantId: pid,
@@ -172,8 +179,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         maxDistance: u.maxDistance !== undefined ? u.maxDistance : current.maxDistance,
         restStop: u.restStop !== undefined ? u.restStop : current.restStop,
       };
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("participant updated", { id, participantId: action.participantId });
       break;
     }
@@ -187,8 +193,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
 
       session.participants = session.participants.filter((x) => x.id !== action.participantId);
       await store.deleteTokenHash(id, action.participantId);
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("participant removed", { id, participantId: action.participantId });
       break;
     }
@@ -196,10 +201,12 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     case "setRoutes": {
       session.computedRoutes = action.computedRoutes;
       session.sharedSegments = action.sharedSegments;
+      session.flockRoute = action.flockRoute;
       log.info("routes updated", {
         id,
         routes: action.computedRoutes.length,
         shared: action.sharedSegments.length,
+        flockRoute: action.flockRoute ? action.flockRoute.coordinates.length : 0,
       });
       break;
     }
@@ -216,8 +223,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         stopMinutes: Math.max(0, w.stopMinutes ?? 0),
       };
       session.waypoints.push(waypoint);
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("waypoint added", { id, waypointId: waypoint.id, stopMinutes: waypoint.stopMinutes });
       break;
     }
@@ -234,8 +240,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         name: u.name?.trim() || cur.name,
         stopMinutes: u.stopMinutes != null ? Math.max(0, u.stopMinutes) : cur.stopMinutes,
       };
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("waypoint updated", { id, waypointId: action.waypointId });
       break;
     }
@@ -244,8 +249,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       const exists = session.waypoints.some((w) => w.id === action.waypointId);
       if (!exists) return { ok: false, status: 404, error: "Waypoint not found" };
       session.waypoints = session.waypoints.filter((w) => w.id !== action.waypointId);
-      session.computedRoutes = null;
-      session.sharedSegments = null;
+      clearComputed(session);
       log.info("waypoint removed", { id, waypointId: action.waypointId });
       break;
     }

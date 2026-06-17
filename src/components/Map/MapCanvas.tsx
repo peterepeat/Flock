@@ -125,10 +125,14 @@ export default function MapCanvas() {
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
   const sharedSegments = session?.sharedSegments ?? [];
+  const flockRoute = session?.flockRoute ?? null;
   const waypoints = session?.waypoints ?? [];
   const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
 
-  // Collect every point that should influence the viewport.
+  // Collect every point that should influence the viewport. We frame the drawn
+  // geometry (the flock route + everyone's routes), not just the start pins —
+  // otherwise a long loop runs off-screen. Route geometry is reduced to its
+  // bounding corners so FitBounds stays cheap (its signature is over `pts`).
   const allPoints = useMemo(() => {
     const pts: LatLng[] = [];
     for (const p of participants) {
@@ -137,8 +141,23 @@ export default function MapCanvas() {
     }
     for (const w of waypoints) pts.push(w.location);
     if (pendingStart) pts.push(pendingStart);
+
+    let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
+    let any = false;
+    const stretch = (lat: number, lng: number) => {
+      any = true;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    };
+    if (flockRoute) for (const [lng, lat] of flockRoute.coordinates) stretch(lat, lng);
+    for (const r of routes) for (const [lng, lat] of r.geometry.coordinates) stretch(lat, lng);
+    if (any) {
+      pts.push({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng });
+    }
     return pts;
-  }, [participants, waypoints, pendingStart]);
+  }, [participants, waypoints, pendingStart, flockRoute, routes]);
 
   return (
     <div className="relative h-full w-full">
@@ -157,6 +176,40 @@ export default function MapCanvas() {
 
         <ClickHandler />
         <FitBounds points={allPoints} />
+
+        {/* The Flock Route — the shared backbone spine the whole flock runs along.
+            A wide soft-white casing laid BENEATH every other line, so the common
+            route reads as one bright thread that the individual approach/egress
+            legs branch off from (the white-to-routes relationship mirrors the
+            black-casing-to-colour trick used per runner). */}
+        {flockRoute && flockRoute.coordinates.length > 1 && (
+          <>
+            <Polyline
+              key="flock-route-glow"
+              positions={flockRoute.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
+              pathOptions={{
+                color: "#ffffff",
+                weight: 34,
+                opacity: 0.12,
+                lineCap: "round",
+                lineJoin: "round",
+              }}
+              interactive={false}
+            />
+            <Polyline
+              key="flock-route-casing"
+              positions={flockRoute.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
+              pathOptions={{
+                color: "#ffffff",
+                weight: 22,
+                opacity: 0.7,
+                lineCap: "round",
+                lineJoin: "round",
+              }}
+              interactive={false}
+            />
+          </>
+        )}
 
         {/* Together overlay — the signature glowing underlay where the flock runs
             together (rendered BENEATH the routes). A wide soft halo + a brighter

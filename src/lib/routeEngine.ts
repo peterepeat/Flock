@@ -63,6 +63,7 @@ const earliestOf = (p: Participant) => timeToSec(p.earliestStartTime ?? DEFAULT_
 export interface CalcResult {
   routes: ComputedRoute[];
   sharedSegments: SharedSegment[];
+  flockRoute: GeoJSON.LineString | null; // the shared backbone spine, for the map
   summary: { totalTogetherMinutes: number; pairwiseSummary: PairSummary[] };
   warnings: CalcWarning[];
   skipped: boolean;
@@ -611,7 +612,14 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     systemTogetherMinutes: round2(systemTM),
   });
 
-  return { routes, sharedSegments, summary: { totalTogetherMinutes: round2(togetherWallMin), pairwiseSummary }, warnings, skipped: false };
+  return {
+    routes,
+    sharedSegments,
+    flockRoute: toLineString(backbone.coords),
+    summary: { totalTogetherMinutes: round2(togetherWallMin), pairwiseSummary },
+    warnings,
+    skipped: false,
+  };
 }
 
 // --- per-runner assembly ----------------------------------------------------
@@ -744,5 +752,5 @@ function buildWarnings(b: RunnerBuild): CalcWarning[] {
 }
 
 function empty(skipped: boolean): CalcResult {
-  return { routes: [], sharedSegments: [], summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], skipped };
+  return { routes: [], sharedSegments: [], flockRoute: null, summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], skipped };
 }

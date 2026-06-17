@@ -40,6 +40,7 @@ export async function POST(request: Request) {
         action: "setRoutes",
         computedRoutes: result.routes,
         sharedSegments: result.sharedSegments,
+        flockRoute: result.flockRoute,
       });
     }
 

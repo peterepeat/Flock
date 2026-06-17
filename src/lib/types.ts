@@ -98,6 +98,7 @@ export interface FlockSession {
   waypoints: FlockWaypoint[]; // shared waypoints everyone routes through
   computedRoutes: ComputedRoute[] | null; // null until first calculation
   sharedSegments: SharedSegment[] | null;
+  flockRoute: GeoJSON.LineString | null; // the shared backbone spine, for the map
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +129,12 @@ export type PatchAction =
       editToken: string;
     }
   | { action: "removeParticipant"; participantId: string; editToken: string }
-  | { action: "setRoutes"; computedRoutes: ComputedRoute[]; sharedSegments: SharedSegment[] }
+  | {
+      action: "setRoutes";
+      computedRoutes: ComputedRoute[];
+      sharedSegments: SharedSegment[];
+      flockRoute: GeoJSON.LineString | null;
+    }
   // Shared waypoints are universal — anyone can manage them (no edit token).
   | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id"> }
   | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
