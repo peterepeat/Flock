@@ -113,6 +113,106 @@ interface Leg {
   name?: string; // rest label
 }
 
+// --- legs / flock clock -----------------------------------------------------
+
+/** Segment the backbone into legs by peel + stop boundaries (reads b.arcKm). */
+function computeLegs(builds: RunnerBuild[], backbone: Backbone): Leg[] {
+  const total = backbone.totalKm;
+  const maxArc = Math.max(0, ...builds.map((b) => b.arcKm));
+  const boundarySet = new Set<number>([0]);
+  for (const b of builds) boundarySet.add(clampRound(b.arcKm, total));
+  for (const s of backbone.stops) if (s.km <= maxArc + EPS) boundarySet.add(clampRound(s.km, total));
+  const boundaries = [...boundarySet].filter((k) => k <= maxArc + EPS).sort((a, b) => a - b);
+
+  const legs: Leg[] = [];
+  let clock = 0;
+  for (let k = 0; k < boundaries.length; k++) {
+    const at = boundaries[k];
+    const stop = backbone.stops.find((s) => Math.abs(s.km - at) < 1e-3);
+    if (stop) {
+      const here = builds.filter((x) => x.arcKm >= at - EPS);
+      if (here.length > 0) {
+        const startSec = clock;
+        clock += stop.durationSec;
+        legs.push({ lo: at, hi: at, present: here.map((x) => x.p.id), paceSec: null, startSec, endSec: clock, name: stop.name });
+      }
+    }
+    if (k >= boundaries.length - 1) break;
+    const lo = at;
+    const hi = boundaries[k + 1];
+    if (hi - lo < EPS) continue;
+    const present = builds.filter((x) => x.arcKm >= hi - EPS);
+    if (present.length === 0) continue;
+    const paceSec = Math.max(...present.map((x) => x.ownPaceSec)); // slowest present
+    const startSec = clock;
+    clock += (hi - lo) * paceSec;
+    legs.push({ lo, hi, present: present.map((x) => x.p.id), paceSec, startSec, endSec: clock });
+  }
+  return legs;
+}
+
+/** Flock-clock time (seconds from km 0) at an arc position, incl. stops passed. */
+function tAtLegs(legs: Leg[], km: number): number {
+  let best = 0;
+  for (const lg of legs) {
+    if (lg.paceSec == null) {
+      if (lg.lo <= km + EPS) best = Math.max(best, lg.endSec);
+      continue;
+    }
+    if (km >= lg.hi - EPS) best = Math.max(best, lg.endSec);
+    else if (km > lg.lo) best = Math.max(best, lg.startSec + (km - lg.lo) * lg.paceSec);
+  }
+  return best;
+}
+
+/** Arrival home (abs seconds) if `b` peels at arc `a` (crow egress estimate). */
+function arrivalEstimate(b: RunnerBuild, a: number, legs: Leg[], backbone: Backbone, T0abs: number): number {
+  const egEst = crowKm(pointAtKm(backbone, a), b.home) * 1.3;
+  return T0abs + tAtLegs(legs, a) + egEst * b.ownPaceSec;
+}
+
+/**
+ * Trim arcs so anyone with a latest-finish makes it home in time. Tightest
+ * deadline first; each trim only speeds up later legs (monotone), so one pass
+ * converges. Re-fetches the egress geometry at each trimmed peel.
+ */
+async function trimForLatestFinish(builds: RunnerBuild[], backbone: Backbone, T0abs: number): Promise<void> {
+  const timed = builds
+    .filter((b) => b.p.latestFinishTime)
+    .sort((a, b) => timeToSec(a.p.latestFinishTime!) - timeToSec(b.p.latestFinishTime!));
+
+  for (const b of timed) {
+    const latest = timeToSec(b.p.latestFinishTime!);
+    const legs0 = computeLegs(builds, backbone);
+    const curArrival = T0abs + tAtLegs(legs0, b.arcKm) + b.egressKm * b.ownPaceSec;
+    if (curArrival <= latest + 60) continue; // 1 min slack
+
+    let lo = 0;
+    let hi = b.arcKm;
+    for (let it = 0; it < 18; it++) {
+      const mid = (lo + hi) / 2;
+      b.arcKm = mid; // computeLegs reads arcKm, so reflect the candidate
+      const legs = computeLegs(builds, backbone);
+      if (arrivalEstimate(b, mid, legs, backbone, T0abs) <= latest) lo = mid;
+      else hi = mid;
+    }
+    b.arcKm = lo;
+
+    try {
+      const eg = await legRoute(pointAtKm(backbone, b.arcKm), b.home);
+      b.egressKm = eg.distanceKm;
+      b.egressGeom = (eg.geometry.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
+    } catch {
+      /* keep prior egress */
+    }
+    log.info("trimmed for latest finish", {
+      participantId: b.p.id,
+      latest: secToTime(latest),
+      arcKm: round2(b.arcKm),
+    });
+  }
+}
+
 // --- public entry -----------------------------------------------------------
 
 export async function calculateRoutes(session: FlockSession): Promise<CalcResult> {
@@ -223,72 +323,23 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     });
   }
 
-  const maxArc = Math.max(...builds.map((b) => b.arcKm));
+  // Global anchor: flock at km 0 when everyone can have arrived (depends only on
+  // earliest-start + approach, so it's fixed before trimming).
+  const T0abs = Math.max(...builds.map((b) => b.earliestSec + b.approachKm * b.ownPaceSec));
 
-  // --- Legs: boundaries at every peel point + every stop, up to maxArc -------
-  const boundarySet = new Set<number>([0]);
-  for (const b of builds) boundarySet.add(clampRound(b.arcKm, total));
-  for (const s of backbone.stops) if (s.km <= maxArc + EPS) boundarySet.add(clampRound(s.km, total));
-  const boundaries = [...boundarySet].filter((k) => k <= maxArc + EPS).sort((a, b) => a - b);
+  // Latest-finish: trim arcs (peel earlier) for anyone who'd otherwise finish
+  // late. Monotone — trimming a slow runner only speeds up later legs — so one
+  // tightest-first pass converges without re-provoking route changes.
+  await trimForLatestFinish(builds, backbone, T0abs);
 
-  const legs: Leg[] = [];
-  let clock = 0; // flock-clock seconds from km 0
-  for (let k = 0; k < boundaries.length; k++) {
-    const at = boundaries[k];
+  const legs = computeLegs(builds, backbone);
+  const tAt = (km: number) => tAtLegs(legs, km);
 
-    // Shared stop AT this boundary (including the km-0 rendezvous café).
-    const stop = backbone.stops.find((s) => Math.abs(s.km - at) < 1e-3);
-    if (stop) {
-      const here = builds.filter((x) => x.arcKm >= at - EPS);
-      if (here.length > 0) {
-        const startSec = clock;
-        clock += stop.durationSec;
-        legs.push({
-          lo: at,
-          hi: at,
-          present: here.map((x) => x.p.id),
-          paceSec: null,
-          startSec,
-          endSec: clock,
-          name: stop.name,
-        });
-      }
-    }
-
-    if (k >= boundaries.length - 1) break;
-    const lo = at;
-    const hi = boundaries[k + 1];
-    if (hi - lo < EPS) continue;
-    const present = builds.filter((x) => x.arcKm >= hi - EPS);
-    if (present.length === 0) continue;
-    const paceSec = Math.max(...present.map((x) => x.ownPaceSec)); // slowest present
-    const startSec = clock;
-    clock += (hi - lo) * paceSec;
-    legs.push({ lo, hi, present: present.map((x) => x.p.id), paceSec, startSec, endSec: clock });
-  }
-
-  // Flock-clock time at an arc position (seconds from km 0), incl. stops passed.
-  const tAt = (km: number): number => {
-    let best = 0;
-    for (const lg of legs) {
-      if (lg.paceSec == null) {
-        if (lg.lo <= km + EPS) best = Math.max(best, lg.endSec);
-        continue;
-      }
-      if (km >= lg.hi - EPS) best = Math.max(best, lg.endSec);
-      else if (km > lg.lo) best = Math.max(best, lg.startSec + (km - lg.lo) * lg.paceSec);
-    }
-    return best;
-  };
-
-  // --- Global anchor: flock at km 0 when everyone can have arrived -----------
   for (const b of builds) {
     b.leaveBackboneSec = tAt(b.arcKm);
-  }
-  const T0abs = Math.max(...builds.map((b) => b.earliestSec + b.approachKm * b.ownPaceSec));
-  for (const b of builds) {
     b.departHomeSec = T0abs - b.approachKm * b.ownPaceSec;
   }
+  const maxArc = Math.max(...builds.map((b) => b.arcKm));
 
   log.info("flock plan", {
     flockId: session.id,
