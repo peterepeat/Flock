@@ -13,11 +13,9 @@ export default function FlockPanel() {
   const formOpen = useFlockStore((s) => s.formOpen);
   const editingId = useFlockStore((s) => s.editingParticipantId);
   const openAddForm = useFlockStore((s) => s.openAddForm);
-  const calcWarnings = useFlockStore((s) => s.calcWarnings);
   const [expanded, setExpanded] = useState(false);
 
   const locked = session?.lockedAt != null;
-  const nameOf = (id: string) => session?.participants.find((p) => p.id === id)?.name ?? "Someone";
   // Everyone has routes but nobody overlaps → too far apart.
   const withStart = session?.participants.filter((p) => p.startLocation).length ?? 0;
   const tooFarApart =
@@ -85,20 +83,8 @@ export default function FlockPanel() {
 
             {session && session.participants.length > 0 && <WaypointsSection />}
 
-            {/* Gentle constraint / routing warnings */}
-            {calcWarnings.length > 0 && (
-              <ul className="space-y-2">
-                {calcWarnings.map((w, i) => (
-                  <li
-                    key={i}
-                    className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-text"
-                  >
-                    <span className="font-medium">{nameOf(w.participantId)}:</span> {w.message}
-                  </li>
-                ))}
-              </ul>
-            )}
-
+            {/* Per-person warnings now live as an indicator on each tile
+                (ParticipantList). This stays for the whole-flock case. */}
             {tooFarApart && (
               <div className="rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
                 Everyone’s a bit too far apart to flock together on this one.
