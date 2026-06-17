@@ -14,6 +14,8 @@ import {
 } from "react-leaflet";
 
 import { initial } from "@/lib/colors";
+import { ownsParticipant } from "@/lib/editTokens";
+import { updateParticipant, updateWaypoint } from "@/lib/flockApi";
 import { toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
@@ -26,25 +28,29 @@ const log = createLogger("map");
 const DEFAULT_CENTER: [number, number] = [-37.8136, 144.9631];
 const DEFAULT_ZOOM = 13;
 
+const round4 = (n: number) => Number(n.toFixed(4));
+
 type MarkerKind = "start" | "finish" | "rest";
 
-function divMarker(color: string, label: string, kind: MarkerKind): L.DivIcon {
+function divMarker(color: string, label: string, kind: MarkerKind, draggable = false): L.DivIcon {
   const size = kind === "start" ? 30 : kind === "finish" ? 26 : 28;
   const anchor = size / 2;
+  const cursor = draggable ? ";cursor:grab" : "";
   return L.divIcon({
     className: "", // drop leaflet's default white box
-    html: `<div class="flock-marker flock-marker--${kind}" style="background:${color}">${label}</div>`,
+    html: `<div class="flock-marker flock-marker--${kind}" style="background:${color}${cursor}">${label}</div>`,
     iconSize: [size, size],
     iconAnchor: [anchor, anchor],
   });
 }
 
 /** A numbered pin for a shared waypoint (☕ if it has a stop). */
-function waypointIcon(order: number, hasStop: boolean): L.DivIcon {
+function waypointIcon(order: number, hasStop: boolean, draggable = false): L.DivIcon {
+  const cursor = draggable ? "cursor:grab;" : "";
   return L.divIcon({
     className: "",
     html:
-      `<div style="display:flex;align-items:center;justify-content:center;` +
+      `<div style="${cursor}display:flex;align-items:center;justify-content:center;` +
       `width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);` +
       `background:var(--text);border:2px solid var(--accent);` +
       `box-shadow:0 2px 8px rgba(0,0,0,0.5);">` +
@@ -66,6 +72,21 @@ function meetIcon(): L.DivIcon {
     iconSize: [16, 16],
     iconAnchor: [8, 8],
   });
+}
+
+/**
+ * Reflect "placing" mode as a crosshair cursor. MapContainer's `style` prop is
+ * create-only in react-leaflet (not re-applied on re-render), so we set the
+ * cursor imperatively on the live container instead.
+ */
+function CursorMode() {
+  const map = useMap();
+  const placingPin = useFlockStore((s) => s.placingPin);
+  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
+  useEffect(() => {
+    map.getContainer().style.cursor = placingPin || placingWaypoint ? "crosshair" : "";
+  }, [map, placingPin, placingWaypoint]);
+  return null;
 }
 
 /** Click-to-place handler for the start pin or a shared waypoint. */
@@ -119,15 +140,42 @@ export default function MapCanvas() {
   const session = useFlockStore((s) => s.session);
   const hovered = useFlockStore((s) => s.hoveredParticipantId);
   const pendingStart = useFlockStore((s) => s.pendingStart);
-  const placingPin = useFlockStore((s) => s.placingPin);
-  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
+
+  const flockId = useFlockStore((s) => s.flockId);
+  const applyServerSession = useFlockStore((s) => s.applyServerSession);
 
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
   const sharedSegments = session?.sharedSegments ?? [];
   const flockRoute = session?.flockRoute ?? null;
   const waypoints = session?.waypoints ?? [];
+  const locked = session?.lockedAt != null;
   const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
+
+  // Drag-to-move: a waypoint (shared, anyone) or a start pin you own. Leaflet has
+  // already moved the marker; we persist the drop and the server echo re-pins it.
+  async function moveWaypoint(id: string, ll: L.LatLng) {
+    if (!flockId) return;
+    try {
+      const updated = await updateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
+      applyServerSession(updated, true);
+      log.info("waypoint moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
+    } catch (err) {
+      log.error("waypoint move failed", { error: String(err) });
+    }
+  }
+  async function moveStart(id: string, ll: L.LatLng) {
+    if (!flockId) return;
+    try {
+      const updated = await updateParticipant(flockId, id, {
+        startLocation: { lat: ll.lat, lng: ll.lng },
+      });
+      applyServerSession(updated, true);
+      log.info("start moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
+    } catch (err) {
+      log.error("start move failed", { error: String(err) });
+    }
+  }
 
   // Collect every point that should influence the viewport. We frame the drawn
   // geometry (the flock route + everyone's routes), not just the start pins —
@@ -166,7 +214,6 @@ export default function MapCanvas() {
         zoom={DEFAULT_ZOOM}
         zoomControl={false}
         className="h-full w-full"
-        style={{ cursor: placingPin || placingWaypoint ? "crosshair" : "" }}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -175,6 +222,7 @@ export default function MapCanvas() {
         />
 
         <ClickHandler />
+        <CursorMode />
         <FitBounds points={allPoints} />
 
         {/* The Flock Route — the shared backbone spine the whole flock runs along.
@@ -325,26 +373,32 @@ export default function MapCanvas() {
           );
         })}
 
-        {/* Participant markers */}
-        {participants.map((p) => (
-          <Marker
-            key={`start-${p.id}`}
-            position={toLeaflet(p.startLocation)}
-            icon={divMarker(p.color, initial(p.name), "start")}
-            eventHandlers={{
-              mouseover: () => useFlockStore.getState().setHovered(p.id),
-              mouseout: () => useFlockStore.getState().setHovered(null),
-            }}
-          >
-            <Tooltip direction="top" offset={[0, -16]}>
-              <span className="mono">{p.name}</span>
-              {(() => {
-                const r = routes.find((x) => x.participantId === p.id);
-                return r ? ` · ${formatDistance(r.distanceKm, session!.unitPreference)}` : "";
-              })()}
-            </Tooltip>
-          </Marker>
-        ))}
+        {/* Participant markers — you can drag your own start to move it. */}
+        {participants.map((p) => {
+          const canDrag = !locked && !!flockId && ownsParticipant(flockId, p.id);
+          return (
+            <Marker
+              key={`start-${p.id}`}
+              position={toLeaflet(p.startLocation)}
+              icon={divMarker(p.color, initial(p.name), "start", canDrag)}
+              draggable={canDrag}
+              eventHandlers={{
+                mouseover: () => useFlockStore.getState().setHovered(p.id),
+                mouseout: () => useFlockStore.getState().setHovered(null),
+                dragend: (e) => moveStart(p.id, (e.target as L.Marker).getLatLng()),
+              }}
+            >
+              <Tooltip direction="top" offset={[0, -16]}>
+                <span className="mono">{p.name}</span>
+                {(() => {
+                  const r = routes.find((x) => x.participantId === p.id);
+                  return r ? ` · ${formatDistance(r.distanceKm, session!.unitPreference)}` : "";
+                })()}
+                {canDrag ? " · drag to move" : ""}
+              </Tooltip>
+            </Marker>
+          );
+        })}
         {participants
           .filter((p) => p.finishLocation)
           .map((p) => (
@@ -354,17 +408,22 @@ export default function MapCanvas() {
               icon={divMarker(p.color, initial(p.name), "finish")}
             />
           ))}
-        {/* Shared waypoints everyone routes through */}
+        {/* Shared waypoints everyone routes through — anyone can drag to reposition. */}
         {waypoints.map((w, i) => (
           <Marker
             key={`wp-${w.id}`}
             position={toLeaflet(w.location)}
-            icon={waypointIcon(i + 1, w.stopMinutes > 0)}
+            icon={waypointIcon(i + 1, w.stopMinutes > 0, !locked)}
+            draggable={!locked}
             zIndexOffset={400}
+            eventHandlers={{
+              dragend: (e) => moveWaypoint(w.id, (e.target as L.Marker).getLatLng()),
+            }}
           >
             <Tooltip direction="top" offset={[0, -22]}>
               <span className="mono">{w.name}</span>
               {w.stopMinutes > 0 ? ` · ${w.stopMinutes} min stop` : ""}
+              {!locked ? " · drag to move" : ""}
             </Tooltip>
           </Marker>
         ))}
