@@ -31,6 +31,7 @@ interface FlockState {
   // Route calculation feedback
   calcStatus: CalcStatus;
   calcWarnings: CalcWarning[];
+  calcError: string | null; // flock-level failure (e.g. quota) shown until it resolves
 
   setFlockId: (id: string) => void;
   setStatus: (status: FlockStatus) => void;
@@ -52,6 +53,7 @@ interface FlockState {
   setWaypointPin: (ll: LatLng | null) => void;
   setCalcStatus: (status: CalcStatus) => void;
   setCalcWarnings: (warnings: CalcWarning[]) => void;
+  setCalcError: (message: string | null) => void;
 }
 
 export const useFlockStore = create<FlockState>((set, get) => ({
@@ -75,6 +77,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
 
   calcStatus: "idle",
   calcWarnings: [],
+  calcError: null,
 
   setFlockId: (id) => set({ flockId: id }),
   setStatus: (status) => set({ status }),
@@ -118,4 +121,5 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setWaypointPin: (ll) => set({ waypointPin: ll }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
+  setCalcError: (message) => set({ calcError: message }),
 }));

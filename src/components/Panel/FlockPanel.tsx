@@ -13,6 +13,7 @@ export default function FlockPanel() {
   const formOpen = useFlockStore((s) => s.formOpen);
   const editingId = useFlockStore((s) => s.editingParticipantId);
   const openAddForm = useFlockStore((s) => s.openAddForm);
+  const calcError = useFlockStore((s) => s.calcError);
   const [expanded, setExpanded] = useState(false);
 
   const locked = session?.lockedAt != null;
@@ -82,6 +83,12 @@ export default function FlockPanel() {
             <ParticipantList />
 
             {session && session.participants.length > 0 && <WaypointsSection />}
+
+            {calcError && (
+              <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-text">
+                {calcError}
+              </div>
+            )}
 
             {/* Per-person warnings now live as an indicator on each tile
                 (ParticipantList). This stays for the whole-flock case. */}

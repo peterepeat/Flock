@@ -20,13 +20,20 @@ const log = createLogger("ors");
 const ORS_BASE = "https://api.openrouteservice.org/v2/directions/foot-hiking/geojson";
 const MAX_RETRIES = 2;
 
-export type RouteErrorCode = "no-key" | "no-route" | "rate-limited" | "ors-error" | "network";
+export type RouteErrorCode =
+  | "no-key"
+  | "no-route"
+  | "rate-limited" // transient per-minute burst — retryable
+  | "quota-exhausted" // daily quota spent — won't recover until resetAt
+  | "ors-error"
+  | "network";
 
 export class RouteError extends Error {
   constructor(
     public code: RouteErrorCode,
     message: string,
     public status?: number,
+    public resetAt?: number, // epoch seconds the daily quota resets (quota-exhausted only)
   ) {
     super(message);
     this.name = "RouteError";
@@ -141,8 +148,24 @@ async function call(body: CallBody, meta: Record<string, unknown>): Promise<OrsR
       });
 
       if (res.status === 429) {
+        // ORS returns 429 for BOTH the per-minute burst limit and the daily
+        // quota. x-ratelimit-* tracks the DAILY budget, so remaining "0" means
+        // the daily quota is spent (won't recover until reset) — distinct from a
+        // transient burst, which we back off + retry.
+        const remaining = res.headers.get("x-ratelimit-remaining");
+        const reset = Number(res.headers.get("x-ratelimit-reset"));
+        if (remaining === "0") {
+          log.warn("ORS daily quota exhausted", { reset, ...meta });
+          lastErr = new RouteError(
+            "quota-exhausted",
+            "Daily routing limit reached",
+            429,
+            Number.isFinite(reset) ? reset : undefined,
+          );
+          break; // retrying won't help until the quota resets
+        }
         const backoff = 500 * 2 ** attempt;
-        log.warn("ORS rate-limited", { attempt, backoff, ...meta });
+        log.warn("ORS rate-limited", { attempt, backoff, remaining, ...meta });
         lastErr = new RouteError("rate-limited", "ORS rate limit", 429);
         if (attempt < MAX_RETRIES) {
           await sleep(backoff);

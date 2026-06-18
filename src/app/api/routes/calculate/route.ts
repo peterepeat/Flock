@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { applyPatch, getFlock } from "@/lib/flockService";
 import { createLogger } from "@/lib/logger";
+import { RouteError } from "@/lib/ors";
 import { calculateRoutes } from "@/lib/routeEngine";
 
 const log = createLogger("api:routes/calculate");
@@ -63,6 +64,16 @@ export async function POST(request: Request) {
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
+    // Daily quota spent → a distinct, actionable signal (won't recover until
+    // reset), so the client can say so and stop hammering.
+    if (err instanceof RouteError && err.code === "quota-exhausted") {
+      log.warn("calculate hit daily quota", { flockId, resetAt: err.resetAt });
+      done({ quota: true });
+      return NextResponse.json(
+        { error: "Daily routing limit reached", code: "quota", resetAt: err.resetAt ?? null },
+        { status: 429 },
+      );
+    }
     log.error("calculate failed", { flockId, error: String(err) });
     done({ error: true });
     return NextResponse.json({ error: "Could not work out routes" }, { status: 500 });

@@ -8,55 +8,84 @@ import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("route-calc");
 const DEBOUNCE_MS = 2000;
+const MAX_ATTEMPTS = 4; // initial try + this many retries before giving up
+const backoffMs = (attempt: number) => Math.min(3000 * 2 ** attempt, 30000);
+const fmtTime = (epochSec: number) =>
+  new Date(epochSec * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /**
  * Watches the session and, whenever routes are stale (computedRoutes === null)
  * and at least one participant has a start, debounces 2s and asks the server to
  * (re)calculate. The server persists the result; every polling client then picks
- * the routes up. Guards prevent duplicate firing for the same session version.
+ * the routes up.
  *
- * All clients run this; a per-updatedAt guard + small jitter keep redundant ORS
- * calls down (and the server caches identical ORS requests within a warm
- * instance). This is intentionally simple and heavily logged so the trigger
- * behaviour is easy to observe and tune.
+ * A transient failure (a 500, network blip, ORS burst limit) now SELF-HEALS:
+ * the same session version is retried with exponential backoff instead of
+ * stalling until something changes. A daily-quota 429 is terminal — we surface
+ * "resets ~HH:MM" and stop hammering until the next edit.
  */
 export function useRouteCalculation(flockId: string) {
   const session = useFlockStore((s) => s.session);
   const setCalcStatus = useFlockStore((s) => s.setCalcStatus);
   const setCalcWarnings = useFlockStore((s) => s.setCalcWarnings);
+  const setCalcError = useFlockStore((s) => s.setCalcError);
 
   const triggeredForUpdatedAt = useRef<string | null>(null);
   const inFlight = useRef(false);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const updatedAt = session?.updatedAt ?? null;
   const routesPresent = session?.computedRoutes != null;
   const withStart = session?.participants.filter((p) => p.startLocation).length ?? 0;
 
   useEffect(() => {
-    if (!session) return;
+    const clearRetry = () => {
+      if (retryTimer.current) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+      }
+    };
 
+    if (!session) return;
     if (routesPresent) {
       setCalcStatus("idle");
+      setCalcError(null);
+      clearRetry();
       return;
     }
     if (withStart < 1) return;
-    if (triggeredForUpdatedAt.current === updatedAt) return;
+    if (triggeredForUpdatedAt.current === updatedAt) return; // already running/handled this version
     if (inFlight.current) return;
 
-    const jitter = Math.floor(Math.random() * 800);
-    log.debug("scheduling calculation", { updatedAt, withStart, debounceMs: DEBOUNCE_MS + jitter });
+    triggeredForUpdatedAt.current = updatedAt;
+    let attempt = 0;
 
-    const timer = setTimeout(async () => {
-      triggeredForUpdatedAt.current = updatedAt;
+    const runCalc = async () => {
+      if (inFlight.current) return;
       inFlight.current = true;
       setCalcStatus("working");
-      const done = log.time("trigger-calculate", { flockId, updatedAt });
+      const done = log.time("trigger-calculate", { flockId, updatedAt, attempt });
+      let retry = false;
       try {
         const res = await fetch("/api/routes/calculate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ flockId }),
         });
+        if (res.status === 429) {
+          const data = (await res.json().catch(() => ({}))) as { code?: string; resetAt?: number };
+          if (data?.code === "quota") {
+            const when = data.resetAt ? fmtTime(data.resetAt) : null;
+            setCalcError(
+              when
+                ? `Daily routing limit reached — routes will work again after ~${when}.`
+                : "Daily routing limit reached — routes will work again once it resets.",
+            );
+            setCalcStatus("error");
+            done({ quota: true });
+            return; // terminal until the next edit
+          }
+        }
         if (!res.ok) throw new Error(`status ${res.status}`);
         const data = (await res.json()) as {
           warnings: CalcWarning[];
@@ -64,21 +93,36 @@ export function useRouteCalculation(flockId: string) {
           sharedCount: number;
         };
         setCalcWarnings(data.warnings ?? []);
+        setCalcError(null);
         setCalcStatus("idle");
         done({ routes: data.routeCount, shared: data.sharedCount, warnings: data.warnings?.length });
       } catch (err) {
-        log.error("calculation failed", { flockId, error: String(err) });
+        log.error("calculation failed", { flockId, attempt, error: String(err) });
         setCalcStatus("error");
-        done({ error: true });
-        // Allow a retry on a later poll after a short cool-off.
-        setTimeout(() => {
-          triggeredForUpdatedAt.current = null;
-        }, 8000);
+        done({ error: true, attempt });
+        if (attempt < MAX_ATTEMPTS) {
+          retry = true;
+        } else {
+          setCalcError("Couldn't work out routes after a few tries — change anything to retry.");
+        }
       } finally {
         inFlight.current = false;
       }
-    }, DEBOUNCE_MS + jitter);
+      if (retry) {
+        const delay = backoffMs(attempt);
+        attempt += 1;
+        log.debug("retrying calculation", { flockId, attempt, delay });
+        retryTimer.current = setTimeout(runCalc, delay);
+      }
+    };
 
-    return () => clearTimeout(timer);
-  }, [session, updatedAt, routesPresent, withStart, flockId, setCalcStatus, setCalcWarnings]);
+    const jitter = Math.floor(Math.random() * 800);
+    log.debug("scheduling calculation", { updatedAt, withStart, debounceMs: DEBOUNCE_MS + jitter });
+    const first = setTimeout(runCalc, DEBOUNCE_MS + jitter);
+
+    return () => {
+      clearTimeout(first);
+      clearRetry();
+    };
+  }, [session, updatedAt, routesPresent, withStart, flockId, setCalcStatus, setCalcWarnings, setCalcError]);
 }

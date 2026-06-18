@@ -642,13 +642,13 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     } else {
       const code = r.reason instanceof RouteError ? r.reason.code : "ors-error";
       log.warn("runner route failed", { participantId: runners[i].id, code });
-      warnings.push({
-        participantId: runners[i].id,
-        message:
-          code === "no-route"
-            ? "We couldn't find a runnable route from your start — try moving your pin."
-            : "Routes are taking longer than usual — trying again shortly.",
-      });
+      const message =
+        code === "no-route"
+          ? "We couldn't find a runnable route from your start — try moving your pin."
+          : code === "quota-exhausted"
+            ? "Daily routing limit reached — routes will work again once it resets."
+            : "Routes are taking longer than usual — trying again shortly.";
+      warnings.push({ participantId: runners[i].id, message });
     }
   });
   if (builds.length === 0) {
