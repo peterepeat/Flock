@@ -68,15 +68,34 @@ export async function getRoute(waypoints: LatLng[]): Promise<OrsRoute> {
 
 /**
  * Round-trip loop route starting and ending at `start`, ~lengthKm long.
+ *
+ * ORS builds round-trips from RANDOM bearings keyed by `seed`, so for a given
+ * point + length one seed can fail to close the loop ("2009 — unable to find a
+ * route for point") while another succeeds. We retry a handful of seeds on that
+ * specific no-route failure (rate-limit / network errors propagate immediately,
+ * so we don't burn the per-minute budget).
  */
 export async function getRoundTrip(start: LatLng, lengthKm: number, seed = 1): Promise<OrsRoute> {
   const coordinates = [toORS(start)];
-  const roundTrip: RoundTripOpts = {
-    lengthMeters: Math.round(lengthKm * 1000),
-    seed,
-    points: 4,
-  };
-  return call({ coordinates, roundTrip }, { kind: "loop", lengthKm });
+  const seeds = [seed, seed + 1, seed + 3, seed + 7, seed + 17];
+  let lastErr: RouteError | null = null;
+  for (let i = 0; i < seeds.length; i++) {
+    const s = seeds[i];
+    try {
+      return await call(
+        { coordinates, roundTrip: { lengthMeters: Math.round(lengthKm * 1000), seed: s, points: 4 } },
+        { kind: "loop", lengthKm, seed: s, seedAttempt: i },
+      );
+    } catch (err) {
+      if (err instanceof RouteError && err.code === "no-route") {
+        lastErr = err; // unlucky seed — try the next one
+        continue;
+      }
+      throw err; // rate-limit / network / config — don't waste more seeds
+    }
+  }
+  log.warn("round-trip failed for every seed", { lengthKm, seeds: seeds.length });
+  throw lastErr ?? new RouteError("no-route", "No round-trip route found");
 }
 
 interface CallBody {
