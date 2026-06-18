@@ -16,7 +16,7 @@ import {
 import { initial } from "@/lib/colors";
 import { ownsParticipant } from "@/lib/editTokens";
 import { updateParticipant, updateWaypoint } from "@/lib/flockApi";
-import { toLeaflet } from "@/lib/geo";
+import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
@@ -58,6 +58,25 @@ function waypointIcon(order: number, hasStop: boolean, draggable = false): L.Div
       `${hasStop ? "☕" : order}</span></div>`,
     iconSize: [26, 26],
     iconAnchor: [13, 24],
+  });
+}
+
+// Direction-of-travel chevrons are sampled along the flock spine at this ground
+// spacing (metres). Sparse enough to read as flow, not as a dotted line.
+const SPINE_ARROW_SPACING_M = 700;
+
+/** A chevron pointing along the flock's direction of travel (deg clockwise from north). */
+function arrowIcon(deg: number): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html:
+      `<div style="transform:rotate(${deg}deg);width:16px;height:16px;` +
+      `filter:drop-shadow(0 0 1px rgba(255,255,255,0.9));">` +
+      `<svg viewBox="0 0 16 16" width="16" height="16">` +
+      `<path d="M4 10 L8 5 L12 10" fill="none" stroke="#0b1413" stroke-width="2.4" ` +
+      `stroke-linecap="round" stroke-linejoin="round"/></svg></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
   });
 }
 
@@ -223,6 +242,33 @@ export default function MapCanvas() {
     return pts;
   }, [participants, waypoints, pendingStart, flockRoute, routes]);
 
+  // Direction-of-travel chevrons along the flock spine: walk the snapped line by
+  // ground distance, dropping a chevron every SPINE_ARROW_SPACING_M oriented to
+  // the local heading. First one at half-spacing so it doesn't sit on the
+  // rendezvous marker. Spine-only keeps it uncluttered (per-runner direction is
+  // a later, selection-scoped concern).
+  const spineArrows = useMemo(() => {
+    if (!flockRoute || flockRoute.coordinates.length < 2) return [];
+    const pts = flockRoute.coordinates.map(([lng, lat]) => ({ lat, lng }) as LatLng);
+    const out: { lat: number; lng: number; deg: number }[] = [];
+    let acc = 0;
+    let next = SPINE_ARROW_SPACING_M / 2;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const segLen = distanceMeters(a, b);
+      if (segLen < 1e-6) continue;
+      const deg = (bearingRad(a, b) * 180) / Math.PI;
+      while (next <= acc + segLen) {
+        const f = (next - acc) / segLen;
+        out.push({ lat: a.lat + (b.lat - a.lat) * f, lng: a.lng + (b.lng - a.lng) * f, deg });
+        next += SPINE_ARROW_SPACING_M;
+      }
+      acc += segLen;
+    }
+    return out;
+  }, [flockRoute]);
+
   return (
     <div className="relative h-full w-full">
       <MapContainer
@@ -274,6 +320,18 @@ export default function MapCanvas() {
             />
           </>
         )}
+
+        {/* Direction-of-travel chevrons on the spine (non-interactive, below the
+            participant/waypoint pins via a negative z-offset). */}
+        {spineArrows.map((ar, i) => (
+          <Marker
+            key={`spine-arrow-${i}`}
+            position={[ar.lat, ar.lng]}
+            icon={arrowIcon(ar.deg)}
+            interactive={false}
+            zIndexOffset={-100}
+          />
+        ))}
 
         {/* Together overlay — the signature glowing underlay where the flock runs
             together (rendered BENEATH the routes). A wide soft halo + a brighter
