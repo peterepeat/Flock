@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Field from "@/components/ui/Field";
 import RangeSlider from "@/components/ui/RangeSlider";
+import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import {
   addParticipant,
@@ -18,6 +19,7 @@ import type { LatLng, ParticipantConstraints, Unit } from "@/lib/types";
 import {
   DISTANCE_MAX_KM,
   DISTANCE_MIN_KM,
+  DISTANCE_TARGET_BAND,
   formatDistance,
   formatPace,
   PACE_MAX_SEC_PER_KM,
@@ -43,11 +45,9 @@ interface Draft {
   finishLocation: LatLng | null;
   finishAddress: string | null;
   distanceOn: boolean;
-  preferredDistance: number;
-  maxDistance: number;
+  distanceKm: number; // single "how far" target
   paceOn: boolean;
-  maxPace: number; // faster (lower sec/km)
-  preferredPace: number; // slower (higher sec/km)
+  paceSec: number; // single comfortable pace (sec/km)
   timeOn: boolean;
   earliestMin: number; // can't leave before (minutes since midnight)
   latestMin: number; // must be done by
@@ -62,11 +62,9 @@ function emptyDraft(): Draft {
     finishLocation: null,
     finishAddress: null,
     distanceOn: false,
-    preferredDistance: 8,
-    maxDistance: 12,
+    distanceKm: 8,
     paceOn: false,
-    maxPace: 300, // 5:00 /km
-    preferredPace: 360, // 6:00 /km
+    paceSec: 360, // 6:00 /km — a comfortable default
     timeOn: false,
     earliestMin: 7 * 60, // 07:00
     latestMin: 10 * 60, // 10:00
@@ -119,11 +117,9 @@ export default function ParticipantForm() {
         finishLocation: existing.finishLocation,
         finishAddress: existing.finishAddress,
         distanceOn: existing.preferredDistance != null,
-        preferredDistance: existing.preferredDistance ?? 8,
-        maxDistance: existing.maxDistance ?? existing.preferredDistance ?? 12,
+        distanceKm: existing.preferredDistance ?? 8,
         paceOn: existing.preferredPace != null,
-        maxPace: existing.maxPace ?? 300,
-        preferredPace: existing.preferredPace ?? 360,
+        paceSec: existing.preferredPace ?? 360,
         timeOn: existing.earliestStartTime != null || existing.latestFinishTime != null,
         earliestMin: toMin(existing.earliestStartTime, 7 * 60),
         latestMin: toMin(existing.latestFinishTime, 10 * 60),
@@ -174,10 +170,15 @@ export default function ParticipantForm() {
       finishLocation: d.finishMode === "elsewhere" ? d.finishLocation : null,
       finishAddress: d.finishMode === "elsewhere" ? d.finishAddress : null,
       latestFinishTime: d.timeOn ? secToTime(d.latestMin * 60) : null,
-      preferredPace: d.paceOn ? d.preferredPace : null,
-      maxPace: d.paceOn ? d.maxPace : null,
-      preferredDistance: d.distanceOn ? d.preferredDistance : null,
-      maxDistance: d.distanceOn ? d.maxDistance : null,
+      // One stated pace → the engine's only pace input. maxPace is unused by the
+      // engine (the flock runs at the slowest present preferred pace), so it's null.
+      preferredPace: d.paceOn ? d.paceSec : null,
+      maxPace: null,
+      // One stated distance → the engine's target. maxDistance is handed a small
+      // headroom band so the stated number reads as "about this far" (a target to
+      // centre on), not a hard ceiling. See DISTANCE_TARGET_BAND in units.ts.
+      preferredDistance: d.distanceOn ? d.distanceKm : null,
+      maxDistance: d.distanceOn ? Math.round(d.distanceKm * (1 + DISTANCE_TARGET_BAND) * 10) / 10 : null,
       restStop: null, // stops are now shared waypoints, set by the flock
     };
   }
@@ -354,38 +355,31 @@ export default function ParticipantForm() {
         )}
       </Field>
 
-      {/* Distance */}
+      {/* Distance — a single target the flock centres your run on, not a hard cap. */}
       <Field label="How far do you want to run?" optional>
         <Toggle
           options={[
             { value: "off", label: "No preference" },
-            { value: "on", label: "Set a range" },
+            { value: "on", label: "Set a distance" },
           ]}
           value={draft.distanceOn ? "on" : "off"}
           onChange={(v) => set("distanceOn", v === "on")}
         />
         {draft.distanceOn && (
           <div className="mt-3">
-            <RangeSlider
+            <Slider
               min={DISTANCE_MIN_KM}
               max={DISTANCE_MAX_KM}
-              low={draft.preferredDistance}
-              high={draft.maxDistance}
-              onChange={(low, high) => {
-                set("preferredDistance", low);
-                set("maxDistance", high);
-              }}
+              value={draft.distanceKm}
+              onChange={(v) => set("distanceKm", v)}
               format={(v) => formatDistance(v, unit)}
-              leftThumb="heart"
-              rightThumb="square"
-              leftLabel="I'd love this far"
-              rightLabel="Up to this far"
             />
+            <p className="mt-1 text-xs text-fog">Roughly this far — we’ll get you close.</p>
           </div>
         )}
       </Field>
 
-      {/* Pace */}
+      {/* Pace — a single comfortable pace; the flock runs at the slowest one present. */}
       <Field label="How fast do you run?" optional>
         <Toggle
           options={[
@@ -397,22 +391,15 @@ export default function ParticipantForm() {
         />
         {draft.paceOn && (
           <div className="mt-3">
-            <RangeSlider
+            <Slider
               min={PACE_MIN_SEC_PER_KM}
               max={PACE_MAX_SEC_PER_KM}
               step={5}
-              low={draft.maxPace}
-              high={draft.preferredPace}
-              onChange={(low, high) => {
-                set("maxPace", low);
-                set("preferredPace", high);
-              }}
+              value={draft.paceSec}
+              onChange={(v) => set("paceSec", v)}
               format={(v) => formatPace(v, unit)}
-              leftThumb="square"
-              rightThumb="heart"
-              leftLabel="I can handle this pace"
-              rightLabel="I love this pace"
             />
+            <p className="mt-1 text-xs text-fog">Your comfortable pace — the flock keeps to its slowest.</p>
           </div>
         )}
       </Field>

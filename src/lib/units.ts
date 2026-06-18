@@ -98,3 +98,11 @@ export const DEFAULT_LOOP_DISTANCE_KM = 5;
 // Distance slider bounds (internal km).
 export const DISTANCE_MIN_KM = 1;
 export const DISTANCE_MAX_KM = 80;
+
+// A runner now states a single "how far" target rather than a love→cap range.
+// The engine still treats preferredDistance as the target and maxDistance as a
+// trim guardrail, so we hand it a small headroom band above the target — the
+// plan can run up to ~this fraction over before it's trimmed. That makes the
+// stated number read as "about this far" (a target to centre on) rather than a
+// hard ceiling. Tunable: lower it to hug the stated number more tightly.
+export const DISTANCE_TARGET_BAND = 0.15;
