@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
@@ -11,6 +11,7 @@ import {
   importRoute,
   removeWaypoint,
   reorderWaypoints,
+  updateWaypoint,
 } from "@/lib/flockApi";
 import { buildFlockGpx, parseFlockGpx } from "@/lib/flockGpx";
 import { createLogger } from "@/lib/logger";
@@ -19,82 +20,74 @@ import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("waypoints");
 
+interface EditorData {
+  name: string;
+  address: string;
+  location: LatLng;
+  stopMinutes: number;
+}
+
+// One editor is open at a time: the add form, or one row's inline edit.
+type EditorState = { mode: "closed" } | { mode: "add" } | { mode: "edit"; id: string };
+
 export default function WaypointsSection() {
   const flockId = useFlockStore((s) => s.flockId)!;
   const session = useFlockStore((s) => s.session);
   const applyServerSession = useFlockStore((s) => s.applyServerSession);
-  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
-  const setPlacingWaypoint = useFlockStore((s) => s.setPlacingWaypoint);
   const waypointPin = useFlockStore((s) => s.waypointPin);
-  const setWaypointPin = useFlockStore((s) => s.setWaypointPin);
 
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState("");
-  const [location, setLocation] = useState<LatLng | null>(null);
-  const [address, setAddress] = useState("");
-  const [stopOn, setStopOn] = useState(false);
-  const [stopMinutes, setStopMinutes] = useState(20);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [editor, setEditor] = useState<EditorState>({ mode: "closed" });
   const [dragId, setDragId] = useState<string | null>(null);
-  const [overId, setOverId] = useState<string | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
   const [ioMsg, setIoMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const draggingRef = useRef(false);
 
   const locked = session?.lockedAt != null;
   const waypoints = session?.waypoints ?? [];
   const waypointEtas = session?.waypointEtas ?? {};
 
-  // Fold a map-dropped pin into the add form.
+  // A pin dropped on the map with no editor open starts a fresh add (the open
+  // editor, if any, folds the pin in itself — see WaypointEditor).
   useEffect(() => {
-    if (waypointPin) {
-      setLocation(waypointPin);
-      setAddress((a) => a || "Dropped pin");
-      setPlacingWaypoint(false);
-      setWaypointPin(null);
-      setAdding(true);
-    }
-  }, [waypointPin, setPlacingWaypoint, setWaypointPin]);
+    if (waypointPin) setEditor((e) => (e.mode === "closed" ? { mode: "add" } : e));
+  }, [waypointPin]);
 
-  function resetForm() {
-    setName("");
-    setLocation(null);
-    setAddress("");
-    setStopOn(false);
-    setStopMinutes(20);
-    setError(null);
-    setAdding(false);
-    setPlacingWaypoint(false);
+  // Reconcile the editor against the live session: if the row being edited
+  // disappears (a concurrent remove via polling) or the flock gets locked
+  // mid-edit/add, collapse the editor — otherwise the panel wedges with no
+  // editor AND no "+ Add" button (both gated on the editor state).
+  useEffect(() => {
+    const wps = session?.waypoints ?? [];
+    const isLocked = session?.lockedAt != null;
+    setEditor((e) => {
+      if (e.mode === "edit" && (isLocked || !wps.some((w) => w.id === e.id))) return { mode: "closed" };
+      if (e.mode === "add" && isLocked) return { mode: "closed" };
+      return e;
+    });
+  }, [session]);
+
+  const close = () => setEditor({ mode: "closed" });
+
+  async function handleAdd(data: EditorData) {
+    const updated = await addWaypoint(flockId, { ...data });
+    applyServerSession(updated, true);
+    close();
+    log.info("waypoint added", { stop: data.stopMinutes });
   }
 
-  async function handleAdd() {
-    if (!location) {
-      setError("Pick a place first.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await addWaypoint(flockId, {
-        location,
-        address,
-        name: name.trim() || address || "Waypoint",
-        stopMinutes: stopOn ? stopMinutes : 0,
-      });
-      applyServerSession(updated, true);
-      log.info("waypoint added", { stop: stopOn ? stopMinutes : 0 });
-      resetForm();
-    } catch (err) {
-      setError(err instanceof FlockApiError ? err.message : "Could not add waypoint");
-    } finally {
-      setBusy(false);
-    }
+  async function handleSave(id: string, data: EditorData) {
+    const updated = await updateWaypoint(flockId, id, { ...data });
+    applyServerSession(updated, true);
+    close();
+    log.info("waypoint edited", { id: id.slice(0, 4) });
   }
 
   async function handleRemove(id: string) {
     try {
       const updated = await removeWaypoint(flockId, id);
       applyServerSession(updated, true);
+      if (editor.mode === "edit" && editor.id === id) close();
     } catch (err) {
       log.error("remove failed", { error: String(err) });
     }
@@ -141,14 +134,17 @@ export default function WaypointsSection() {
     }
   }
 
-  // Drop the dragged waypoint into the target's slot; persist the new order.
-  async function handleReorder(targetId: string) {
-    if (!dragId || dragId === targetId) return;
-    const ids = waypoints.map((w) => w.id);
-    const from = ids.indexOf(dragId);
-    const to = ids.indexOf(targetId);
-    if (from === -1 || to === -1) return;
-    ids.splice(to, 0, ids.splice(from, 1)[0]);
+  // Move the dragged waypoint to gap index `to` (0..length); persist the order.
+  async function handleReorder(to: number) {
+    if (dragId == null) return;
+    const orig = waypoints.map((w) => w.id);
+    const from = orig.indexOf(dragId);
+    if (from === -1) return;
+    const ids = [...orig];
+    ids.splice(from, 1);
+    // Removing an earlier item shifts every later gap left by one.
+    ids.splice(from < to ? to - 1 : to, 0, dragId);
+    if (ids.every((id, k) => id === orig[k])) return; // no change
     try {
       const updated = await reorderWaypoints(flockId, ids);
       applyServerSession(updated, true);
@@ -159,6 +155,12 @@ export default function WaypointsSection() {
   }
 
   if (locked && waypoints.length === 0) return null;
+
+  const canReorder = !locked && waypoints.length > 1 && editor.mode === "closed";
+  const dropLine = (gap: number) =>
+    dragId != null && overIndex === gap ? (
+      <li aria-hidden className="h-[2px] rounded-full bg-accent" />
+    ) : null;
 
   return (
     <div className="space-y-3 rounded-xl bg-surface p-4">
@@ -176,154 +178,127 @@ export default function WaypointsSection() {
       {waypoints.length > 0 && (
         <ul className="space-y-1.5">
           {waypoints.map((w, i) => {
-            const canReorder = !locked && waypoints.length > 1;
+            const editing = editor.mode === "edit" && editor.id === w.id && !locked;
             const eta = waypointEtas[w.id];
             return (
-              <li
-                key={w.id}
-                draggable={canReorder}
-                onDragStart={() => setDragId(w.id)}
-                onDragEnter={() => canReorder && setOverId(w.id)}
-                onDragOver={(e) => {
-                  if (canReorder) e.preventDefault();
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  void handleReorder(w.id);
-                  setDragId(null);
-                  setOverId(null);
-                }}
-                onDragEnd={() => {
-                  setDragId(null);
-                  setOverId(null);
-                }}
-                className={`flex items-center gap-2 rounded-lg bg-surface-mid px-2.5 py-2 transition ${
-                  dragId === w.id ? "opacity-40" : ""
-                } ${overId === w.id && dragId !== w.id ? "ring-1 ring-accent/70" : ""}`}
-              >
-                {canReorder && (
-                  <span
-                    className="shrink-0 cursor-grab text-fog active:cursor-grabbing"
-                    aria-hidden
-                    title="Drag to reorder"
+              <Fragment key={w.id}>
+                {dropLine(i)}
+                {editing ? (
+                  <li>
+                    <WaypointEditor
+                      initial={{
+                        name: w.name,
+                        address: w.address,
+                        location: w.location,
+                        stopMinutes: w.stopMinutes,
+                      }}
+                      submitLabel="Save"
+                      onSubmit={(d) => handleSave(w.id, d)}
+                      onCancel={close}
+                    />
+                  </li>
+                ) : (
+                  <li
+                    draggable={canReorder}
+                    onDragStart={() => {
+                      draggingRef.current = true;
+                      setDragId(w.id);
+                    }}
+                    onDragOver={(e) => {
+                      if (!canReorder || dragId == null) return;
+                      e.preventDefault();
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setOverIndex(e.clientY < r.top + r.height / 2 ? i : i + 1);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (overIndex != null) void handleReorder(overIndex);
+                      setDragId(null);
+                      setOverIndex(null);
+                    }}
+                    onDragEnd={() => {
+                      draggingRef.current = false;
+                      setDragId(null);
+                      setOverIndex(null);
+                    }}
+                    className={`flex items-center gap-2 rounded-lg bg-surface-mid px-2.5 py-2 transition ${
+                      dragId === w.id ? "opacity-40" : ""
+                    }`}
                   >
-                    <GripIcon />
-                  </span>
-                )}
-                <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-lift text-[11px] text-text">
-                  {i + 1}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm text-text">{w.name}</span>
-                  {(eta || w.stopMinutes > 0) && (
-                    <span className="mono block text-xs">
-                      {eta && <span className="text-fog">passes ~{eta}</span>}
-                      {eta && w.stopMinutes > 0 && <span className="text-fog"> · </span>}
-                      {w.stopMinutes > 0 && (
-                        <span className="text-together">☕ {w.stopMinutes} min stop</span>
-                      )}
+                    {canReorder && (
+                      <span
+                        className="shrink-0 cursor-grab text-fog active:cursor-grabbing"
+                        aria-hidden
+                        title="Drag to reorder"
+                      >
+                        <GripIcon />
+                      </span>
+                    )}
+                    <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-lift text-[11px] text-text">
+                      {i + 1}
                     </span>
-                  )}
-                </span>
-                {!locked && (
-                  <button
-                    type="button"
-                    onClick={() => handleRemove(w.id)}
-                    className="shrink-0 text-fog hover:text-accent"
-                    aria-label="Remove waypoint"
-                  >
-                    ×
-                  </button>
+                    <div
+                      role={locked ? undefined : "button"}
+                      tabIndex={locked ? undefined : 0}
+                      title={locked ? undefined : "Tap to edit"}
+                      onClick={() => {
+                        if (locked || draggingRef.current) return;
+                        setEditor({ mode: "edit", id: w.id });
+                      }}
+                      onKeyDown={(e) => {
+                        if (locked) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setEditor({ mode: "edit", id: w.id });
+                        }
+                      }}
+                      className={`min-w-0 flex-1 text-left ${locked ? "" : "cursor-pointer"}`}
+                    >
+                      <span className="block truncate text-sm text-text">{w.name}</span>
+                      {(eta || w.stopMinutes > 0) && (
+                        <span className="mono block text-xs">
+                          {eta && <span className="text-fog">passes ~{eta}</span>}
+                          {eta && w.stopMinutes > 0 && <span className="text-fog"> · </span>}
+                          {w.stopMinutes > 0 && (
+                            <span className="text-together">☕ {w.stopMinutes} min stop</span>
+                          )}
+                        </span>
+                      )}
+                    </div>
+                    {!locked && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleRemove(w.id);
+                        }}
+                        className="shrink-0 text-fog hover:text-accent"
+                        aria-label="Remove waypoint"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </li>
                 )}
-              </li>
+              </Fragment>
             );
           })}
+          {dropLine(waypoints.length)}
         </ul>
       )}
 
-      {!locked && !adding && (
+      {!locked && editor.mode === "closed" && (
         <button
           type="button"
-          onClick={() => setAdding(true)}
+          onClick={() => setEditor({ mode: "add" })}
           className="text-sm text-accent hover:brightness-110"
         >
           + Add a waypoint
         </button>
       )}
 
-      {!locked && adding && (
-        <div className="space-y-3 border-t border-white/5 pt-3">
-          <AddressSearch
-            placeholder="Search for a place"
-            onSelect={(r) => {
-              setLocation({ lat: r.lat, lng: r.lng });
-              setAddress(r.shortName);
-              if (!name) setName(r.shortName);
-            }}
-          />
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setPlacingWaypoint(!placingWaypoint)}
-              className={`text-xs ${placingWaypoint ? "text-accent" : "text-fog hover:text-text"}`}
-            >
-              {placingWaypoint ? "Tap the map to drop it…" : "…or tap the map"}
-            </button>
-            {location && (
-              <span className="mono text-xs text-together">
-                ✓ {location.lat.toFixed(4)}, {location.lng.toFixed(4)}
-              </span>
-            )}
-          </div>
-
-          <input
-            type="text"
-            value={name}
-            placeholder="Name it (optional)"
-            onChange={(e) => setName(e.target.value)}
-            className="w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2 text-sm text-text outline-none placeholder:text-fog focus:border-accent/60"
-          />
-
-          <div>
-            <Toggle
-              options={[
-                { value: "no", label: "Just pass through" },
-                { value: "yes", label: "Stop here" },
-              ]}
-              value={stopOn ? "yes" : "no"}
-              onChange={(v) => setStopOn(v === "yes")}
-            />
-            {stopOn && (
-              <div className="mt-2">
-                <span className="text-xs text-text-dim">How long?</span>
-                <Slider
-                  min={5}
-                  max={90}
-                  step={5}
-                  value={stopMinutes}
-                  onChange={setStopMinutes}
-                  format={(v) => `${v} min`}
-                />
-              </div>
-            )}
-          </div>
-
-          {error && <p className="text-xs text-accent">{error}</p>}
-
-          <div className="flex items-center justify-between">
-            <button type="button" onClick={resetForm} className="text-sm text-fog hover:text-text">
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleAdd}
-              disabled={busy || !location}
-              className="rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
-            >
-              {busy ? "Adding…" : "Add waypoint"}
-            </button>
-          </div>
-        </div>
+      {!locked && editor.mode === "add" && (
+        <WaypointEditor submitLabel="Add waypoint" onSubmit={handleAdd} onCancel={close} />
       )}
 
       {(waypoints.length > 0 || !locked) && (
@@ -358,6 +333,155 @@ export default function WaypointsSection() {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The add/edit form for a single waypoint. Used both for adding (no `initial`)
+ * and for inline editing a row (`initial` pre-fills it). Only one is ever mounted
+ * at a time, so it owns the map-place mode and folds a dropped pin into itself.
+ */
+function WaypointEditor({
+  initial,
+  submitLabel,
+  onSubmit,
+  onCancel,
+}: {
+  initial?: { name: string; address: string; location: LatLng | null; stopMinutes: number };
+  submitLabel: string;
+  onSubmit: (data: EditorData) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
+  const setPlacingWaypoint = useFlockStore((s) => s.setPlacingWaypoint);
+  const waypointPin = useFlockStore((s) => s.waypointPin);
+  const setWaypointPin = useFlockStore((s) => s.setWaypointPin);
+
+  const [name, setName] = useState(initial?.name ?? "");
+  const [location, setLocation] = useState<LatLng | null>(initial?.location ?? null);
+  const [address, setAddress] = useState(initial?.address ?? "");
+  const [stopOn, setStopOn] = useState((initial?.stopMinutes ?? 0) > 0);
+  const [stopMinutes, setStopMinutes] = useState(
+    initial && initial.stopMinutes > 0 ? initial.stopMinutes : 20,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Fold a map-dropped pin into this editor (only one editor is open at a time).
+  useEffect(() => {
+    if (waypointPin) {
+      setLocation(waypointPin);
+      setAddress((a) => a || "Dropped pin");
+      setPlacingWaypoint(false);
+      setWaypointPin(null);
+    }
+  }, [waypointPin, setPlacingWaypoint, setWaypointPin]);
+
+  // Leaving the editor by ANY path (cancel, save, switching rows, programmatic
+  // close) must exit map-placing mode so the crosshair never lingers.
+  useEffect(() => () => setPlacingWaypoint(false), [setPlacingWaypoint]);
+
+  function cancel() {
+    setPlacingWaypoint(false);
+    onCancel();
+  }
+
+  async function submit() {
+    if (!location) {
+      setError("Pick a place first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit({
+        name: name.trim() || address || "Waypoint",
+        address,
+        location,
+        stopMinutes: stopOn ? stopMinutes : 0,
+      });
+      setPlacingWaypoint(false);
+    } catch (err) {
+      setError(err instanceof FlockApiError ? err.message : "Could not save waypoint");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-white/5 pt-3">
+      <AddressSearch
+        initialValue={address === "Dropped pin" ? "" : address}
+        placeholder="Search for a place"
+        onSelect={(r) => {
+          setLocation({ lat: r.lat, lng: r.lng });
+          setAddress(r.shortName);
+          if (!name) setName(r.shortName);
+        }}
+      />
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => setPlacingWaypoint(!placingWaypoint)}
+          className={`text-xs ${placingWaypoint ? "text-accent" : "text-fog hover:text-text"}`}
+        >
+          {placingWaypoint ? "Tap the map to drop it…" : "…or tap the map"}
+        </button>
+        {location && (
+          <span className="mono text-xs text-together">
+            ✓ {location.lat.toFixed(4)}, {location.lng.toFixed(4)}
+          </span>
+        )}
+      </div>
+
+      <input
+        type="text"
+        value={name}
+        placeholder="Name it (optional)"
+        onChange={(e) => setName(e.target.value)}
+        className="w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2 text-sm text-text outline-none placeholder:text-fog focus:border-accent/60"
+      />
+
+      <div>
+        <Toggle
+          options={[
+            { value: "no", label: "Just pass through" },
+            { value: "yes", label: "Stop here" },
+          ]}
+          value={stopOn ? "yes" : "no"}
+          onChange={(v) => setStopOn(v === "yes")}
+        />
+        {stopOn && (
+          <div className="mt-2">
+            <span className="text-xs text-text-dim">How long?</span>
+            <Slider
+              min={5}
+              max={90}
+              step={5}
+              value={stopMinutes}
+              onChange={setStopMinutes}
+              format={(v) => `${v} min`}
+            />
+          </div>
+        )}
+      </div>
+
+      {error && <p className="text-xs text-accent">{error}</p>}
+
+      <div className="flex items-center justify-between">
+        <button type="button" onClick={cancel} className="text-sm text-fog hover:text-text">
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy || !location}
+          className="rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-white hover:brightness-110 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : submitLabel}
+        </button>
+      </div>
     </div>
   );
 }

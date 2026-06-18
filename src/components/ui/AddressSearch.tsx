@@ -24,8 +24,17 @@ export default function AddressSearch({
   const [open, setOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const justSelected = useRef(false);
+  const firstRun = useRef(true);
 
   useEffect(() => {
+    // Don't auto-search the value present at mount — when the field is pre-filled
+    // (e.g. editing an existing waypoint), the location is already known, so a
+    // geocode + results dropdown on open would be unsolicited. Search only once
+    // the user actually edits the text.
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
     // Honour the Nominatim 1 req/sec limit with a 1s debounce.
     if (justSelected.current) {
       justSelected.current = false;
