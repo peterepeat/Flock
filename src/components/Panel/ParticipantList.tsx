@@ -13,6 +13,7 @@ export default function ParticipantList() {
   const session = useFlockStore((s) => s.session);
   const openEditForm = useFlockStore((s) => s.openEditForm);
   const setHovered = useFlockStore((s) => s.setHovered);
+  const setSelected = useFlockStore((s) => s.setSelected);
   const expandedId = useFlockStore((s) => s.expandedParticipantId);
   const setExpanded = useFlockStore((s) => s.setExpanded);
   const calcWarnings = useFlockStore((s) => s.calcWarnings);
@@ -52,7 +53,12 @@ export default function ParticipantList() {
               <div className="flex items-center gap-3 px-2 py-2">
                 <button
                   type="button"
-                  onClick={() => setExpanded(isExpanded ? null : p.id)}
+                  onClick={() => {
+                    const willExpand = !isExpanded;
+                    setExpanded(willExpand ? p.id : null);
+                    // Expanding a runner also focuses their route on the map.
+                    setSelected(willExpand ? p.id : null);
+                  }}
                   className="flex min-w-0 flex-1 items-center gap-3 text-left"
                   aria-expanded={isExpanded}
                 >

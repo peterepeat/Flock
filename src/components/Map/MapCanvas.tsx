@@ -65,19 +65,46 @@ function waypointIcon(order: number, hasStop: boolean, draggable = false): L.Div
 // spacing (metres). Sparse enough to read as flow, not as a dotted line.
 const SPINE_ARROW_SPACING_M = 700;
 
-/** A chevron pointing along the flock's direction of travel (deg clockwise from north). */
-function arrowIcon(deg: number): L.DivIcon {
+/** A chevron pointing along a route's direction of travel (deg clockwise from north).
+    `light` = white chevron (for a coloured route line); default = dark (for the white spine). */
+function arrowIcon(deg: number, light = false): L.DivIcon {
+  const stroke = light ? "#ffffff" : "#0b1413";
+  const shadow = light ? "rgba(0,0,0,0.75)" : "rgba(255,255,255,0.9)";
   return L.divIcon({
     className: "",
     html:
       `<div style="transform:rotate(${deg}deg);width:16px;height:16px;` +
-      `filter:drop-shadow(0 0 1px rgba(255,255,255,0.9));">` +
+      `filter:drop-shadow(0 0 1px ${shadow});">` +
       `<svg viewBox="0 0 16 16" width="16" height="16">` +
-      `<path d="M4 10 L8 5 L12 10" fill="none" stroke="#0b1413" stroke-width="2.4" ` +
+      `<path d="M4 10 L8 5 L12 10" fill="none" stroke="${stroke}" stroke-width="2.4" ` +
       `stroke-linecap="round" stroke-linejoin="round"/></svg></div>`,
     iconSize: [16, 16],
     iconAnchor: [8, 8],
   });
+}
+
+/** Sample direction chevrons along a [lng,lat] polyline, one every `spacingM`
+    metres (first at half-spacing), each oriented to the local heading. */
+function arrowsAlong(coords: number[][], spacingM: number): { lat: number; lng: number; deg: number }[] {
+  if (coords.length < 2) return [];
+  const pts = coords.map(([lng, lat]) => ({ lat, lng }) as LatLng);
+  const out: { lat: number; lng: number; deg: number }[] = [];
+  let acc = 0;
+  let next = spacingM / 2;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const segLen = distanceMeters(a, b);
+    if (segLen < 1e-6) continue;
+    const deg = (bearingRad(a, b) * 180) / Math.PI;
+    while (next <= acc + segLen) {
+      const f = (next - acc) / segLen;
+      out.push({ lat: a.lat + (b.lat - a.lat) * f, lng: a.lng + (b.lng - a.lng) * f, deg });
+      next += spacingM;
+    }
+    acc += segLen;
+  }
+  return out;
 }
 
 /** A small glowing diamond marking where the flock converges. */
@@ -136,7 +163,11 @@ function ClickHandler() {
       if (formOpen && placingPin) {
         log.debug("map click → start pin", { lat: ll.lat, lng: ll.lng });
         setDraftStart(ll);
+        return;
       }
+      // A bare click on empty map (Leaflet doesn't fire this for marker/route
+      // clicks) clears any route focus.
+      useFlockStore.getState().setSelected(null);
     },
   });
   return null;
@@ -167,6 +198,11 @@ function FitBounds({ points }: { points: LatLng[] }) {
 export default function MapCanvas() {
   const session = useFlockStore((s) => s.session);
   const hovered = useFlockStore((s) => s.hoveredParticipantId);
+  const selected = useFlockStore((s) => s.selectedParticipantId);
+  // The focused runner: a persistent click-selection, else the transient hover.
+  // When set, only this runner's route is drawn (the rest declutter to the shared
+  // spine + glow); when null, no individual route lines show.
+  const focus = selected ?? hovered;
   const pendingStart = useFlockStore((s) => s.pendingStart);
   const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
@@ -242,32 +278,19 @@ export default function MapCanvas() {
     return pts;
   }, [participants, waypoints, pendingStart, flockRoute, routes]);
 
-  // Direction-of-travel chevrons along the flock spine: walk the snapped line by
-  // ground distance, dropping a chevron every SPINE_ARROW_SPACING_M oriented to
-  // the local heading. First one at half-spacing so it doesn't sit on the
-  // rendezvous marker. Spine-only keeps it uncluttered (per-runner direction is
-  // a later, selection-scoped concern).
-  const spineArrows = useMemo(() => {
-    if (!flockRoute || flockRoute.coordinates.length < 2) return [];
-    const pts = flockRoute.coordinates.map(([lng, lat]) => ({ lat, lng }) as LatLng);
-    const out: { lat: number; lng: number; deg: number }[] = [];
-    let acc = 0;
-    let next = SPINE_ARROW_SPACING_M / 2;
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1];
-      const b = pts[i];
-      const segLen = distanceMeters(a, b);
-      if (segLen < 1e-6) continue;
-      const deg = (bearingRad(a, b) * 180) / Math.PI;
-      while (next <= acc + segLen) {
-        const f = (next - acc) / segLen;
-        out.push({ lat: a.lat + (b.lat - a.lat) * f, lng: a.lng + (b.lng - a.lng) * f, deg });
-        next += SPINE_ARROW_SPACING_M;
-      }
-      acc += segLen;
-    }
-    return out;
-  }, [flockRoute]);
+  // Direction-of-travel chevrons. When nothing is focused, they ride the flock
+  // SPINE (the shared route's heading). When a runner is focused, they ride THAT
+  // runner's full route instead (incl. their approach/egress feeders), and the
+  // spine chevrons step aside so the focused line reads cleanly.
+  const spineArrows = useMemo(
+    () => (flockRoute ? arrowsAlong(flockRoute.coordinates, SPINE_ARROW_SPACING_M) : []),
+    [flockRoute],
+  );
+  const focusedRoute = focus ? routes.find((r) => r.participantId === focus) : undefined;
+  const focusedArrows = useMemo(
+    () => (focusedRoute ? arrowsAlong(focusedRoute.geometry.coordinates, SPINE_ARROW_SPACING_M) : []),
+    [focusedRoute],
+  );
 
   return (
     <div className="relative h-full w-full">
@@ -321,13 +344,13 @@ export default function MapCanvas() {
           </>
         )}
 
-        {/* Direction-of-travel chevrons on the spine (non-interactive, below the
-            participant/waypoint pins via a negative z-offset). */}
-        {spineArrows.map((ar, i) => (
+        {/* Direction chevrons (non-interactive, below pins). Spine chevrons at rest;
+            the focused runner's route chevrons when one is focused. */}
+        {(focus ? focusedArrows : spineArrows).map((ar, i) => (
           <Marker
-            key={`spine-arrow-${i}`}
+            key={`arrow-${i}`}
             position={[ar.lat, ar.lng]}
-            icon={arrowIcon(ar.deg)}
+            icon={arrowIcon(ar.deg, focus != null)}
             interactive={false}
             zIndexOffset={-100}
           />
@@ -376,46 +399,52 @@ export default function MapCanvas() {
           />
         ))}
 
-        {/* Route casings — a dark outline under every route so the colours read
-            clearly against busy map tiles. */}
-        {routes.map((r) => {
-          const dim = hovered && hovered !== r.participantId;
-          return (
+        {/* Routes are faint at rest; focusing a runner pops their line and recedes
+            the rest. Only the focused line gets the dark casing (a clean outline);
+            the faint ones stay thin colour-only so they don't muddy the map. */}
+        {routes
+          .filter((r) => focus === r.participantId)
+          .map((r) => (
             <Polyline
               key={`casing-${r.participantId}`}
               positions={r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
               pathOptions={{
                 color: "#0b0b0e",
-                weight: 8,
-                opacity: dim ? 0.25 : 0.75,
+                weight: 9,
+                opacity: 0.8,
                 lineCap: "round",
                 lineJoin: "round",
               }}
               interactive={false}
             />
-          );
-        })}
+          ))}
 
-        {/* Individual routes (colour cores) */}
         {routes.map((r) => {
-          const p = participants.find((x) => x.id === r.participantId);
-          const color = p?.color ?? "#fff";
-          const isHover = hovered === r.participantId;
-          const dim = hovered && !isHover;
-          return (
+            const p = participants.find((x) => x.id === r.participantId);
+            const color = p?.color ?? "#fff";
+            const isFocused = focus === r.participantId;
+            // Faint at rest; the focused runner pops; the rest recede further when
+            // one is focused so the focused line reads cleanly.
+            const opacity = isFocused ? 1 : focus ? 0.16 : 0.32;
+            const weight = isFocused ? 6 : 3;
+            return (
             <Polyline
               key={r.participantId}
               positions={r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
               pathOptions={{
                 color,
-                weight: isHover ? 6 : 4.5,
-                opacity: dim ? 0.3 : 1,
+                weight,
+                opacity,
                 lineCap: "round",
                 lineJoin: "round",
               }}
               eventHandlers={{
                 mouseover: () => useFlockStore.getState().setHovered(r.participantId),
                 mouseout: () => useFlockStore.getState().setHovered(null),
+                click: () =>
+                  useFlockStore
+                    .getState()
+                    .setSelected(selected === r.participantId ? null : r.participantId),
               }}
             >
               <Tooltip sticky>
@@ -463,6 +492,8 @@ export default function MapCanvas() {
               eventHandlers={{
                 mouseover: () => useFlockStore.getState().setHovered(p.id),
                 mouseout: () => useFlockStore.getState().setHovered(null),
+                click: () =>
+                  useFlockStore.getState().setSelected(selected === p.id ? null : p.id),
                 dragend: (e) => moveStart(p.id, e.target as L.Marker, p.startLocation),
               }}
             >
@@ -536,6 +567,9 @@ export default function MapCanvas() {
 
 function Legend() {
   const session = useFlockStore((s) => s.session);
+  const selected = useFlockStore((s) => s.selectedParticipantId);
+  const setSelected = useFlockStore((s) => s.setSelected);
+  const setHovered = useFlockStore((s) => s.setHovered);
   if (!session) return null;
   const shared = session.sharedSegments ?? [];
   const flockRoute = session.flockRoute ?? null;
@@ -544,13 +578,26 @@ function Legend() {
 
   return (
     <div className="absolute bottom-4 right-4 z-[500] max-w-[200px] rounded-xl border border-white/10 bg-surface-mid/90 p-3 text-xs shadow-panel backdrop-blur">
-      <ul className="space-y-1.5">
-        {session.participants.map((p) => (
-          <li key={p.id} className="flex items-center gap-2">
-            <span className="h-2.5 w-2.5 rounded-full" style={{ background: p.color }} />
-            <span className="truncate text-text">{p.name}</span>
-          </li>
-        ))}
+      <ul className="space-y-0.5">
+        {session.participants.map((p) => {
+          const active = selected === p.id;
+          return (
+            <li key={p.id}>
+              <button
+                type="button"
+                onClick={() => setSelected(active ? null : p.id)}
+                onMouseEnter={() => setHovered(p.id)}
+                onMouseLeave={() => setHovered(null)}
+                aria-pressed={active}
+                title={active ? "Click to show all" : "Click to focus this route"}
+                className={`flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition hover:bg-white/5 ${active ? "bg-white/10" : ""}`}
+              >
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: p.color }} />
+                <span className="truncate text-text">{p.name}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
       {/* Key for the map elements that aren't a person: the shared spine, the
           flocking glow, and the meet-up diamonds. */}

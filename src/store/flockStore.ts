@@ -16,6 +16,7 @@ interface FlockState {
   formOpen: boolean;
   editingParticipantId: string | null; // null while form is open => adding new
   hoveredParticipantId: string | null;
+  selectedParticipantId: string | null; // clicked-to-focus: isolates that route on the map
   expandedParticipantId: string | null; // schedule expanded (used later)
   draftStart: LatLng | null; // pin placed via map click while form open (map → form)
   pendingStart: LatLng | null; // the open form's current start, shown live on the map (form → map)
@@ -42,6 +43,7 @@ interface FlockState {
   openEditForm: (participantId: string) => void;
   closeForm: () => void;
   setHovered: (participantId: string | null) => void;
+  setSelected: (participantId: string | null) => void;
   setExpanded: (participantId: string | null) => void;
   setDraftStart: (ll: LatLng | null) => void;
   setPendingStart: (ll: LatLng | null) => void;
@@ -65,6 +67,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   formOpen: false,
   editingParticipantId: null,
   hoveredParticipantId: null,
+  selectedParticipantId: null,
   expandedParticipantId: null,
   draftStart: null,
   pendingStart: null,
@@ -110,6 +113,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       pendingFinish: null,
     }),
   setHovered: (participantId) => set({ hoveredParticipantId: participantId }),
+  setSelected: (participantId) => set({ selectedParticipantId: participantId }),
   setExpanded: (participantId) => set({ expandedParticipantId: participantId }),
   setDraftStart: (ll) => set({ draftStart: ll }),
   setPendingStart: (ll) => set({ pendingStart: ll }),
