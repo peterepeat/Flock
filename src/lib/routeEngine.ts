@@ -102,7 +102,8 @@ interface RunnerBuild {
   p: Participant;
   ownPaceSec: number;
   earliestSec: number;
-  home: LatLng;
+  home: LatLng; // where the approach STARTS (always the runner's start)
+  finishPt: LatLng; // where the egress ENDS — the chosen finish, else the start
   enterKm: number;
   exitKm: number;
   approachKm: number;
@@ -305,7 +306,8 @@ function opportunisticOverlap(builds: RunnerBuild[], T0abs: number): OppRun[] {
 interface OptItem {
   id: string;
   budget: number | null; // null = unconstrained (takes the whole route)
-  home: LatLng;
+  home: LatLng; // approach origin (start)
+  finish: LatLng; // egress destination (chosen finish, else start)
 }
 interface Window {
   enterKm: number;
@@ -319,8 +321,11 @@ function optimizeWindows(items: OptItem[], backbone: Backbone): Map<string, Wind
   const pos: number[] = [];
   for (let k = 0; k <= NSEG; k++) pos.push(k * segLen);
   const pts = pos.map((p) => pointAtKm(backbone, p));
-  // appr[i][k] = crow approach/egress estimate from home i to boundary point k.
-  const appr = items.map((it) => pts.map((pt) => crowKm(it.home, pt) * ROAD_FACTOR));
+  // Crow feeder estimates to each boundary point: approach is start→point,
+  // egress is finish→point. They differ only when a runner picked a separate
+  // finish; otherwise finish === start and the two tables coincide.
+  const apprStart = items.map((it) => pts.map((pt) => crowKm(it.home, pt) * ROAD_FACTOR));
+  const apprFinish = items.map((it) => pts.map((pt) => crowKm(it.finish, pt) * ROAD_FACTOR));
   const idxOf = (km: number) => Math.max(0, Math.min(NSEG, Math.round(km / segLen)));
 
   const windows = new Map<string, Window>();
@@ -336,7 +341,7 @@ function optimizeWindows(items: OptItem[], backbone: Backbone): Map<string, Wind
     if (budget == null) return NSEG;
     let best = ei;
     for (let xi = ei; xi <= NSEG; xi++) {
-      const cost = appr[i][ei] + (pos[xi] - pos[ei]) + appr[i][xi];
+      const cost = apprStart[i][ei] + (pos[xi] - pos[ei]) + apprFinish[i][xi];
       if (cost <= budget + EPS) best = xi;
     }
     return best;
@@ -371,9 +376,9 @@ function optimizeWindows(items: OptItem[], backbone: Backbone): Map<string, Wind
       let bestArc = cur.exitKm - cur.enterKm;
 
       for (let ei = 0; ei <= NSEG; ei++) {
-        if (it.budget != null && appr[i][ei] > it.budget) continue;
+        if (it.budget != null && apprStart[i][ei] > it.budget) continue;
         for (let xi = ei; xi <= NSEG; xi++) {
-          const cost = appr[i][ei] + (pos[xi] - pos[ei]) + appr[i][xi];
+          const cost = apprStart[i][ei] + (pos[xi] - pos[ei]) + apprFinish[i][xi];
           if (it.budget != null && cost > it.budget + EPS) continue;
           const val = prefix[xi] - prefix[ei];
           const arc = pos[xi] - pos[ei];
@@ -431,7 +436,7 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
       if (cut <= 0.05) continue;
       b.exitKm = Math.max(b.enterKm, b.exitKm - cut);
       try {
-        const eg = await legRoute(pointAtKm(backbone, b.exitKm), b.home);
+        const eg = await legRoute(pointAtKm(backbone, b.exitKm), b.finishPt);
         b.egressKm = eg.distanceKm;
         b.egressGeom = geomToLatLng(eg.geometry);
       } catch {
@@ -563,12 +568,18 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
 
   const rendezvous = waypoints[0]?.location ?? centroid(runners.map((p) => p.startLocation));
 
+  // A runner egresses to their chosen finish if they set one, else back to start.
+  const finishOf = (p: Participant): LatLng => p.finishLocation ?? p.startLocation;
+
   // Backbone length (auto only): the "never solo" reach (second-longest arc),
-  // using crow approach estimates — no ORS needed for sizing.
+  // using crow feeder estimates — no ORS needed for sizing. The feeder cost is
+  // approach (start→rendezvous) + egress (finish→rendezvous); when finish === start
+  // this is the old symmetric 2× round-trip.
   const arcEstimate = (p: Participant): number => {
     const t = targetDistanceKm(p);
     if (t == null) return Infinity;
-    return Math.max(0, t - 2 * crowKm(p.startLocation, rendezvous) * ROAD_FACTOR);
+    const feeder = (crowKm(p.startLocation, rendezvous) + crowKm(finishOf(p), rendezvous)) * ROAD_FACTOR;
+    return Math.max(0, t - feeder);
   };
   const estsById = runners
     .map((p) => ({ id: p.id, est: arcEstimate(p) }))
@@ -593,7 +604,12 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
 
   // Best-response: choose each runner's [enter, exit] to maximise together-time.
   const windows = optimizeWindows(
-    runners.map((p) => ({ id: p.id, budget: targetDistanceKm(p), home: p.startLocation })),
+    runners.map((p) => ({
+      id: p.id,
+      budget: targetDistanceKm(p),
+      home: p.startLocation,
+      finish: finishOf(p),
+    })),
     backbone,
   );
   log.info("windows", {
@@ -612,7 +628,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
       const w = windows.get(p.id)!;
       const [approach, egress] = await Promise.all([
         legRoute(p.startLocation, pointAtKm(backbone, w.enterKm)),
-        legRoute(pointAtKm(backbone, w.exitKm), p.startLocation),
+        legRoute(pointAtKm(backbone, w.exitKm), finishOf(p)),
       ]);
       return { p, w, approach, egress };
     }),
@@ -627,6 +643,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
         ownPaceSec: paceOf(p),
         earliestSec: earliestOf(p),
         home: p.startLocation,
+        finishPt: finishOf(p),
         enterKm: w.enterKm,
         exitKm: w.exitKm,
         approachKm: approach.distanceKm,
@@ -893,7 +910,7 @@ function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: n
       startTime: secToTime(extEndAbs),
       endTime: secToTime(arrival),
       startLocation: exitPoint,
-      endLocation: b.home,
+      endLocation: b.finishPt,
       paceSecPerKm: b.ownPaceSec,
       companionIds: [],
       distanceKm: round2(b.egressKm),
@@ -902,7 +919,7 @@ function buildComputed(b: RunnerBuild, backbone: Backbone, legs: Leg[], T0abs: n
 
   return {
     participantId: b.p.id,
-    waypoints: [b.home, pointAtKm(backbone, b.enterKm), exitPoint, b.home],
+    waypoints: [b.home, pointAtKm(backbone, b.enterKm), exitPoint, b.finishPt],
     geometry: toLineString(fullGeom),
     distanceKm: round2(distanceKm),
     estimatedDurationMinutes: Math.round((arrival - b.departHomeSec) / 60),
