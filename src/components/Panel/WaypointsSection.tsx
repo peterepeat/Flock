@@ -5,17 +5,17 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
-import {
-  addWaypoint,
-  FlockApiError,
-  importRoute,
-  removeWaypoint,
-  reorderWaypoints,
-  updateWaypoint,
-} from "@/lib/flockApi";
+import { FlockApiError } from "@/lib/flockApi";
 import { buildFlockGpx, parseFlockGpx } from "@/lib/flockGpx";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
+import {
+  uAddWaypoint,
+  uImportRoute,
+  uRemoveWaypoint,
+  uReorderWaypoints,
+  uUpdateWaypoint,
+} from "@/lib/undoableEdits";
 import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("waypoints");
@@ -30,7 +30,6 @@ interface EditorData {
 export default function WaypointsSection() {
   const flockId = useFlockStore((s) => s.flockId)!;
   const session = useFlockStore((s) => s.session);
-  const applyServerSession = useFlockStore((s) => s.applyServerSession);
   const waypointPin = useFlockStore((s) => s.waypointPin);
   // The add/edit editor lives in the store so the map can open a waypoint for
   // editing and coordinate the "tap empty map to add" gesture.
@@ -68,23 +67,20 @@ export default function WaypointsSection() {
   }, [session, close]);
 
   async function handleAdd(data: EditorData) {
-    const updated = await addWaypoint(flockId, { ...data });
-    applyServerSession(updated, true);
+    await uAddWaypoint(flockId, { ...data });
     close();
     log.info("waypoint added", { stop: data.stopMinutes });
   }
 
   async function handleSave(id: string, data: EditorData) {
-    const updated = await updateWaypoint(flockId, id, { ...data });
-    applyServerSession(updated, true);
+    await uUpdateWaypoint(flockId, id, { ...data });
     close();
     log.info("waypoint edited", { id: id.slice(0, 4) });
   }
 
   async function handleRemove(id: string) {
     try {
-      const updated = await removeWaypoint(flockId, id);
-      applyServerSession(updated, true);
+      await uRemoveWaypoint(flockId, id);
       if (editor.mode === "edit" && editor.id === id) close();
     } catch (err) {
       log.error("remove failed", { error: String(err) });
@@ -114,8 +110,7 @@ export default function WaypointsSection() {
         setIoMsg(parsed.warnings[0] ?? "No route points found in that GPX.");
         return;
       }
-      const updated = await importRoute(flockId, parsed.waypoints, parsed.gpxPassthrough);
-      applyServerSession(updated, true);
+      await uImportRoute(flockId, parsed.waypoints, parsed.gpxPassthrough);
       setIoMsg(
         parsed.warnings.length
           ? parsed.warnings.join(" ")
@@ -144,8 +139,7 @@ export default function WaypointsSection() {
     ids.splice(from < to ? to - 1 : to, 0, dragId);
     if (ids.every((id, k) => id === orig[k])) return; // no change
     try {
-      const updated = await reorderWaypoints(flockId, ids);
-      applyServerSession(updated, true);
+      await uReorderWaypoints(flockId, ids);
       log.info("waypoints reordered", { order: ids.map((s) => s.slice(0, 4)) });
     } catch (err) {
       log.error("reorder failed", { error: String(err) });

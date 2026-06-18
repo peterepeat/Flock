@@ -228,6 +228,9 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         address: w.address ?? "",
         name: w.name?.trim() || w.address || "Waypoint",
         stopMinutes: Math.max(0, w.stopMinutes ?? 0),
+        // Preserve foreign GPX data so re-adding (e.g. an undo of a remove) keeps
+        // the lossless round-trip — mirrors the importRoute handler.
+        ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
       };
       session.waypoints.push(waypoint);
       clearComputed(session);

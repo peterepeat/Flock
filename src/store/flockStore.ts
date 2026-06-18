@@ -1,7 +1,10 @@
 import { create } from "zustand";
 
+import { createLogger } from "@/lib/logger";
 import type { CalcWarning } from "@/lib/routing-types";
 import type { FlockSession, LatLng } from "@/lib/types";
+
+const log = createLogger("history");
 
 export type FlockStatus = "loading" | "ready" | "notfound" | "error";
 export type CalcStatus = "idle" | "working" | "error";
@@ -10,6 +13,17 @@ export type CalcStatus = "idle" | "working" | "error";
 // the map can open a waypoint for editing and coordinate the "tap empty map to
 // add" gesture. One editor is open at a time.
 export type WaypointEditorState = { mode: "closed" } | { mode: "add" } | { mode: "edit"; id: string };
+
+// A single undoable local edit. `undo`/`redo` issue the compensating / original
+// mutation (a normal PatchAction via flockApi) and return the resulting session,
+// which undo()/redo() then apply. Per-device only.
+export interface HistoryEntry {
+  label: string;
+  undo: () => Promise<FlockSession>;
+  redo: () => Promise<FlockSession>;
+}
+
+const HISTORY_MAX = 50;
 
 interface FlockState {
   flockId: string | null;
@@ -39,6 +53,14 @@ interface FlockState {
   calcStatus: CalcStatus;
   calcWarnings: CalcWarning[];
   calcError: string | null; // flock-level failure (e.g. quota) shown until it resolves
+
+  // Per-device undo/redo of this user's own edits (not shared across devices).
+  undoStack: HistoryEntry[];
+  redoStack: HistoryEntry[];
+  historyBusy: boolean;
+  recordHistory: (entry: HistoryEntry) => void;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
 
   setFlockId: (id: string) => void;
   setStatus: (status: FlockStatus) => void;
@@ -92,8 +114,55 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   calcWarnings: [],
   calcError: null,
 
-  setFlockId: (id) => set({ flockId: id }),
+  undoStack: [],
+  redoStack: [],
+  historyBusy: false,
+
+  setFlockId: (id) => set({ flockId: id, undoStack: [], redoStack: [] }),
   setStatus: (status) => set({ status }),
+
+  // Push a local edit's inverse; a new edit always clears the redo branch.
+  recordHistory: (entry) =>
+    set((s) => ({
+      undoStack: [...s.undoStack, entry].slice(-HISTORY_MAX),
+      redoStack: [],
+    })),
+
+  undo: async () => {
+    const { undoStack, historyBusy, applyServerSession } = get();
+    if (historyBusy || undoStack.length === 0) return;
+    const entry = undoStack[undoStack.length - 1];
+    set({ historyBusy: true });
+    try {
+      const session = await entry.undo();
+      applyServerSession(session, true);
+      set((s) => ({ undoStack: s.undoStack.slice(0, -1), redoStack: [...s.redoStack, entry] }));
+    } catch (err) {
+      // The target likely changed under us (e.g. another device edited it); drop
+      // the now-unapplicable entry rather than leaving a broken undo.
+      log.error("undo failed — dropping entry", { label: entry.label, error: String(err) });
+      set((s) => ({ undoStack: s.undoStack.slice(0, -1) }));
+    } finally {
+      set({ historyBusy: false });
+    }
+  },
+
+  redo: async () => {
+    const { redoStack, historyBusy, applyServerSession } = get();
+    if (historyBusy || redoStack.length === 0) return;
+    const entry = redoStack[redoStack.length - 1];
+    set({ historyBusy: true });
+    try {
+      const session = await entry.redo();
+      applyServerSession(session, true);
+      set((s) => ({ redoStack: s.redoStack.slice(0, -1), undoStack: [...s.undoStack, entry] }));
+    } catch (err) {
+      log.error("redo failed — dropping entry", { label: entry.label, error: String(err) });
+      set((s) => ({ redoStack: s.redoStack.slice(0, -1) }));
+    } finally {
+      set({ historyBusy: false });
+    }
+  },
 
   applyServerSession: (session, force = false) => {
     const prev = get().lastSyncedUpdatedAt;

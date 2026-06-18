@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
@@ -12,10 +12,40 @@ export default function Header() {
   const flockId = useFlockStore((s) => s.flockId)!;
   const session = useFlockStore((s) => s.session);
   const applyServerSession = useFlockStore((s) => s.applyServerSession);
+  const undoStack = useFlockStore((s) => s.undoStack);
+  const redoStack = useFlockStore((s) => s.redoStack);
+  const historyBusy = useFlockStore((s) => s.historyBusy);
+  const undo = useFlockStore((s) => s.undo);
+  const redo = useFlockStore((s) => s.redo);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const locked = session?.lockedAt != null;
+  // No undo/redo on a locked plan (edits are rejected) or mid-flight.
+  const canUndo = !locked && !historyBusy && undoStack.length > 0;
+  const canRedo = !locked && !historyBusy && redoStack.length > 0;
+
+  // Keyboard: ⌘/Ctrl+Z = undo, ⇧⌘/Ctrl+Z or Ctrl+Y = redo. Skip while typing in a
+  // field so native text undo still works.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const k = e.key.toLowerCase();
+      const isUndo = k === "z" && !e.shiftKey;
+      const isRedo = (k === "z" && e.shiftKey) || k === "y";
+      if (!isUndo && !isRedo) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      e.preventDefault();
+      if (isRedo) {
+        if (canRedo) void redo();
+      } else if (canUndo) {
+        void undo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canUndo, canRedo, undo, redo]);
 
   async function copyLink() {
     const url =
@@ -53,6 +83,28 @@ export default function Header() {
       </div>
 
       <div className="flex items-center gap-2">
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => void undo()}
+            disabled={!canUndo}
+            title="Undo (⌘Z)"
+            aria-label="Undo"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-base text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
+          >
+            ⟲
+          </button>
+          <button
+            type="button"
+            onClick={() => void redo()}
+            disabled={!canRedo}
+            title="Redo (⇧⌘Z)"
+            aria-label="Redo"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-base text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
+          >
+            ⟳
+          </button>
+        </div>
         <button
           type="button"
           onClick={copyLink}

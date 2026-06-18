@@ -15,7 +15,7 @@ import {
 
 import { initial } from "@/lib/colors";
 import { ownsParticipant } from "@/lib/editTokens";
-import { updateParticipant, updateWaypoint } from "@/lib/flockApi";
+import { uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
 import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
@@ -220,7 +220,6 @@ export default function MapCanvas() {
   const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
   const flockId = useFlockStore((s) => s.flockId);
-  const applyServerSession = useFlockStore((s) => s.applyServerSession);
 
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
@@ -238,8 +237,7 @@ export default function MapCanvas() {
     if (!flockId) return;
     const ll = marker.getLatLng();
     try {
-      const updated = await updateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
-      applyServerSession(updated, true);
+      await uUpdateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
       log.info("waypoint moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
     } catch (err) {
       marker.setLatLng(toLeaflet(origin));
@@ -250,10 +248,7 @@ export default function MapCanvas() {
     if (!flockId) return;
     const ll = marker.getLatLng();
     try {
-      const updated = await updateParticipant(flockId, id, {
-        startLocation: { lat: ll.lat, lng: ll.lng },
-      });
-      applyServerSession(updated, true);
+      await uUpdateParticipant(flockId, id, { startLocation: { lat: ll.lat, lng: ll.lng } }, "Move start");
       log.info("start moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
     } catch (err) {
       marker.setLatLng(toLeaflet(origin));

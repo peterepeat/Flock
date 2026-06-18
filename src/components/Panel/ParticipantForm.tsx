@@ -11,11 +11,11 @@ import {
   addParticipant,
   FlockApiError,
   removeParticipant,
-  setUnit,
   updateParticipant,
 } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
-import type { LatLng, ParticipantConstraints, Unit } from "@/lib/types";
+import type { LatLng, Participant, ParticipantConstraints, Unit } from "@/lib/types";
+import { recordParticipantEdit, uSetUnit } from "@/lib/undoableEdits";
 import {
   DISTANCE_MAX_KM,
   DISTANCE_MIN_KM,
@@ -71,6 +71,24 @@ function emptyDraft(): Draft {
   };
 }
 
+/** A participant's editable constraints — used to snapshot state at edit-open. */
+function toConstraints(p: Participant): ParticipantConstraints {
+  return {
+    name: p.name,
+    startLocation: p.startLocation,
+    startAddress: p.startAddress,
+    earliestStartTime: p.earliestStartTime,
+    finishLocation: p.finishLocation,
+    finishAddress: p.finishAddress,
+    latestFinishTime: p.latestFinishTime,
+    preferredPace: p.preferredPace,
+    maxPace: p.maxPace,
+    preferredDistance: p.preferredDistance,
+    maxDistance: p.maxDistance,
+    restStop: p.restStop,
+  };
+}
+
 export default function ParticipantForm() {
   const flockId = useFlockStore((s) => s.flockId)!;
   const session = useFlockStore((s) => s.session);
@@ -102,6 +120,11 @@ export default function ParticipantForm() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const initialised = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // For one-undo-per-edit-session: constraints at open vs the last value actually
+  // PERSISTED (a debounced edit cancelled on close was never saved, so recording
+  // the live draft would make redo restore a never-persisted state).
+  const priorConstraintsRef = useRef<ParticipantConstraints | null>(null);
+  const lastSavedConstraintsRef = useRef<ParticipantConstraints | null>(null);
 
   // Seed the draft from an existing participant (edit mode) once.
   useEffect(() => {
@@ -109,6 +132,7 @@ export default function ParticipantForm() {
     initialised.current = true;
     if (existing) {
       setTargetId(existing.id);
+      priorConstraintsRef.current = toConstraints(existing);
       setDraft({
         name: existing.name,
         startLocation: existing.startLocation,
@@ -186,6 +210,22 @@ export default function ParticipantForm() {
   const constraints = buildConstraints(draft);
   const canSave = constraints != null;
 
+  // On closing an EDIT session, record ONE undo step reverting to the open-time
+  // constraints — the per-keystroke autosaves below are deliberately not each
+  // undoable. `next` comes from the last PERSISTED constraints so undo/redo match
+  // the server. editingId/flockId from first render identify the session (null for
+  // a new-join, which isn't an undoable edit).
+  useEffect(() => {
+    return () => {
+      const prior = priorConstraintsRef.current;
+      const next = lastSavedConstraintsRef.current;
+      if (editingId && prior && next && JSON.stringify(prior) !== JSON.stringify(next)) {
+        recordParticipantEdit(flockId, editingId, prior, next);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-save (edit mode only): debounce 500ms after the last change.
   useEffect(() => {
     if (!targetId) return; // creation uses the explicit button
@@ -196,6 +236,7 @@ export default function ParticipantForm() {
       try {
         const updated = await updateParticipant(flockId, targetId, constraints);
         applyServerSession(updated, true);
+        lastSavedConstraintsRef.current = constraints;
         setSaveState("saved");
         log.debug("autosaved", { targetId });
       } catch (err) {
@@ -268,8 +309,7 @@ export default function ParticipantForm() {
             value={unit}
             onChange={async (u) => {
               try {
-                const updated = await setUnit(flockId, u);
-                applyServerSession(updated, true);
+                await uSetUnit(flockId, u);
               } catch (err) {
                 log.error("set unit failed", { error: String(err) });
               }
