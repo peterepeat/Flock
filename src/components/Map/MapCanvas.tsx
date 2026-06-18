@@ -369,9 +369,13 @@ export default function MapCanvas() {
           );
         })}
 
-        {/* Meeting points — only where the flock converges (start of each
-            together-period). */}
+        {/* Meeting points — a diamond only where the flock genuinely grows (the
+            rendezvous, a joiner, or two neighbours converging on a feeder). Legs
+            where the set only shrinks (a peel-off) are drawn as together segments
+            but aren't meetings, so they earn no diamond. Sessions computed before
+            isConvergence existed lack the flag → treated as "show" (prior behaviour). */}
         {sharedSegments.map((seg, i) => {
+          if (seg.isConvergence === false) return null;
           const first = seg.geometry.coordinates[0];
           if (!first) return null;
           const names = seg.participantIds.map(nameOf);
@@ -476,7 +480,9 @@ function Legend() {
   const session = useFlockStore((s) => s.session);
   if (!session) return null;
   const shared = session.sharedSegments ?? [];
+  const flockRoute = session.flockRoute ?? null;
   const totalMin = Math.round(shared.reduce((s, x) => s + x.overlapMinutes, 0));
+  const hasMeet = shared.some((s) => s.isConvergence !== false);
 
   return (
     <div className="absolute bottom-4 right-4 z-[500] max-w-[200px] rounded-xl border border-white/10 bg-surface-mid/90 p-3 text-xs shadow-panel backdrop-blur">
@@ -488,6 +494,36 @@ function Legend() {
           </li>
         ))}
       </ul>
+      {/* Key for the map elements that aren't a person: the shared spine, the
+          flocking glow, and the meet-up diamonds. */}
+      {(flockRoute || shared.length > 0) && (
+        <ul className="mt-2 space-y-1.5 border-t border-white/10 pt-2">
+          {flockRoute && (
+            <li className="flex items-center gap-2">
+              <span className="h-[3px] w-3.5 rounded-full bg-white/75" />
+              <span className="text-fog">Flock route</span>
+            </li>
+          )}
+          {shared.length > 0 && (
+            <li className="flex items-center gap-2">
+              <span
+                className="h-[3px] w-3.5 rounded-full"
+                style={{ background: "var(--together)" }}
+              />
+              <span className="text-fog">Flocking together</span>
+            </li>
+          )}
+          {hasMeet && (
+            <li className="flex items-center gap-2">
+              <span
+                className="ml-1 h-2 w-2 rotate-45"
+                style={{ background: "var(--together)", boxShadow: "0 0 6px var(--together)" }}
+              />
+              <span className="text-fog">Meet-up</span>
+            </li>
+          )}
+        </ul>
+      )}
       <div className="mono mt-2 border-t border-white/10 pt-2 text-fog">
         {shared.length} together · {totalMin} min flocking
       </div>

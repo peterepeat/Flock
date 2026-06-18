@@ -715,14 +715,31 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     ...soloRoutes,
   ];
 
-  const sharedSegments: SharedSegment[] = legs
-    .filter((lg) => lg.paceSec != null && lg.present.length >= 2)
-    .map((lg) => ({
-      participantIds: lg.present,
-      geometry: toLineString(sliceKm(backbone, lg.lo, lg.hi)),
-      overlapMinutes: round2((lg.endSec - lg.startSec) / 60),
-      startTime: secToTime(T0abs + lg.startSec),
-    }));
+  // A leg is a "meet here" point only when someone JOINS the flock here — the
+  // present-set gains a member relative to the previous TRAVEL leg (and the first
+  // one, where everyone converges at the rendezvous). A pure peel-off leg (the set
+  // only shrinks) is still drawn as a together segment but isn't a meeting, so it
+  // earns no diamond. We compare against the previous *travel* leg, NOT legs[i-1]:
+  // computeLegs interleaves a zero-length STOP leg at each waypoint stop, and a
+  // stop leg's present-set already includes anyone joining at that km — so using
+  // it as `prev` would mask a real join (notably a rendezvous café at km 0, which
+  // would otherwise lose its diamond). Stop legs never reset the tracked set.
+  const sharedSegments: SharedSegment[] = [];
+  let prevTravelPresent: string[] = [];
+  for (const lg of legs) {
+    if (lg.paceSec == null) continue; // stop leg — not a segment, doesn't reset join detection
+    if (lg.present.length >= 2) {
+      const joined = lg.present.some((id) => !prevTravelPresent.includes(id));
+      sharedSegments.push({
+        participantIds: lg.present,
+        geometry: toLineString(sliceKm(backbone, lg.lo, lg.hi)),
+        overlapMinutes: round2((lg.endSec - lg.startSec) / 60),
+        startTime: secToTime(T0abs + lg.startSec),
+        isConvergence: joined,
+      });
+    }
+    prevTravelPresent = lg.present;
+  }
 
   // Together-Minutes (wall + system) + pairwise.
   let togetherWallMin = 0;
@@ -758,6 +775,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
       geometry: toLineString(run.geom),
       overlapMinutes: round2(durMin),
       startTime: secToTime(run.startSec),
+      isConvergence: true, // two neighbours genuinely converge on a feeder leg
     });
   }
 

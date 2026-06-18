@@ -90,6 +90,12 @@ export interface SharedSegment {
   geometry: GeoJSON.LineString;
   overlapMinutes: number; // time all are on this segment together
   startTime: string; // earliest participant's time at start of segment
+  // True only where the flock genuinely grows here — someone joins (or a feeder
+  // convergence). Drives the "meet here" diamond, so peel-off boundaries (the set
+  // only shrinks) don't get mislabelled as meetings. Optional: absent on sessions
+  // computed before this field existed → the map treats absence as "show" (the
+  // prior behaviour) until the next recalc.
+  isConvergence?: boolean;
 }
 
 export interface FlockSession {
