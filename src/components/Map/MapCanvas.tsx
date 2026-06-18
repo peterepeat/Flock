@@ -166,8 +166,18 @@ function ClickHandler() {
         return;
       }
       // A bare click on empty map (Leaflet doesn't fire this for marker/route
-      // clicks) clears any route focus.
-      useFlockStore.getState().setSelected(null);
+      // clicks). Priority: clear a route focus first; otherwise, in the list view
+      // with nothing else open, drop a waypoint here — this opens the prefilled add
+      // editor, and addWaypoint appends it to the END of the route.
+      const st = useFlockStore.getState();
+      if (st.selectedParticipantId) {
+        st.setSelected(null);
+        return;
+      }
+      if (!st.formOpen && st.waypointEditor.mode === "closed" && st.session?.lockedAt == null) {
+        log.debug("map click → append waypoint", { lat: ll.lat, lng: ll.lng });
+        st.setWaypointPin(ll);
+      }
     },
   });
   return null;
@@ -203,6 +213,9 @@ export default function MapCanvas() {
   // When set, only this runner's route is drawn (the rest declutter to the shared
   // spine + glow); when null, no individual route lines show.
   const focus = selected ?? hovered;
+  // Suppress the click a waypoint marker can fire right after a drag (so dragging
+  // to reposition doesn't also open its editor).
+  const wpDragRef = useRef(false);
   const pendingStart = useFlockStore((s) => s.pendingStart);
   const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
@@ -526,13 +539,34 @@ export default function MapCanvas() {
             draggable={!locked}
             zIndexOffset={400}
             eventHandlers={{
-              dragend: (e) => moveWaypoint(w.id, e.target as L.Marker, w.location),
+              dragend: (e) => {
+                const m = e.target as L.Marker;
+                const ll = m.getLatLng();
+                // Distinguish a real reposition from finger jitter on a touch tap:
+                // only >3 m counts as a drag (and triggers a recalc); otherwise snap
+                // back so the click still reads as a tap-to-edit.
+                const moved = distanceMeters(w.location, { lat: ll.lat, lng: ll.lng }) > 3;
+                wpDragRef.current = moved;
+                if (moved) void moveWaypoint(w.id, m, w.location);
+                else m.setLatLng(toLeaflet(w.location));
+                // Fallback reset in case Leaflet suppresses the post-drag click.
+                setTimeout(() => {
+                  wpDragRef.current = false;
+                }, 300);
+              },
+              click: () => {
+                if (wpDragRef.current) {
+                  wpDragRef.current = false; // consume the click Leaflet fires after a drag
+                  return;
+                }
+                if (!locked) useFlockStore.getState().openEditWaypoint(w.id);
+              },
             }}
           >
             <Tooltip direction="top" offset={[0, -22]}>
               <span className="mono">{w.name}</span>
               {w.stopMinutes > 0 ? ` · ${w.stopMinutes} min stop` : ""}
-              {!locked ? " · drag to move" : ""}
+              {!locked ? " · tap to edit · drag to move" : ""}
             </Tooltip>
           </Marker>
         ))}

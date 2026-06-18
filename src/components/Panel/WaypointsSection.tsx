@@ -27,16 +27,18 @@ interface EditorData {
   stopMinutes: number;
 }
 
-// One editor is open at a time: the add form, or one row's inline edit.
-type EditorState = { mode: "closed" } | { mode: "add" } | { mode: "edit"; id: string };
-
 export default function WaypointsSection() {
   const flockId = useFlockStore((s) => s.flockId)!;
   const session = useFlockStore((s) => s.session);
   const applyServerSession = useFlockStore((s) => s.applyServerSession);
   const waypointPin = useFlockStore((s) => s.waypointPin);
+  // The add/edit editor lives in the store so the map can open a waypoint for
+  // editing and coordinate the "tap empty map to add" gesture.
+  const editor = useFlockStore((s) => s.waypointEditor);
+  const openAddWaypoint = useFlockStore((s) => s.openAddWaypoint);
+  const openEditWaypoint = useFlockStore((s) => s.openEditWaypoint);
+  const close = useFlockStore((s) => s.closeWaypointEditor);
 
-  const [editor, setEditor] = useState<EditorState>({ mode: "closed" });
   const [dragId, setDragId] = useState<string | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const [ioMsg, setIoMsg] = useState<string | null>(null);
@@ -50,24 +52,20 @@ export default function WaypointsSection() {
   // A pin dropped on the map with no editor open starts a fresh add (the open
   // editor, if any, folds the pin in itself — see WaypointEditor).
   useEffect(() => {
-    if (waypointPin) setEditor((e) => (e.mode === "closed" ? { mode: "add" } : e));
-  }, [waypointPin]);
+    if (waypointPin && useFlockStore.getState().waypointEditor.mode === "closed") openAddWaypoint();
+  }, [waypointPin, openAddWaypoint]);
 
   // Reconcile the editor against the live session: if the row being edited
   // disappears (a concurrent remove via polling) or the flock gets locked
   // mid-edit/add, collapse the editor — otherwise the panel wedges with no
   // editor AND no "+ Add" button (both gated on the editor state).
   useEffect(() => {
+    const ed = useFlockStore.getState().waypointEditor;
     const wps = session?.waypoints ?? [];
     const isLocked = session?.lockedAt != null;
-    setEditor((e) => {
-      if (e.mode === "edit" && (isLocked || !wps.some((w) => w.id === e.id))) return { mode: "closed" };
-      if (e.mode === "add" && isLocked) return { mode: "closed" };
-      return e;
-    });
-  }, [session]);
-
-  const close = () => setEditor({ mode: "closed" });
+    if (ed.mode === "edit" && (isLocked || !wps.some((w) => w.id === ed.id))) close();
+    else if (ed.mode === "add" && isLocked) close();
+  }, [session, close]);
 
   async function handleAdd(data: EditorData) {
     const updated = await addWaypoint(flockId, { ...data });
@@ -243,13 +241,13 @@ export default function WaypointsSection() {
                       title={locked ? undefined : "Tap to edit"}
                       onClick={() => {
                         if (locked || draggingRef.current) return;
-                        setEditor({ mode: "edit", id: w.id });
+                        openEditWaypoint(w.id);
                       }}
                       onKeyDown={(e) => {
                         if (locked) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setEditor({ mode: "edit", id: w.id });
+                          openEditWaypoint(w.id);
                         }
                       }}
                       className={`min-w-0 flex-1 text-left ${locked ? "" : "cursor-pointer"}`}
@@ -290,7 +288,7 @@ export default function WaypointsSection() {
       {!locked && editor.mode === "closed" && (
         <button
           type="button"
-          onClick={() => setEditor({ mode: "add" })}
+          onClick={() => openAddWaypoint()}
           className="text-sm text-accent hover:brightness-110"
         >
           + Add a waypoint

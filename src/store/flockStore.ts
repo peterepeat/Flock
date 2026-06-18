@@ -6,6 +6,11 @@ import type { FlockSession, LatLng } from "@/lib/types";
 export type FlockStatus = "loading" | "ready" | "notfound" | "error";
 export type CalcStatus = "idle" | "working" | "error";
 
+// The waypoint add/edit editor. In the store (not local to WaypointsSection) so
+// the map can open a waypoint for editing and coordinate the "tap empty map to
+// add" gesture. One editor is open at a time.
+export type WaypointEditorState = { mode: "closed" } | { mode: "add" } | { mode: "edit"; id: string };
+
 interface FlockState {
   flockId: string | null;
   session: FlockSession | null;
@@ -28,6 +33,7 @@ interface FlockState {
   // Shared-waypoint placement
   placingWaypoint: boolean; // map is in "click to place a shared waypoint" mode
   waypointPin: LatLng | null; // location chosen for the waypoint being added (map → form)
+  waypointEditor: WaypointEditorState; // which waypoint editor (add/edit) is open, if any
 
   // Route calculation feedback
   calcStatus: CalcStatus;
@@ -53,6 +59,9 @@ interface FlockState {
   setPlacingFinish: (placing: boolean) => void;
   setPlacingWaypoint: (placing: boolean) => void;
   setWaypointPin: (ll: LatLng | null) => void;
+  openAddWaypoint: () => void;
+  openEditWaypoint: (waypointId: string) => void;
+  closeWaypointEditor: () => void;
   setCalcStatus: (status: CalcStatus) => void;
   setCalcWarnings: (warnings: CalcWarning[]) => void;
   setCalcError: (message: string | null) => void;
@@ -77,6 +86,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   placingFinish: false,
   placingWaypoint: false,
   waypointPin: null,
+  waypointEditor: { mode: "closed" },
 
   calcStatus: "idle",
   calcWarnings: [],
@@ -123,6 +133,21 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setPlacingFinish: (placing) => set({ placingFinish: placing }),
   setPlacingWaypoint: (placing) => set({ placingWaypoint: placing }),
   setWaypointPin: (ll) => set({ waypointPin: ll }),
+  openAddWaypoint: () => set({ waypointEditor: { mode: "add" } }),
+  // Editing a waypoint lives in the list view, so close the participant form and
+  // any placing mode first.
+  openEditWaypoint: (waypointId) =>
+    set({
+      waypointEditor: { mode: "edit", id: waypointId },
+      formOpen: false,
+      editingParticipantId: null,
+      placingPin: false,
+      placingFinish: false,
+      selectedParticipantId: null, // editing a waypoint clears any route focus
+      waypointPin: null, // drop any stray pin so it can't pop a spurious add
+    }),
+  closeWaypointEditor: () =>
+    set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
   setCalcError: (message) => set({ calcError: message }),

@@ -14,6 +14,7 @@ export default function FlockPanel() {
   const editingId = useFlockStore((s) => s.editingParticipantId);
   const openAddForm = useFlockStore((s) => s.openAddForm);
   const calcError = useFlockStore((s) => s.calcError);
+  const waypointEditing = useFlockStore((s) => s.waypointEditor.mode !== "closed");
   const [expanded, setExpanded] = useState(false);
 
   const locked = session?.lockedAt != null;
@@ -23,8 +24,8 @@ export default function FlockPanel() {
     !!session?.computedRoutes &&
     withStart >= 2 &&
     (session.sharedSegments?.length ?? 0) === 0;
-  // On mobile the sheet auto-expands when the form is open.
-  const sheetExpanded = expanded || formOpen;
+  // On mobile the sheet auto-expands when the form or a waypoint editor is open.
+  const sheetExpanded = expanded || formOpen || waypointEditing;
 
   return (
     <aside
