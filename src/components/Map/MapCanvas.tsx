@@ -255,6 +255,22 @@ export default function MapCanvas() {
 
   const flockId = useFlockStore((s) => s.flockId);
 
+  // Stable [lat,lng] identity per marker. react-leaflet re-applies a Marker's
+  // `position` (marker.setLatLng) only when the prop changes BY REFERENCE — and
+  // toLeaflet() builds a fresh array every render, so ANY re-render during a drag
+  // (a 5s poll, a recalc finishing, a hover) snapped the marker back to the store
+  // position mid-gesture. Returning the SAME array while the coords are unchanged
+  // makes react-leaflet skip setLatLng, so an in-flight drag is never yanked; a
+  // genuine move (the server echo after dragend) yields a new array and re-pins.
+  const posCacheRef = useRef<Map<string, [number, number]>>(new Map());
+  const stablePos = (key: string, ll: LatLng): [number, number] => {
+    const prev = posCacheRef.current.get(key);
+    if (prev && prev[0] === ll.lat && prev[1] === ll.lng) return prev;
+    const next: [number, number] = [ll.lat, ll.lng];
+    posCacheRef.current.set(key, next);
+    return next;
+  };
+
   const participants = session?.participants ?? [];
   const routes = session?.computedRoutes ?? [];
   const sharedSegments = session?.sharedSegments ?? [];
@@ -466,9 +482,11 @@ export default function MapCanvas() {
             const color = p?.color ?? "#fff";
             const isFocused = focus === r.participantId;
             // Faint at rest; the focused runner pops; the rest recede further when
-            // one is focused so the focused line reads cleanly.
+            // one is focused so the focused line reads cleanly. At-rest lines are a
+            // touch thicker (4) than the receded ones (3) so individual paths read
+            // when nothing is selected.
             const opacity = isFocused ? 1 : focus ? 0.16 : 0.32;
-            const weight = isFocused ? 6 : 3;
+            const weight = isFocused ? 6 : focus ? 3 : 4;
             return (
             <Polyline
               key={r.participantId}
@@ -530,7 +548,7 @@ export default function MapCanvas() {
           return (
             <Marker
               key={`start-${p.id}`}
-              position={toLeaflet(p.startLocation)}
+              position={stablePos(`start-${p.id}`, p.startLocation)}
               icon={divMarker(p.color, initial(p.name), "start", canDrag)}
               draggable={canDrag}
               eventHandlers={{
@@ -584,7 +602,7 @@ export default function MapCanvas() {
         {waypoints.map((w, i) => (
           <Marker
             key={`wp-${w.id}`}
-            position={toLeaflet(w.location)}
+            position={stablePos(`wp-${w.id}`, w.location)}
             icon={waypointIcon(i + 1, w.stopMinutes > 0, !locked)}
             draggable={!locked}
             zIndexOffset={400}
