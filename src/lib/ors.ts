@@ -11,7 +11,7 @@
 // most likely to fail (rate limits, no-route), so it is instrumented closely.
 // ---------------------------------------------------------------------------
 
-import { toORS } from "./geo";
+import { despurLoop, fromORS, toORS } from "./geo";
 import { createLogger } from "./logger";
 import type { LatLng } from "./types";
 
@@ -19,6 +19,13 @@ const log = createLogger("ors");
 
 const ORS_BASE = "https://api.openrouteservice.org/v2/directions/foot-hiking/geojson";
 const MAX_RETRIES = 2;
+
+// ORS round-trips wander out-and-back; de-spur (despurLoop) trims those dead
+// folds, which SHORTENS the loop. So we over-request by this fraction to still
+// land near the asked length. The post-trim length is approximate — callers that
+// need a hard length already truncate/scale it (truncateToKm, fitLoop) — so this
+// is a tuning knob, not a correctness dependency.
+const DESPUR_OVERREQUEST = 0.15;
 
 export type RouteErrorCode =
   | "no-key"
@@ -85,14 +92,16 @@ export async function getRoute(waypoints: LatLng[]): Promise<OrsRoute> {
 export async function getRoundTrip(start: LatLng, lengthKm: number, seed = 1): Promise<OrsRoute> {
   const coordinates = [toORS(start)];
   const seeds = [seed, seed + 1, seed + 3, seed + 7, seed + 17];
+  const requestedKm = lengthKm * (1 + DESPUR_OVERREQUEST);
   let lastErr: RouteError | null = null;
   for (let i = 0; i < seeds.length; i++) {
     const s = seeds[i];
     try {
-      return await call(
-        { coordinates, roundTrip: { lengthMeters: Math.round(lengthKm * 1000), seed: s, points: 4 } },
-        { kind: "loop", lengthKm, seed: s, seedAttempt: i },
+      const raw = await call(
+        { coordinates, roundTrip: { lengthMeters: Math.round(requestedKm * 1000), seed: s, points: 4 } },
+        { kind: "loop", lengthKm, requestedKm: Number(requestedKm.toFixed(2)), seed: s, seedAttempt: i },
       );
+      return despur(raw);
     } catch (err) {
       if (err instanceof RouteError && err.code === "no-route") {
         lastErr = err; // unlucky seed — try the next one
@@ -103,6 +112,30 @@ export async function getRoundTrip(start: LatLng, lengthKm: number, seed = 1): P
   }
   log.warn("round-trip failed for every seed", { lengthKm, seeds: seeds.length });
   throw lastErr ?? new RouteError("no-route", "No round-trip route found");
+}
+
+/**
+ * Trim dead out-and-back folds from a round-trip's geometry. Returns a new
+ * OrsRoute with cleaned geometry + recomputed distance; orsDurationSec is scaled
+ * by the length ratio (the engine recomputes timing from pace and never reads it,
+ * but we keep it consistent for diagnostics).
+ */
+function despur(route: OrsRoute): OrsRoute {
+  const raw = (route.geometry.coordinates as [number, number][]).map(fromORS);
+  const { coords, distanceKm } = despurLoop(raw);
+  if (coords.length === raw.length) return route; // nothing trimmed
+  const ratio = route.distanceKm > 0 ? distanceKm / route.distanceKm : 1;
+  log.info("de-spurred round-trip", {
+    fromKm: Number(route.distanceKm.toFixed(2)),
+    toKm: Number(distanceKm.toFixed(2)),
+    fromPts: raw.length,
+    toPts: coords.length,
+  });
+  return {
+    geometry: { type: "LineString", coordinates: coords.map(toORS) },
+    distanceKm,
+    orsDurationSec: route.orsDurationSec * ratio,
+  };
 }
 
 interface CallBody {

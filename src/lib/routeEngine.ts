@@ -492,28 +492,33 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
   }
 }
 
-/** A standalone solo loop for a runner too far to join the flock route. */
+/**
+ * A standalone solo loop for a runner too far to join the flock route, sized to
+ * their target but kept WITHIN their hard ceiling — the distance cap AND the
+ * latest-finish window. A round-trip can't be trimmed after the fact, and
+ * getRoundTrip over-requests to absorb de-spurring, so we fit it to the ceiling
+ * via fitLoop rather than trust the returned length (which could otherwise bust
+ * a tight cap/deadline). Every stranded runner has a cap or a deadline set — they
+ * are the only two strand triggers — so the ceiling is always bounded. Null when
+ * even a minimal loop won't fit (the runner keeps the strand warning).
+ */
 async function soloLoop(b: RunnerBuild): Promise<ComputedRoute | null> {
-  let target = targetDistanceKm(b.p) ?? DEFAULT_LOOP_DISTANCE_KM;
-  // Keep the solo run inside any latest-finish window too.
+  let ceiling = b.p.maxDistance ?? targetDistanceKm(b.p) ?? DEFAULT_LOOP_DISTANCE_KM;
   if (b.p.latestFinishTime) {
-    const budgetMin = (timeToSec(b.p.latestFinishTime) - b.earliestSec) / 60;
-    const maxByTime = (budgetMin * 60 * 0.95) / b.ownPaceSec;
-    if (maxByTime > 0.5) target = Math.min(target, maxByTime);
+    // dist * pace must land at or before the latest finish (3% headroom for rounding).
+    const maxByTime = ((timeToSec(b.p.latestFinishTime) - b.earliestSec) * 0.97) / b.ownPaceSec;
+    if (maxByTime > 0.5) ceiling = Math.min(ceiling, maxByTime);
   }
-  let ors: OrsRoute;
-  try {
-    ors = await getRoundTrip(b.home, Math.max(1, target));
-  } catch {
-    return null;
-  }
-  const dist = ors.distanceKm;
+  const want = Math.min(targetDistanceKm(b.p) ?? DEFAULT_LOOP_DISTANCE_KM, ceiling);
+  const loop = await fitLoop(b.home, want, ceiling);
+  if (!loop) return null;
+  const dist = loop.km;
   const depart = b.earliestSec;
   const arrival = depart + dist * b.ownPaceSec;
   return {
     participantId: b.p.id,
     waypoints: [b.home, b.home],
-    geometry: ors.geometry,
+    geometry: toLineString(loop.geom),
     distanceKm: round2(dist),
     estimatedDurationMinutes: Math.round((dist * b.ownPaceSec) / 60),
     departureTime: secToTime(depart),
