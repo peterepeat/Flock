@@ -7,6 +7,7 @@ import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import { FlockApiError } from "@/lib/flockApi";
 import { buildFlockGpx, parseFlockGpx } from "@/lib/flockGpx";
+import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import {
@@ -377,14 +378,25 @@ function WaypointEditor({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Fold a map-dropped pin into this editor (only one editor is open at a time).
+  // Fold a map-dropped pin into this editor (only one editor is open at a time),
+  // then reverse-geocode it to suggest a name (nearby POI / address) — non-blocking,
+  // and only applied if the user hasn't typed over it or dropped a newer pin.
+  const lastPinRef = useRef<LatLng | null>(null);
   useEffect(() => {
-    if (waypointPin) {
-      setLocation(waypointPin);
-      setAddress((a) => a || "Dropped pin");
-      setPlacingWaypoint(false);
-      setWaypointPin(null);
-    }
+    if (!waypointPin) return;
+    const ll = waypointPin;
+    lastPinRef.current = ll;
+    setLocation(ll);
+    setAddress((a) => a || "Dropped pin");
+    setPlacingWaypoint(false);
+    setWaypointPin(null);
+    reverseGeocode(ll.lat, ll.lng).then((r) => {
+      if (lastPinRef.current !== ll) return; // a newer pin superseded this one
+      const label = pinLabel(r);
+      if (!label) return;
+      setAddress((a) => (!a || a === "Dropped pin" ? label : a));
+      if (r?.name) setName((n) => n || r.name!);
+    });
   }, [waypointPin, setPlacingWaypoint, setWaypointPin]);
 
   // Leaving the editor by ANY path (cancel, save, switching rows, programmatic

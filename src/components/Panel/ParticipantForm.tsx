@@ -13,6 +13,7 @@ import {
   removeParticipant,
   updateParticipant,
 } from "@/lib/flockApi";
+import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
 import type { LatLng, Participant, ParticipantConstraints, Unit } from "@/lib/types";
 import { recordParticipantEdit, uSetUnit } from "@/lib/undoableEdits";
@@ -159,29 +160,51 @@ export default function ParticipantForm() {
     setPendingFinish(draft.finishMode === "elsewhere" ? draft.finishLocation : null);
   }, [draft.finishMode, draft.finishLocation, setPendingFinish]);
 
-  // Fold a map-dropped start pin into the draft.
+  // Fold a map-dropped start pin into the draft, then reverse-geocode it to name
+  // the spot (a nearby POI / address) — non-blocking, and only if the user hasn't
+  // since typed an address or moved the pin.
   useEffect(() => {
-    if (draftStart) {
-      setDraft((d) => ({ ...d, startLocation: draftStart, startAddress: d.startAddress || "Dropped pin" }));
-      setPlacingPin(false);
-      setDraftStart(null);
-      log.debug("start pin dropped", { draftStart });
-    }
+    if (!draftStart) return;
+    const ll = draftStart;
+    setDraft((d) => ({ ...d, startLocation: ll, startAddress: d.startAddress || "Dropped pin" }));
+    setPlacingPin(false);
+    setDraftStart(null);
+    log.debug("start pin dropped", { ll });
+    reverseGeocode(ll.lat, ll.lng).then((r) => {
+      const label = pinLabel(r);
+      if (!label) return;
+      setDraft((d) => {
+        const same = d.startLocation?.lat === ll.lat && d.startLocation?.lng === ll.lng;
+        return same && (!d.startAddress || d.startAddress === "Dropped pin")
+          ? { ...d, startAddress: label }
+          : d;
+      });
+    });
   }, [draftStart, setPlacingPin, setDraftStart]);
 
-  // Fold a map-dropped finish pin into the draft.
+  // Fold a map-dropped finish pin into the draft, then reverse-name it (as above).
   useEffect(() => {
-    if (draftFinish) {
-      setDraft((d) => ({
-        ...d,
-        finishMode: "elsewhere",
-        finishLocation: draftFinish,
-        finishAddress: d.finishAddress || "Dropped pin",
-      }));
-      setPlacingFinish(false);
-      setDraftFinish(null);
-      log.debug("finish pin dropped", { draftFinish });
-    }
+    if (!draftFinish) return;
+    const ll = draftFinish;
+    setDraft((d) => ({
+      ...d,
+      finishMode: "elsewhere",
+      finishLocation: ll,
+      finishAddress: d.finishAddress || "Dropped pin",
+    }));
+    setPlacingFinish(false);
+    setDraftFinish(null);
+    log.debug("finish pin dropped", { ll });
+    reverseGeocode(ll.lat, ll.lng).then((r) => {
+      const label = pinLabel(r);
+      if (!label) return;
+      setDraft((d) => {
+        const same = d.finishLocation?.lat === ll.lat && d.finishLocation?.lng === ll.lng;
+        return same && (!d.finishAddress || d.finishAddress === "Dropped pin")
+          ? { ...d, finishAddress: label }
+          : d;
+      });
+    });
   }, [draftFinish, setPlacingFinish, setDraftFinish]);
 
   function buildConstraints(d: Draft): ParticipantConstraints | null {

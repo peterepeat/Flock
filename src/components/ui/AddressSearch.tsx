@@ -3,9 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 
 import { createLogger } from "@/lib/logger";
-import type { GeocodeResult } from "@/lib/types";
+import type { GeocodeResult, LatLng } from "@/lib/types";
+import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("address-search");
+
+// Photon (the primary backend) permits type-ahead, so we debounce far tighter
+// than the 1s the old Nominatim-only path was forced into.
+const DEBOUNCE_MS = 250;
+const MIN_CHARS = 3;
+const CACHE_MAX = 50;
 
 interface AddressSearchProps {
   initialValue?: string;
@@ -23,46 +30,104 @@ export default function AddressSearch({
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const cacheRef = useRef<Map<string, GeocodeResult[]>>(new Map());
   const justSelected = useRef(false);
   const firstRun = useRef(true);
+  const focused = useRef(false);
+
+  // The live map view biases results toward what the user is looking at. Held in a
+  // ref so panning doesn't re-arm the debounce; read at fetch time.
+  const mapCenter = useFlockStore((s) => s.mapCenter);
+  const mapBounds = useFlockStore((s) => s.mapBounds);
+  const viewRef = useRef({ mapCenter, mapBounds });
+  viewRef.current = { mapCenter, mapBounds };
+
+  // Cache key bundles the query with the bias centre, so a result fetched for one
+  // map view isn't served as if it were biased to another.
+  const keyFor = (q: string, c: LatLng | null) =>
+    `${q.toLowerCase()}|${c ? `${c.lat.toFixed(2)},${c.lng.toFixed(2)}` : ""}`;
+
+  // Sync the box to an EXTERNAL change of initialValue (e.g. a dropped pin a
+  // reverse-geocode just named) — but only into an EMPTY, unfocused field, so we
+  // never overwrite text the user has typed or a result they just picked.
+  useEffect(() => {
+    if (focused.current || query.length > 0) return;
+    if (initialValue === query) return;
+    justSelected.current = true; // a synced value must not trigger a search
+    setQuery(initialValue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialValue]);
 
   useEffect(() => {
-    // Don't auto-search the value present at mount — when the field is pre-filled
-    // (e.g. editing an existing waypoint), the location is already known, so a
-    // geocode + results dropdown on open would be unsolicited. Search only once
-    // the user actually edits the text.
+    // Don't auto-search the value present at mount (pre-filled = already known).
     if (firstRun.current) {
       firstRun.current = false;
       return;
     }
-    // Honour the Nominatim 1 req/sec limit with a 1s debounce.
+    // A pick from the dropdown / an external sync sets the box text; don't search it.
     if (justSelected.current) {
       justSelected.current = false;
       return;
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (query.trim().length < 3) {
+    const q = query.trim();
+    if (q.length < MIN_CHARS) {
       setResults([]);
+      setOpen(false);
       return;
     }
+
+    // Instant path: a cached result for this exact query+view (e.g. after a backspace).
+    const cached = cacheRef.current.get(keyFor(q, viewRef.current.mapCenter));
+    if (cached) {
+      setResults(cached);
+      setOpen(true);
+      return;
+    }
+
     debounceRef.current = setTimeout(async () => {
+      // Cancel any in-flight request so a slow earlier response can't clobber this one.
+      abortRef.current?.abort();
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      // Snapshot the view ONCE so the bias we fetch with and the key we store under
+      // are the same, even if the user pans mid-flight.
+      const view = viewRef.current;
+      const key = keyFor(q, view.mapCenter);
       setLoading(true);
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+        const params = new URLSearchParams({ q });
+        if (view.mapCenter) {
+          params.set("lat", String(view.mapCenter.lat));
+          params.set("lng", String(view.mapCenter.lng));
+        }
+        if (view.mapBounds) {
+          const b = view.mapBounds;
+          params.set("viewbox", `${b.minLng},${b.minLat},${b.maxLng},${b.maxLat}`);
+        }
+        const res = await fetch(`/api/geocode?${params.toString()}`, { signal: ctrl.signal });
         const data = (await res.json()) as { results: GeocodeResult[] };
+        if (cacheRef.current.size >= CACHE_MAX) {
+          const oldest = cacheRef.current.keys().next().value;
+          if (oldest !== undefined) cacheRef.current.delete(oldest);
+        }
+        cacheRef.current.set(key, data.results);
         setResults(data.results);
         setOpen(true);
-        log.debug("results", { q: query, count: data.results.length });
+        log.debug("results", { q, count: data.results.length });
       } catch (err) {
+        if ((err as Error)?.name === "AbortError") return; // superseded by a newer keystroke
         log.error("search failed", { error: String(err) });
         setResults([]);
       } finally {
-        setLoading(false);
+        if (abortRef.current === ctrl) setLoading(false); // only the latest clears the spinner
       }
-    }, 1000);
+    }, DEBOUNCE_MS);
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      abortRef.current?.abort(); // drop an in-flight request on unmount / next keystroke
     };
   }, [query]);
 
@@ -81,7 +146,13 @@ export default function AddressSearch({
         value={query}
         placeholder={placeholder}
         onChange={(e) => setQuery(e.target.value)}
-        onFocus={() => results.length > 0 && setOpen(true)}
+        onFocus={() => {
+          focused.current = true;
+          if (results.length > 0) setOpen(true);
+        }}
+        onBlur={() => {
+          focused.current = false;
+        }}
         className="w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none placeholder:text-fog focus:border-accent/60"
       />
       {loading && (

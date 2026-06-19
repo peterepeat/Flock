@@ -2,7 +2,7 @@
 
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   MapContainer,
   Marker,
@@ -140,6 +140,37 @@ function CursorMode() {
     map.getContainer().style.cursor =
       placingPin || placingFinish || placingWaypoint ? "crosshair" : "";
   }, [map, placingPin, placingFinish, placingWaypoint]);
+  return null;
+}
+
+/**
+ * Track the live map viewport into the store on pan/zoom, so the address search
+ * can bias autocomplete toward what the user is currently looking at (center =
+ * Photon focus point; bounds = Nominatim-fallback viewbox).
+ */
+function ViewportTracker() {
+  const setMapView = useFlockStore((s) => s.setMapView);
+  const publish = useCallback(
+    (map: L.Map) => {
+      const c = map.getCenter();
+      const b = map.getBounds();
+      setMapView({
+        center: { lat: c.lat, lng: c.lng },
+        bounds: { minLat: b.getSouth(), minLng: b.getWest(), maxLat: b.getNorth(), maxLng: b.getEast() },
+      });
+    },
+    [setMapView],
+  );
+  const map = useMapEvents({
+    moveend(e) {
+      publish(e.target as L.Map);
+    },
+    zoomend(e) {
+      publish(e.target as L.Map);
+    },
+  });
+  // Seed the store with the initial view (no move event fires on first load).
+  useEffect(() => publish(map), [map, publish]);
   return null;
 }
 
@@ -366,6 +397,7 @@ export default function MapCanvas() {
 
         <ClickHandler />
         <CursorMode />
+        <ViewportTracker />
         <FitBounds points={allPoints} />
 
         {/* The Flock Route — the shared backbone spine the whole flock runs along.

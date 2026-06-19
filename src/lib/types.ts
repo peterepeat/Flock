@@ -132,6 +132,14 @@ export interface GeocodeResult {
   lng: number;
 }
 
+// Result of naming a tapped point. `name` is a nearby named POI when one sits
+// within range of the tap; `address` is the nearest street/place label. The
+// client labels a dropped pin with name ?? address (?? "Dropped pin").
+export interface ReverseGeocodeResult {
+  name: string | null;
+  address: string | null;
+}
+
 // Action-based PATCH body. Doing the mutation server-side (read → apply → write)
 // keeps last-write-wins clobbering to a minimum and makes every change loggable.
 export type PatchAction =

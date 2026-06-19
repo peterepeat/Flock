@@ -49,6 +49,12 @@ interface FlockState {
   waypointPin: LatLng | null; // location chosen for the waypoint being added (map → form)
   waypointEditor: WaypointEditorState; // which waypoint editor (add/edit) is open, if any
 
+  // Live map viewport, tracked on pan/zoom (MapCanvas → ViewportTracker), so the
+  // address search can bias results toward what the user is looking at. `center`
+  // is the soft focus point (Photon); `bounds` feeds the Nominatim-fallback viewbox.
+  mapCenter: LatLng | null;
+  mapBounds: { minLat: number; minLng: number; maxLat: number; maxLng: number } | null;
+
   // Mobile bottom-sheet height. The single source of truth for whether the sheet
   // is a small peek (lots of map) or fully open (lots of drawer). Opening an
   // editor requests expansion; tapping the map / the handle can collapse it again
@@ -91,6 +97,10 @@ interface FlockState {
   openEditWaypoint: (waypointId: string) => void;
   closeWaypointEditor: () => void;
   setSheetExpanded: (expanded: boolean) => void;
+  setMapView: (view: {
+    center: LatLng;
+    bounds: { minLat: number; minLng: number; maxLat: number; maxLng: number };
+  }) => void;
   setCalcStatus: (status: CalcStatus) => void;
   setCalcWarnings: (warnings: CalcWarning[]) => void;
   setCalcError: (message: string | null) => void;
@@ -116,6 +126,8 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   placingWaypoint: false,
   waypointPin: null,
   waypointEditor: { mode: "closed" },
+  mapCenter: null,
+  mapBounds: null,
   sheetExpanded: false,
 
   calcStatus: "idle",
@@ -251,6 +263,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   closeWaypointEditor: () =>
     set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null, sheetExpanded: false }),
   setSheetExpanded: (expanded) => set({ sheetExpanded: expanded }),
+  setMapView: ({ center, bounds }) => set({ mapCenter: center, mapBounds: bounds }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
   setCalcError: (message) => set({ calcError: message }),
