@@ -121,6 +121,21 @@ s11() {
   check "$F" "s11 finish-elsewhere keen" 2 1 0 1
 }
 
+# Ride-to-stop-then-home (partial-dwell exit): a keen, deadline-pressed runner on a
+# flock route WITH a café stop. The full dwell would blow their deadline, so they
+# ride to the stop and peel off there — keeping the together-time — rather than
+# peeling before it; warm-up/cool-down loops still bring them to target. The
+# checker's arrival≤latest guard fails if the dwell wrongly busts their deadline.
+s12() {
+  local F; F=$(create); echo "s12 → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Start
+  wp "$F" -37.8050 144.9720 Cafe 30
+  wp "$F" -37.7840 144.9610 Far
+  person "$F" Anchor -37.7980 144.9775 null null    360 300 null
+  person "$F" Keen   -37.7985 144.9785 12   '"09:30"' 360 300 14
+  check "$F" "s12 ride-to-stop + deadline" 2 1 0 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -138,7 +153,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

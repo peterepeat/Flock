@@ -43,14 +43,12 @@ const log = createLogger("route-engine");
 const DEFAULT_BACKBONE_KM = 6;
 const ROAD_FACTOR = 1.3; // crow-flies → on-path estimate for approach/egress
 const EPS = 1e-6;
-// Solo extension: the backbone reaches only as far as the SECOND-longest runner
-// (the "never solo on the backbone" invariant). The single longest's surplus
-// distance — when it clears this margin — becomes a solo tail past the peel-off.
+// Minimum length of any solo fill loop — cool-down (from the exit) or warm-up
+// (from home). A runner short of their distance target by less than this isn't
+// worth an ORS round-trip; applySoloFill/fitLoop skip it. (Mirrored as MIN_GROW_KM
+// in flockRoute.ts, the floor for growing a waypoint corridor.) The "never solo on
+// the spine" sizing itself lives in the L* computation in calculateRoutes.
 const MIN_EXTENSION_KM = 1.5;
-// Solo fill loops are requested a touch under their available room because ORS
-// round-trips overshoot the asked length and a loop can't be trimmed (it must
-// return to its start to egress) — so we leave headroom rather than bust a cap.
-const FILL_SAFETY = 0.85;
 // Opportunistic overlap: two runners on their APPROACH/EGRESS feeder legs count
 // as together when within this distance at the same instant, for at least this
 // long (filters incidental crossings). The backbone clock already handles the
@@ -546,20 +544,28 @@ async function tryLoop(at: LatLng, km: number): Promise<{ km: number; geom: LatL
 }
 
 /**
- * A solo loop that lands WITHIN `maxKm` (the room it must fit). ORS round-trips
- * overshoot their requested length unpredictably and a loop can't be trimmed (it
- * must return to its start), so we ask a touch under, and if the result still
- * overshoots the ceiling we retry once scaled by the observed overshoot. Null if
- * ORS fails or it still won't fit.
+ * A solo loop of about `wantKm` that lands WITHIN `maxKm` (the hard ceiling it
+ * must not bust). We ask for the want directly — no systematic shrink, so a runner
+ * with plenty of room actually reaches their target — and only if the ORS
+ * round-trip overshoots the ceiling (a loop can't be trimmed: it must return to
+ * its start) do we retry once, scaled by the observed overshoot. Null if ORS fails
+ * or it still won't fit.
  */
-async function fitLoop(at: LatLng, maxKm: number): Promise<{ km: number; geom: LatLng[] } | null> {
+async function fitLoop(
+  at: LatLng,
+  wantKm: number,
+  maxKm: number,
+): Promise<{ km: number; geom: LatLng[] } | null> {
   if (maxKm < MIN_EXTENSION_KM) return null;
-  const loop = await tryLoop(at, maxKm * FILL_SAFETY);
-  if (!loop || loop.km <= maxKm) return loop;
-  const scaled = maxKm * FILL_SAFETY * (maxKm / loop.km);
+  const fits = (km: number) => km >= MIN_EXTENSION_KM && km <= maxKm;
+  const req = Math.min(wantKm, maxKm);
+  const loop = await tryLoop(at, req);
+  if (!loop) return null;
+  if (loop.km <= maxKm) return fits(loop.km) ? loop : null; // skip a trivial sub-MIN loop
+  const scaled = req * (maxKm / loop.km) * 0.98;
   if (scaled < 1) return null;
   const retry = await tryLoop(at, scaled);
-  return retry && retry.km <= maxKm ? retry : null;
+  return retry && fits(retry.km) ? retry : null;
 }
 
 /**
@@ -578,47 +584,47 @@ async function applySoloFill(b: RunnerBuild, backbone: Backbone, T0abs: number):
   const target = targetDistanceKm(b.p);
   if (target == null) return;
   const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-  // The cap is the most any loop may add (same +0.4 tolerance as enforce).
+  // The cap is the most the total may reach (same +0.4 tolerance as enforce).
   const capCeil = b.p.maxDistance != null ? b.p.maxDistance + 0.4 : Infinity;
-  let deficit = Math.min(target, capCeil) - built;
-  if (deficit < MIN_EXTENSION_KM) return;
+  let want = Math.min(target, capCeil) - built; // distance still to fill toward target
+  if (want < MIN_EXTENSION_KM) return;
 
-  // Each "room" is the MAX km that side can absorb (cap + time tolerances baked in).
-  // We request a touch under it (round-trips overshoot, and a loop can't be trimmed
-  // without breaking its return to the start), and accept only a loop that lands
-  // within the room.
+  // We ask each loop for `want` and pass fitLoop the hard CEILING that loop must not
+  // bust (cap headroom + the relevant time tolerance) — so a runner with room reaches
+  // their target, while a tight one is re-sized down rather than busting a limit.
   const exitAbs = T0abs + b.exitClockSec;
   const latest = b.p.latestFinishTime != null ? timeToSec(b.p.latestFinishTime) + 60 : Infinity;
 
-  // Cool-down loop from the exit, before egress: bounded by latest-finish + cap.
-  const cooldownRoom = Math.min(
-    deficit,
+  // Cool-down loop from the exit, before egress: ceiling = cap headroom ∧ time left.
+  const cooldownMax = Math.min(
     capCeil - built,
     (latest - exitAbs - b.egressKm * b.ownPaceSec) / b.ownPaceSec,
   );
-  if (cooldownRoom >= MIN_EXTENSION_KM) {
-    const loop = await fitLoop(pointAtKm(backbone, b.exitKm), cooldownRoom);
+  if (want >= MIN_EXTENSION_KM && cooldownMax >= MIN_EXTENSION_KM) {
+    const loop = await fitLoop(pointAtKm(backbone, b.exitKm), want, cooldownMax);
     if (loop) {
       b.cooldownKm = loop.km;
       b.cooldownGeom = loop.geom;
-      deficit -= loop.km;
+      want -= loop.km;
     }
   }
 
-  // Warm-up loop from home, before setting off: uses the slack between earliest-start
-  // and when they'd otherwise leave (shifts departure earlier only) + cap.
-  const earliest = b.earliestSec - 60;
-  const warmupRoom = Math.min(
-    deficit,
-    capCeil - built - b.cooldownKm,
-    (b.departHomeSec - earliest) / b.ownPaceSec,
-  );
-  if (warmupRoom >= MIN_EXTENSION_KM) {
-    const loop = await fitLoop(b.home, warmupRoom);
-    if (loop) {
-      b.warmupKm = loop.km;
-      b.warmupGeom = loop.geom;
-      b.departHomeSec -= loop.km * b.ownPaceSec;
+  // Warm-up loop from home, before setting off — ONLY when the runner actually set an
+  // earliest-start. Otherwise the slack would be measured against the 07:00 default
+  // they never chose, pulling their departure earlier than asked. Shifts departure
+  // earlier only; never touches the rendezvous or arrival.
+  if (b.p.earliestStartTime != null && want >= MIN_EXTENSION_KM) {
+    const warmupMax = Math.min(
+      capCeil - built - b.cooldownKm,
+      (b.departHomeSec - (b.earliestSec - 60)) / b.ownPaceSec,
+    );
+    if (warmupMax >= MIN_EXTENSION_KM) {
+      const loop = await fitLoop(b.home, want, warmupMax);
+      if (loop) {
+        b.warmupKm = loop.km;
+        b.warmupGeom = loop.geom;
+        b.departHomeSec -= loop.km * b.ownPaceSec;
+      }
     }
   }
 
