@@ -6,10 +6,10 @@ import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import { FlockApiError } from "@/lib/flockApi";
-import { buildFlockGpx, parseFlockGpx } from "@/lib/flockGpx";
-import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
+import { buildFlockGpx, isAutoWaypointName, parseFlockGpx } from "@/lib/flockGpx";
+import { pinLabel, reverseGeocode, reverseGeocodeBatch } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
-import type { LatLng } from "@/lib/types";
+import type { FlockWaypoint, LatLng } from "@/lib/types";
 import {
   uAddWaypoint,
   uImportRoute,
@@ -20,6 +20,44 @@ import {
 import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("waypoints");
+
+// Cap how many auto-named points we reverse-geocode on import (a huge route
+// shouldn't burst the geocoder); the rest keep their placeholder names. And a
+// deadline so a slow/unavailable geocoder never stalls the import itself.
+const REVERSE_NAME_CAP = 60;
+const REVERSE_NAME_DEADLINE_MS = 8000;
+
+/** Replace auto-assigned placeholder names ("Start", "Point 3", …) on imported
+ *  waypoints with reverse-geocoded place names. Best-effort: any that fail or
+ *  exceed the cap/deadline keep their placeholder. */
+async function reverseNameImported(
+  wps: Omit<FlockWaypoint, "id">[],
+): Promise<Omit<FlockWaypoint, "id">[]> {
+  const targets = wps
+    .map((w, i) => ({ w, i }))
+    .filter(({ w }) => isAutoWaypointName(w.name))
+    .slice(0, REVERSE_NAME_CAP);
+  if (targets.length === 0) return wps;
+  const labels = await Promise.race([
+    reverseGeocodeBatch(targets.map(({ w }) => w.location)),
+    new Promise<null>((res) => setTimeout(() => res(null), REVERSE_NAME_DEADLINE_MS)),
+  ]);
+  if (!labels) {
+    log.warn("reverse-naming timed out — importing with placeholder names", { count: targets.length });
+    return wps;
+  }
+  const out = wps.map((w) => ({ ...w }));
+  let named = 0;
+  targets.forEach(({ i }, k) => {
+    const label = pinLabel(labels[k]);
+    if (label) {
+      out[i] = { ...out[i], name: label, address: label };
+      named++;
+    }
+  });
+  log.info("reverse-named imported waypoints", { targets: targets.length, named });
+  return out;
+}
 
 interface EditorData {
   name: string;
@@ -126,13 +164,19 @@ export default function WaypointsSection() {
         setIoMsg(parsed.warnings[0] ?? "No route points found in that GPX.");
         return;
       }
-      await uImportRoute(flockId, parsed.waypoints, parsed.gpxPassthrough);
+      // Points the GPX didn't name (a bare track, or unnamed pins) come in with
+      // placeholders ("Start", "Point 3", …). Reverse-geocode those into real place
+      // names — the same naming a tapped pin gets — then import once.
+      const needsNaming = parsed.waypoints.some((w) => isAutoWaypointName(w.name));
+      if (needsNaming) setIoMsg("Importing — naming waypoints…");
+      const waypoints = needsNaming ? await reverseNameImported(parsed.waypoints) : parsed.waypoints;
+      await uImportRoute(flockId, waypoints, parsed.gpxPassthrough);
       setIoMsg(
         parsed.warnings.length
           ? parsed.warnings.join(" ")
-          : `Imported ${parsed.waypoints.length} waypoints.`,
+          : `Imported ${waypoints.length} waypoints.`,
       );
-      log.info("route imported", { waypoints: parsed.waypoints.length });
+      log.info("route imported", { waypoints: waypoints.length });
     } catch (err) {
       setIoMsg(
         err instanceof FlockApiError || err instanceof Error

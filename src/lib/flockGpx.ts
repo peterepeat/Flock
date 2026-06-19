@@ -197,13 +197,26 @@ function captureExtra(el: Element, isFlockStop: boolean): string | undefined {
   return keep.length ? keep.join("") : undefined;
 }
 
+// The placeholder name a point gets when its GPX element carried no <name> (a
+// bare <wpt>/<rtept>, or a <trk> simplified to shape points). These convey no
+// place info, so an importer can reverse-geocode them into real names — see
+// isAutoWaypointName + reverseGeocodeBatch.
+const AUTO_WAYPOINT_NAME = "Waypoint";
+
+/** True if `name` is one parseFlockGpx auto-assigned (no <name> in the GPX). */
+export function isAutoWaypointName(name: string): boolean {
+  return (
+    name === AUTO_WAYPOINT_NAME || name === "Start" || name === "Finish" || /^Point \d+$/.test(name)
+  );
+}
+
 function pointFromEl(el: Element): Omit<FlockWaypoint, "id"> | null {
   const lat = Number(el.getAttribute("lat"));
   const lng = Number(el.getAttribute("lon"));
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const stopEl = el.getElementsByTagNameNS(FLOCK_NS, "stopMinutes")[0];
   const stopMinutes = stopEl ? Math.max(0, parseInt(stopEl.textContent ?? "0", 10) || 0) : 0;
-  const name = childByName(el, "name")?.textContent?.trim() || "Waypoint";
+  const name = childByName(el, "name")?.textContent?.trim() || AUTO_WAYPOINT_NAME;
   const extra = captureExtra(el, stopMinutes > 0);
   return { location: { lat, lng }, address: name, name, stopMinutes, ...(extra ? { gpxExtra: extra } : {}) };
 }

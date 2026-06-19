@@ -31,3 +31,24 @@ export async function reverseGeocode(lat: number, lng: number): Promise<ReverseG
 export function pinLabel(r: ReverseGeocodeResult | null): string | null {
   return r?.name || r?.address || null;
 }
+
+/**
+ * Reverse-geocode many points with BOUNDED concurrency (best-effort) — used to
+ * name a batch of imported GPX waypoints without bursting the provider. Results
+ * align by index; failures are null. Throttle = max in-flight requests.
+ */
+export async function reverseGeocodeBatch(
+  points: { lat: number; lng: number }[],
+  concurrency = 5,
+): Promise<(ReverseGeocodeResult | null)[]> {
+  const out: (ReverseGeocodeResult | null)[] = new Array(points.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < points.length) {
+      const i = next++;
+      out[i] = await reverseGeocode(points[i].lat, points[i].lng);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, points.length) }, worker));
+  return out;
+}
