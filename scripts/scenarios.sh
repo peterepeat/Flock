@@ -38,8 +38,8 @@ calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: applic
 # person NAME LAT LNG [extraJSON]
 person() { patch "$1" "{\"action\":\"addParticipant\",\"editToken\":\"$2\",\"participant\":{\"name\":\"$2\",\"startLocation\":{\"lat\":$3,\"lng\":$4},\"startAddress\":\"$2\",\"earliestStartTime\":\"07:00\",\"finishLocation\":null,\"finishAddress\":null,\"latestFinishTime\":${6:-null},\"preferredPace\":${7:-360},\"maxPace\":${8:-300},\"preferredDistance\":${5:-null},\"maxDistance\":${9:-null},\"restStop\":null}}" "$2"; }
 wp()     { patch "$1" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$2,\"lng\":$3},\"address\":\"$4\",\"name\":\"$4\",\"stopMinutes\":${5:-0}}}"; }
-# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP
-check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
+# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET]
+check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
 
 # 5 disparate people (shared across s4/s5/s6). args: FID
 add5() {
@@ -73,6 +73,20 @@ ext() {
   check "$F" "ext solo-extension" 3 1 0 1
 }
 
+# Grown spine: a SHORT waypoint corridor (two waypoints ~2km apart) + two keen
+# runners. Pre-grow the backbone was just the ~2km corridor, so the 2nd-longest
+# (Ben, 20km) fell far short on a capped corridor; now the spine grows to ~the
+# 2nd-longest reach so both reach target WITH the flock. expect_target (Ava ~22 via
+# her solo tail) + expect_second_target (Ben ~20 on the grown spine).
+s7() {
+  local F; F=$(create); echo "s7 → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Fitzroy
+  wp "$F" -37.7890 144.9950 CliftonHill
+  person "$F" Ava -37.7980 144.9775 22 null 360 300 24
+  person "$F" Ben -37.7985 144.9785 20 null 360 300 22
+  check "$F" "s7 short-corridor 2-keen" 2 1 0 1 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -90,7 +104,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Compact pass/fail checker for a calculated flock (reads flock JSON on stdin).
 
-argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1> [expect_target 0|1]
+argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1> [expect_target 0|1] [expect_second_target 0|1]
 Exits non-zero on any failed assertion. Prints one PASS/FAIL line.
 
 expect_target=1 asserts the longest-targeted runner reaches near their
 preferredDistance (within 2km) — the solo-extension guard: without it the keenest
 runner is cut short where the (capped) backbone turns around.
+
+expect_second_target=1 asserts the SECOND-longest-targeted runner also reaches
+near their preferredDistance — the grown-spine guard: with a short waypoint
+corridor and two keen runners the shared backbone must grow so the second runner
+reaches target WITH the flock, not fall short on a capped corridor.
 """
 import sys, json
 
@@ -15,6 +20,7 @@ expect_routes = int(sys.argv[2])
 expect_together = int(sys.argv[3])
 expect_stop = int(sys.argv[4])
 expect_target = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+expect_second_target = int(sys.argv[6]) if len(sys.argv) > 6 else 0
 
 s = json.load(sys.stdin)
 parts = {p["id"]: p for p in s["participants"]}
@@ -62,6 +68,21 @@ if expect_target:
         want = keenest["preferredDistance"]
         if dist < want - 2.0:
             fails.append(f"{names[keenest['id']]} reached {dist}km, short of target {want}km (extension failed)")
+
+if expect_second_target:
+    targeted = sorted(
+        (p for p in s["participants"] if p.get("preferredDistance")),
+        key=lambda p: p["preferredDistance"],
+        reverse=True,
+    )
+    if len(targeted) < 2:
+        fails.append("expect_second_target but fewer than 2 targeted runners")
+    else:
+        second = targeted[1]
+        dist = next((r["distanceKm"] for r in routes if r["participantId"] == second["id"]), 0)
+        want = second["preferredDistance"]
+        if dist < want - 2.0:
+            fails.append(f"{names[second['id']]} (2nd-longest) reached {dist}km, short of {want}km (spine not grown)")
 
 totkm = round(sum(r["distanceKm"] for r in routes), 1)
 status = "PASS" if not fails else "FAIL"

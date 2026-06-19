@@ -33,6 +33,7 @@ import {
   DEFAULT_DEPARTURE,
   DEFAULT_LOOP_DISTANCE_KM,
   DEFAULT_PACE_SEC_PER_KM,
+  DISTANCE_MAX_KM,
   secToTime,
   timeToSec,
 } from "./units";
@@ -571,26 +572,42 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   // A runner egresses to their chosen finish if they set one, else back to start.
   const finishOf = (p: Participant): LatLng => p.finishLocation ?? p.startLocation;
 
-  // Backbone length (auto only): the "never solo" reach (second-longest arc),
-  // using crow feeder estimates — no ORS needed for sizing. The feeder cost is
-  // approach (start→rendezvous) + egress (finish→rendezvous); when finish === start
-  // this is the old symmetric 2× round-trip.
+  // Shared-route length L* — the "never solo on the spine" reach: the SECOND-
+  // longest runner's on-backbone reach, so the two longest can run the whole
+  // shared route together and only the single longest ever solos a tail. This
+  // governs BOTH modes — an auto loop is sized to it, and a waypoint corridor is
+  // GROWN to it (buildBackbone) when the waypoints alone fall short.
+  //
+  // reach = distance target − road-factored feeder (approach + egress). The
+  // feeder is corridor-aware: approach to the first waypoint (km 0), egress from
+  // the LAST waypoint (the corridor's far end); with no corridor both anchor to
+  // the rendezvous (so auto mode is unchanged — finish===start is the old
+  // symmetric 2× round-trip).
+  const egressAnchor =
+    waypoints.length >= 2 ? waypoints[waypoints.length - 1].location : rendezvous;
   const arcEstimate = (p: Participant): number => {
     const t = targetDistanceKm(p);
     if (t == null) return Infinity;
-    const feeder = (crowKm(p.startLocation, rendezvous) + crowKm(finishOf(p), rendezvous)) * ROAD_FACTOR;
+    const feeder =
+      (crowKm(p.startLocation, rendezvous) + crowKm(finishOf(p), egressAnchor)) * ROAD_FACTOR;
     return Math.max(0, t - feeder);
   };
   const estsById = runners
     .map((p) => ({ id: p.id, est: arcEstimate(p) }))
     .sort((a, b) => b.est - a.est);
-  const ests = estsById.map((e) => e.est);
-  const finite = ests.filter((e) => Number.isFinite(e));
+  const ests = estsById.map((e) => e.est); // sorted desc; unconstrained = Infinity first
+  const finite = ests.filter((e) => Number.isFinite(e)); // still sorted desc
+  // The second-most-capable runner's reach (so the top two cover the whole spine).
+  // ests[1] is that runner — finite when ≤1 runner is unconstrained. With ≥2
+  // unconstrained it's Infinity, so cap at the longest finite reach; with none
+  // finite, the default. (This is the prior rule, just hardened so the result is
+  // never Infinity — a latent crash once waypoint mode consumes targetKm — and
+  // clamped to the distance ceiling.)
   let targetKm: number;
-  if (ests.length >= 2 && Number.isFinite(ests[1])) targetKm = ests[1];
-  else if (finite.length) targetKm = Math.max(...finite);
+  if (Number.isFinite(ests[1])) targetKm = ests[1];
+  else if (finite.length) targetKm = finite[0];
   else targetKm = DEFAULT_BACKBONE_KM;
-  targetKm = Math.max(1, targetKm);
+  targetKm = Math.max(1, Math.min(targetKm, DISTANCE_MAX_KM));
 
   const backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
 
