@@ -20,6 +20,7 @@ import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
 import type { LatLng } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
+import { isMobileViewport } from "@/lib/viewport";
 import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("map");
@@ -44,20 +45,25 @@ function divMarker(color: string, label: string, kind: MarkerKind, draggable = f
   });
 }
 
-/** A numbered pin for a shared waypoint (☕ if it has a stop). */
+/** A numbered pin for a shared waypoint (☕ if it has a stop). The teardrop is kept
+    small (it was crowding the map on mobile) but sits inside a larger transparent
+    box so it stays an easy tap / drag target. */
 function waypointIcon(order: number, hasStop: boolean, draggable = false): L.DivIcon {
   const cursor = draggable ? "cursor:grab;" : "";
+  const T = 20; // visible teardrop
+  const BOX = 32; // transparent hit area around it
   return L.divIcon({
     className: "",
     html:
-      `<div style="${cursor}display:flex;align-items:center;justify-content:center;` +
-      `width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);` +
+      `<div style="${cursor}display:flex;align-items:center;justify-content:center;width:${BOX}px;height:${BOX}px;">` +
+      `<div style="display:flex;align-items:center;justify-content:center;` +
+      `width:${T}px;height:${T}px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);` +
       `background:var(--text);border:2px solid var(--accent);` +
-      `box-shadow:0 2px 8px rgba(0,0,0,0.5);">` +
-      `<span style="transform:rotate(45deg);font-size:12px;font-weight:600;color:#15151a;">` +
-      `${hasStop ? "☕" : order}</span></div>`,
-    iconSize: [26, 26],
-    iconAnchor: [13, 24],
+      `box-shadow:0 2px 6px rgba(0,0,0,0.5);">` +
+      `<span style="transform:rotate(45deg);font-size:10px;font-weight:600;color:#15151a;">` +
+      `${hasStop ? "☕" : order}</span></div></div>`,
+    iconSize: [BOX, BOX],
+    iconAnchor: [BOX / 2, (BOX - T) / 2 + T * 0.92], // teardrop tip at the location
   });
 }
 
@@ -166,14 +172,26 @@ function ClickHandler() {
         return;
       }
       // A bare click on empty map (Leaflet doesn't fire this for marker/route
-      // clicks). Priority: clear a route focus first; otherwise, in the list view
-      // with nothing else open, drop a waypoint here — this opens the prefilled add
-      // editor, and addWaypoint appends it to the END of the route.
+      // clicks). Priority order:
       const st = useFlockStore.getState();
+      //  1. clear a route focus, if one is active;
       if (st.selectedParticipantId) {
         st.setSelected(null);
         return;
       }
+      //  2. on mobile, collapse an expanded sheet to give the map back — this is
+      //     the "tap the map to dismiss the drawer" gesture. It's non-destructive:
+      //     any in-progress edit stays open underneath, just peeked, so the user
+      //     can drag the handle back up and carry on (matches bottom-sheet prior
+      //     art — dismiss ≠ cancel);
+      if (isMobileViewport() && st.sheetExpanded) {
+        log.debug("map click → collapse sheet");
+        st.setSheetExpanded(false);
+        return;
+      }
+      //  3. otherwise, in the list view with nothing open, drop a waypoint here —
+      //     this opens the prefilled add editor, and addWaypoint appends it to the
+      //     END of the route.
       if (!st.formOpen && st.waypointEditor.mode === "closed" && st.session?.lockedAt == null) {
         log.debug("map click → append waypoint", { lat: ll.lat, lng: ll.lng });
         st.setWaypointPin(ll);
@@ -183,21 +201,40 @@ function ClickHandler() {
   return null;
 }
 
-/** Fit the map to all known points whenever their set meaningfully changes. */
+/**
+ * Frame the map to the known points — but calmly. We only (re)frame when the
+ * content isn't already comfortably in view, so the map respects wherever the
+ * user has panned/zoomed and never yanks the viewport in response to their own
+ * direct manipulation (dragging a pin), to routes recomputing a second later, or
+ * to a polled change that's still on-screen. The viewport moves only when
+ * something would otherwise sit off the edge: first load, a far-away join, or a
+ * route that grew past the current view.
+ */
 function FitBounds({ points }: { points: LatLng[] }) {
   const map = useMap();
   const sig = points.map((p) => `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`).join("|");
   const lastSig = useRef("");
+  const framedOnce = useRef(false);
 
   useEffect(() => {
     if (points.length === 0) return;
     if (sig === lastSig.current) return;
     lastSig.current = sig;
+
+    const target = L.latLngBounds(points.map(toLeaflet));
+    // Once we've framed at least once, leave the viewport alone as long as the
+    // content still fits inside it (shrunk 8% so points hugging the edge still
+    // count as "off-screen" and pull the view).
+    if (framedOnce.current && map.getBounds().pad(-0.08).contains(target)) {
+      log.debug("fit skipped — content in view", { count: points.length });
+      return;
+    }
+    framedOnce.current = true;
+
     if (points.length === 1) {
       map.setView(toLeaflet(points[0]), 14, { animate: true });
     } else {
-      const bounds = L.latLngBounds(points.map(toLeaflet));
-      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15, animate: true });
+      map.fitBounds(target, { padding: [60, 60], maxZoom: 15, animate: true });
     }
     log.debug("fit bounds", { count: points.length });
   }, [sig, points, map]);
@@ -213,9 +250,6 @@ export default function MapCanvas() {
   // When set, only this runner's route is drawn (the rest declutter to the shared
   // spine + glow); when null, no individual route lines show.
   const focus = selected ?? hovered;
-  // Suppress the click a waypoint marker can fire right after a drag (so dragging
-  // to reposition doesn't also open its editor).
-  const wpDragRef = useRef(false);
   const pendingStart = useFlockStore((s) => s.pendingStart);
   const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
@@ -488,7 +522,9 @@ export default function MapCanvas() {
           );
         })}
 
-        {/* Participant markers — you can drag your own start to move it. */}
+        {/* Participant markers — tapping your OWN opens you for editing (same as
+            tapping a waypoint), and you can drag it to move your start. Tapping
+            someone else's (or anyone's once locked) just focuses their route. */}
         {participants.map((p) => {
           const canDrag = !locked && !!flockId && ownsParticipant(flockId, p.id);
           return (
@@ -500,9 +536,28 @@ export default function MapCanvas() {
               eventHandlers={{
                 mouseover: () => useFlockStore.getState().setHovered(p.id),
                 mouseout: () => useFlockStore.getState().setHovered(null),
-                click: () =>
-                  useFlockStore.getState().setSelected(selected === p.id ? null : p.id),
-                dragend: (e) => moveStart(p.id, e.target as L.Marker, p.startLocation),
+                dragend: (e) => {
+                  const m = e.target as L.Marker;
+                  const ll = m.getLatLng();
+                  // Leaflet fires dragend once the pointer moves ≥3 px; treat only a
+                  // >3 m ground move as a real reposition. A sub-3 m "drag" is a tap
+                  // with finger jitter — snap back and open the editor right here,
+                  // because Leaflet swallows the click that would otherwise follow.
+                  const moved = distanceMeters(p.startLocation, { lat: ll.lat, lng: ll.lng }) > 3;
+                  if (moved) {
+                    void moveStart(p.id, m, p.startLocation);
+                  } else {
+                    m.setLatLng(toLeaflet(p.startLocation));
+                    if (canDrag) useFlockStore.getState().openEditForm(p.id);
+                  }
+                },
+                click: () => {
+                  // A clean tap — Leaflet suppresses the click after any drag, so this
+                  // only runs for a real tap. Your own pin → edit you; anyone else's →
+                  // focus their route.
+                  if (canDrag) useFlockStore.getState().openEditForm(p.id);
+                  else useFlockStore.getState().setSelected(selected === p.id ? null : p.id);
+                },
               }}
             >
               <Tooltip direction="top" offset={[0, -16]}>
@@ -511,7 +566,7 @@ export default function MapCanvas() {
                   const r = routes.find((x) => x.participantId === p.id);
                   return r ? ` · ${formatDistance(r.distanceKm, session!.unitPreference)}` : "";
                 })()}
-                {canDrag ? " · drag to move" : ""}
+                {canDrag ? " · tap to edit · drag to move" : ""}
               </Tooltip>
             </Marker>
           );
@@ -537,23 +592,18 @@ export default function MapCanvas() {
               dragend: (e) => {
                 const m = e.target as L.Marker;
                 const ll = m.getLatLng();
-                // Distinguish a real reposition from finger jitter on a touch tap:
-                // only >3 m counts as a drag (and triggers a recalc); otherwise snap
-                // back so the click still reads as a tap-to-edit.
+                // >3 m = a real reposition; a sub-3 m "drag" is a jittery tap, so snap
+                // back and open the editor here (Leaflet eats the post-drag click).
                 const moved = distanceMeters(w.location, { lat: ll.lat, lng: ll.lng }) > 3;
-                wpDragRef.current = moved;
-                if (moved) void moveWaypoint(w.id, m, w.location);
-                else m.setLatLng(toLeaflet(w.location));
-                // Fallback reset in case Leaflet suppresses the post-drag click.
-                setTimeout(() => {
-                  wpDragRef.current = false;
-                }, 300);
+                if (moved) {
+                  void moveWaypoint(w.id, m, w.location);
+                } else {
+                  m.setLatLng(toLeaflet(w.location));
+                  if (!locked) useFlockStore.getState().openEditWaypoint(w.id);
+                }
               },
               click: () => {
-                if (wpDragRef.current) {
-                  wpDragRef.current = false; // consume the click Leaflet fires after a drag
-                  return;
-                }
+                // A clean tap (Leaflet suppresses the click after a drag).
                 if (!locked) useFlockStore.getState().openEditWaypoint(w.id);
               },
             }}

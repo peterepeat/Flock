@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 
 import ParticipantForm from "@/components/Panel/ParticipantForm";
 import ParticipantList from "@/components/Panel/ParticipantList";
 import TogetherStat from "@/components/Panel/TogetherStat";
 import WaypointsSection from "@/components/Panel/WaypointsSection";
+import { isMobileViewport } from "@/lib/viewport";
 import { useFlockStore } from "@/store/flockStore";
 
 export default function FlockPanel() {
@@ -14,40 +15,72 @@ export default function FlockPanel() {
   const editingId = useFlockStore((s) => s.editingParticipantId);
   const openAddForm = useFlockStore((s) => s.openAddForm);
   const calcError = useFlockStore((s) => s.calcError);
-  const waypointEditing = useFlockStore((s) => s.waypointEditor.mode !== "closed");
-  const [expanded, setExpanded] = useState(false);
+  const sheetExpanded = useFlockStore((s) => s.sheetExpanded);
+  const setSheetExpanded = useFlockStore((s) => s.setSheetExpanded);
+  const placingPin = useFlockStore((s) => s.placingPin);
+  const placingFinish = useFlockStore((s) => s.placingFinish);
+  const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const locked = session?.lockedAt != null;
+  // While a "tap the map to drop a pin" mode is active, peek the sheet so the map
+  // the user is being asked to tap is actually reachable. It re-expands on its own
+  // once the pin lands (the placing flag flips off) and the editor is shown again.
+  const placing = placingPin || placingFinish || placingWaypoint;
+  const expanded = sheetExpanded && !placing;
   // Everyone has routes but nobody overlaps → too far apart.
   const withStart = session?.participants.filter((p) => p.startLocation).length ?? 0;
   const tooFarApart =
     !!session?.computedRoutes &&
     withStart >= 2 &&
     (session.sharedSegments?.length ?? 0) === 0;
-  // On mobile the sheet auto-expands when the form or a waypoint editor is open.
-  const sheetExpanded = expanded || formOpen || waypointEditing;
+
+  // When the form opens (often from a map tap), reset the scroll so its first
+  // field is in view — otherwise the sheet just looks like a wall of content with
+  // no obvious relationship to what was tapped. Reset instantly on open (the form
+  // content is swapped fresh, so there's nothing to animate) and don't re-fire
+  // mid-edit, so it can never fight a scroll the user starts. (The waypoint editor
+  // scrolls itself into view from WaypointsSection.)
+  useEffect(() => {
+    if (formOpen) scrollRef.current?.scrollTo({ top: 0 });
+  }, [formOpen]);
+
+  // Tapping a collapsed sheet anywhere that isn't an actual control opens it
+  // (mobile only — the desktop column has no peek state). Taps on buttons / links
+  // / inputs keep doing their own thing.
+  const onSheetClick = (e: React.MouseEvent) => {
+    if (sheetExpanded || !isMobileViewport()) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("button, a, input, textarea, select, label, [role='button']")) return;
+    setSheetExpanded(true);
+  };
 
   return (
     <aside
+      onClick={onSheetClick}
       className={[
         // Desktop: left column.
         "md:relative md:z-10 md:flex md:h-full md:w-80 md:flex-col md:border-r md:border-white/5",
-        // Mobile: bottom sheet.
+        // Mobile: bottom sheet — a small peek at rest (map-first), nearly full
+        // height while editing.
         "fixed inset-x-0 bottom-0 z-[1000] flex flex-col rounded-t-2xl border-t border-white/10 md:rounded-none md:border-t-0",
         "bg-surface-mid shadow-panel",
-        sheetExpanded ? "h-[78dvh] md:h-full" : "h-[40dvh] md:h-full",
+        expanded ? "h-[90dvh] md:h-full" : "h-[24dvh] md:h-full",
         "transition-[height] duration-300",
       ].join(" ")}
     >
-      {/* Mobile drag handle */}
+      {/* Mobile drag handle — a generous tap target around the visible grabber. */}
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-surface-lift md:hidden"
-        aria-label="Expand panel"
-      />
+        onClick={() => setSheetExpanded(!sheetExpanded)}
+        className="mx-auto flex h-7 w-full max-w-[140px] shrink-0 items-center justify-center md:hidden"
+        aria-label={sheetExpanded ? "Collapse panel" : "Expand panel"}
+        aria-expanded={sheetExpanded}
+      >
+        <span className="h-1.5 w-10 rounded-full bg-surface-lift" />
+      </button>
 
-      <div className="flock-scroll flex-1 overflow-y-auto px-5 py-4">
+      <div ref={scrollRef} className="flock-scroll flex-1 overflow-y-auto px-5 py-4">
         {formOpen ? (
           <>
             <h2 className="mb-4 text-lg font-semibold">

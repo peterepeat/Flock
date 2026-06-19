@@ -49,6 +49,12 @@ interface FlockState {
   waypointPin: LatLng | null; // location chosen for the waypoint being added (map → form)
   waypointEditor: WaypointEditorState; // which waypoint editor (add/edit) is open, if any
 
+  // Mobile bottom-sheet height. The single source of truth for whether the sheet
+  // is a small peek (lots of map) or fully open (lots of drawer). Opening an
+  // editor requests expansion; tapping the map / the handle can collapse it again
+  // WITHOUT discarding an in-progress edit. Ignored on desktop (fixed column).
+  sheetExpanded: boolean;
+
   // Route calculation feedback
   calcStatus: CalcStatus;
   calcWarnings: CalcWarning[];
@@ -84,6 +90,7 @@ interface FlockState {
   openAddWaypoint: () => void;
   openEditWaypoint: (waypointId: string) => void;
   closeWaypointEditor: () => void;
+  setSheetExpanded: (expanded: boolean) => void;
   setCalcStatus: (status: CalcStatus) => void;
   setCalcWarnings: (warnings: CalcWarning[]) => void;
   setCalcError: (message: string | null) => void;
@@ -109,6 +116,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   placingWaypoint: false,
   waypointPin: null,
   waypointEditor: { mode: "closed" },
+  sheetExpanded: false,
 
   calcStatus: "idle",
   calcWarnings: [],
@@ -177,9 +185,32 @@ export const useFlockStore = create<FlockState>((set, get) => ({
     return true;
   },
 
-  openAddForm: () => set({ formOpen: true, editingParticipantId: null, draftStart: null }),
+  // Opening any editor requests the sheet expand (mobile); closing collapses it
+  // back to a peek so the map is the resting state ("more map when not editing").
+  // The participant form and the waypoint editor are mutually exclusive, so
+  // opening the form also clears any open waypoint editor (else it would linger
+  // and reappear when the form closes).
+  openAddForm: () =>
+    set({
+      formOpen: true,
+      editingParticipantId: null,
+      draftStart: null,
+      waypointEditor: { mode: "closed" },
+      placingWaypoint: false,
+      waypointPin: null,
+      sheetExpanded: true,
+    }),
   openEditForm: (participantId) =>
-    set({ formOpen: true, editingParticipantId: participantId, draftStart: null }),
+    set({
+      formOpen: true,
+      editingParticipantId: participantId,
+      draftStart: null,
+      selectedParticipantId: null, // editing a person clears any route focus
+      waypointEditor: { mode: "closed" },
+      placingWaypoint: false,
+      waypointPin: null,
+      sheetExpanded: true,
+    }),
   closeForm: () =>
     set({
       formOpen: false,
@@ -190,6 +221,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       placingFinish: false,
       draftFinish: null,
       pendingFinish: null,
+      sheetExpanded: false,
     }),
   setHovered: (participantId) => set({ hoveredParticipantId: participantId }),
   setSelected: (participantId) => set({ selectedParticipantId: participantId }),
@@ -202,7 +234,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setPlacingFinish: (placing) => set({ placingFinish: placing }),
   setPlacingWaypoint: (placing) => set({ placingWaypoint: placing }),
   setWaypointPin: (ll) => set({ waypointPin: ll }),
-  openAddWaypoint: () => set({ waypointEditor: { mode: "add" } }),
+  openAddWaypoint: () => set({ waypointEditor: { mode: "add" }, sheetExpanded: true }),
   // Editing a waypoint lives in the list view, so close the participant form and
   // any placing mode first.
   openEditWaypoint: (waypointId) =>
@@ -214,9 +246,11 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       placingFinish: false,
       selectedParticipantId: null, // editing a waypoint clears any route focus
       waypointPin: null, // drop any stray pin so it can't pop a spurious add
+      sheetExpanded: true,
     }),
   closeWaypointEditor: () =>
-    set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null }),
+    set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null, sheetExpanded: false }),
+  setSheetExpanded: (expanded) => set({ sheetExpanded: expanded }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
   setCalcError: (message) => set({ calcError: message }),

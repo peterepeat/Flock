@@ -43,6 +43,11 @@ export default function WaypointsSection() {
   const [ioMsg, setIoMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
+  // The active editor (edit row or add form), so we can scroll it into view when
+  // it opens — e.g. after tapping a waypoint on the map, which would otherwise
+  // leave the editor below the fold in a tall sheet.
+  const editorAnchorRef = useRef<HTMLDivElement | HTMLLIElement | null>(null);
+  const editorKey = editor.mode === "edit" ? `edit:${editor.id}` : editor.mode;
 
   const locked = session?.lockedAt != null;
   const waypoints = session?.waypoints ?? [];
@@ -53,6 +58,16 @@ export default function WaypointsSection() {
   useEffect(() => {
     if (waypointPin && useFlockStore.getState().waypointEditor.mode === "closed") openAddWaypoint();
   }, [waypointPin, openAddWaypoint]);
+
+  // When an editor opens, bring it into view (after the sheet's height transition
+  // settles) so the user sees what they're editing rather than a wall of drawer.
+  useEffect(() => {
+    if (editor.mode === "closed") return;
+    const t = setTimeout(() => {
+      editorAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 320);
+    return () => clearTimeout(t);
+  }, [editorKey, editor.mode]);
 
   // Reconcile the editor against the live session: if the row being edited
   // disappears (a concurrent remove via polling) or the flock gets locked
@@ -176,7 +191,7 @@ export default function WaypointsSection() {
               <Fragment key={w.id}>
                 {dropLine(i)}
                 {editing ? (
-                  <li>
+                  <li ref={(el) => { editorAnchorRef.current = el; }}>
                     <WaypointEditor
                       initial={{
                         name: w.name,
@@ -290,7 +305,9 @@ export default function WaypointsSection() {
       )}
 
       {!locked && editor.mode === "add" && (
-        <WaypointEditor submitLabel="Add waypoint" onSubmit={handleAdd} onCancel={close} />
+        <div ref={(el) => { editorAnchorRef.current = el; }}>
+          <WaypointEditor submitLabel="Add waypoint" onSubmit={handleAdd} onCancel={close} />
+        </div>
       )}
 
       {(waypoints.length > 0 || !locked) && (
