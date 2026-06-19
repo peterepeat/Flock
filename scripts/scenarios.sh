@@ -87,6 +87,40 @@ s7() {
   check "$F" "s7 short-corridor 2-keen" 2 1 0 1 1
 }
 
+# Edge: ≥2 UNCONSTRAINED runners + waypoints. Reaches are all Infinity, so sizing
+# must not return Infinity (the latent crash the L* clamp guards) — backbone falls
+# back to the default and both run it together.
+s9() {
+  local F; F=$(create); echo "s9 → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Fitzroy
+  wp "$F" -37.7890 144.9950 CliftonHill
+  person "$F" Uno -37.7980 144.9775 null null 360 300 null
+  person "$F" Dos -37.7985 144.9785 null null 360 300 null
+  check "$F" "s9 2-unconstrained + wp" 2 1 0
+}
+
+# Edge: a LONG waypoint corridor + small targets → the spine must NOT grow (deficit
+# ≤ 0); shorter runners just peel off early. (Confirm via the absence of a "backbone
+# grown" log; here we assert it stays structurally valid + within caps.)
+s10() {
+  local F; F=$(create); echo "s10 → $BASE/flock/$F"
+  wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8230 144.9680 CBD; wp "$F" -37.8000 145.0050 Abbotsford
+  person "$F" Sam -37.7860 144.9530 6 null 360 300 7
+  person "$F" Pat -37.7855 144.9525 7 null 360 300 8
+  check "$F" "s10 long-corridor small-targets" 2 1 0
+}
+
+# Edge: a finish-elsewhere keen runner + waypoints → corridor-aware egress anchors
+# to the LAST waypoint, and the runner egresses to their chosen finish, reaching target.
+s11() {
+  local F; F=$(create); echo "s11 → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Fitzroy
+  wp "$F" -37.7890 144.9950 CliftonHill
+  patch "$F" "{\"action\":\"addParticipant\",\"editToken\":\"Ava\",\"participant\":{\"name\":\"Ava\",\"startLocation\":{\"lat\":-37.798,\"lng\":144.9775},\"startAddress\":\"Ava\",\"earliestStartTime\":\"07:00\",\"finishLocation\":{\"lat\":-37.81,\"lng\":145.01},\"finishAddress\":\"finish\",\"latestFinishTime\":null,\"preferredPace\":360,\"maxPace\":300,\"preferredDistance\":20,\"maxDistance\":22,\"restStop\":null}}"
+  person "$F" Ben -37.7985 144.9785 18 null 360 300 20
+  check "$F" "s11 finish-elsewhere keen" 2 1 0 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -104,7 +138,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"
