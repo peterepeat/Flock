@@ -28,6 +28,9 @@ export interface ApplyResult {
   error?: string;
   // For addParticipant: the id the server actually used.
   participantId?: string;
+  // For setRoutes: the routes were discarded because the plan changed under us
+  // (expectedUpdatedAt no longer matched). The caller should recompute.
+  stale?: boolean;
 }
 
 function now(): string {
@@ -204,6 +207,18 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     }
 
     case "setRoutes": {
+      // Freshness guard: if the plan changed since these routes were computed
+      // (a waypoint/participant edit landed during the calc), discard them — a
+      // stale write would silently "ignore" the edit. Don't save: the session
+      // stays computed-null so the calc retries against the current plan.
+      if (action.expectedUpdatedAt && session.updatedAt !== action.expectedUpdatedAt) {
+        log.info("setRoutes stale — plan changed during calc, discarding", {
+          id,
+          computedFrom: action.expectedUpdatedAt,
+          current: session.updatedAt,
+        });
+        return { ok: true, status: 200, session, stale: true };
+      }
       session.computedRoutes = action.computedRoutes;
       session.sharedSegments = action.sharedSegments;
       session.flockRoute = action.flockRoute;

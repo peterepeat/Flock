@@ -158,6 +158,12 @@ export type PatchAction =
       sharedSegments: SharedSegment[];
       flockRoute: GeoJSON.LineString | null;
       waypointEtas: Record<string, string> | null;
+      // The session.updatedAt these routes were computed from. If the plan has
+      // changed since (a waypoint/participant edit landed during the calc), the
+      // routes are stale and must NOT overwrite the newer plan — they'd silently
+      // "ignore" the edit. Optional for back-compat; when set, persistence is
+      // conditional on it still matching.
+      expectedUpdatedAt?: string;
     }
   // Shared waypoints are universal — anyone can manage them (no edit token).
   | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id"> }

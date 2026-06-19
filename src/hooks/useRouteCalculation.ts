@@ -91,11 +91,27 @@ export function useRouteCalculation(flockId: string) {
           warnings: CalcWarning[];
           routeCount: number;
           sharedCount: number;
+          persisted?: boolean; // false = computed but NOT saved (plan changed under us)
+          skipped?: boolean;
         };
         setCalcWarnings(data.warnings ?? []);
         setCalcError(null);
-        setCalcStatus("idle");
-        done({ routes: data.routeCount, shared: data.sharedCount, warnings: data.warnings?.length });
+        if (data.persisted === false && !data.skipped) {
+          // The server computed routes but the plan kept changing while it ran, so
+          // nothing was saved (routes stay null). Retry with backoff until editing
+          // settles — otherwise we'd go idle and strand the user with no route.
+          log.debug("calc not persisted (plan still churning) — retrying", { attempt });
+          if (attempt < MAX_ATTEMPTS) {
+            setCalcStatus("working");
+            retry = true;
+          } else {
+            setCalcError("Routes kept shifting while calculating — change anything to retry.");
+            setCalcStatus("idle");
+          }
+        } else {
+          setCalcStatus("idle");
+        }
+        done({ routes: data.routeCount, shared: data.sharedCount, warnings: data.warnings?.length, persisted: data.persisted });
       } catch (err) {
         log.error("calculation failed", { flockId, attempt, error: String(err) });
         setCalcStatus("error");

@@ -515,10 +515,10 @@ export default function MapCanvas() {
             const isFocused = focus === r.participantId;
             // Faint at rest; the focused runner pops; the rest recede further when
             // one is focused so the focused line reads cleanly. At-rest lines are a
-            // touch thicker (4) than the receded ones (3) so individual paths read
-            // when nothing is selected.
-            const opacity = isFocused ? 1 : focus ? 0.16 : 0.32;
-            const weight = isFocused ? 6 : focus ? 3 : 4;
+            // touch thicker (5) and slightly more opaque than the receded ones (3)
+            // so individual feeder paths to/from the flock read when nothing is selected.
+            const opacity = isFocused ? 1 : focus ? 0.16 : 0.42;
+            const weight = isFocused ? 6 : focus ? 3 : 5;
             return (
             <Polyline
               key={r.participantId}
