@@ -137,6 +137,15 @@ export async function importRoute(
   return session;
 }
 
+/** Cosmetic bulk rename by id (does NOT recompute the route). */
+export async function renameWaypoints(
+  flockId: string,
+  names: Record<string, { name: string; address: string }>,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "renameWaypoints", names });
+  return session;
+}
+
 export async function lockFlock(flockId: string): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "lock" });
   return session;

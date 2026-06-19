@@ -9,6 +9,7 @@
 
 import { createLogger } from "./logger";
 import { nextColor } from "./colors";
+import { isAutoWaypointName } from "./flockGpx";
 import { newFlockId, newParticipantId, newWaypointId } from "./ids";
 import { getStore, hashToken } from "./store";
 import type {
@@ -290,6 +291,30 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.waypoints = [...named, ...rest];
       clearComputed(session);
       log.info("waypoints reordered", { id, order: session.waypoints.map((w) => w.id.slice(0, 4)) });
+      break;
+    }
+
+    case "renameWaypoints": {
+      // Cosmetic only: set names/addresses by id. Deliberately does NOT call
+      // clearComputed — a name doesn't change routing, so the computed route stays
+      // valid and background reverse-naming after an import won't trigger a recalc
+      // per waypoint. Unknown ids are ignored; save() still bumps updatedAt so
+      // clients pick up the names. Allowed regardless of lock (purely cosmetic).
+      let renamed = 0;
+      for (const w of session.waypoints) {
+        const n = action.names[w.id];
+        const name = n?.name?.trim();
+        if (!name) continue;
+        // Only fill in names that are STILL auto-generated placeholders. This is
+        // the authoritative guard against background naming clobbering a name the
+        // user (or another device) set while we were geocoding — checked here at
+        // write time, so it's immune to client-side staleness.
+        if (!isAutoWaypointName(w.name)) continue;
+        w.name = name;
+        w.address = n.address?.trim() || name;
+        renamed++;
+      }
+      log.info("waypoints renamed", { id, renamed });
       break;
     }
 

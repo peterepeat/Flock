@@ -5,9 +5,9 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
-import { FlockApiError } from "@/lib/flockApi";
+import { FlockApiError, renameWaypoints } from "@/lib/flockApi";
 import { buildFlockGpx, isAutoWaypointName, parseFlockGpx } from "@/lib/flockGpx";
-import { pinLabel, reverseGeocode, reverseGeocodeBatch } from "@/lib/geocodeClient";
+import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
 import type { FlockWaypoint, LatLng } from "@/lib/types";
 import {
@@ -21,41 +21,75 @@ import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("waypoints");
 
-// Cap how many auto-named points we reverse-geocode on import (a huge route
-// shouldn't burst the geocoder); the rest keep their placeholder names. The
-// deadline bounds the wait — whatever resolved by then is KEPT (partial naming
-// beats none), so a slow geocoder degrades gracefully rather than stalling.
+// Cap how many auto-named points we reverse-geocode (a huge route shouldn't run
+// the geocoder forever); the rest keep their placeholder names.
 const REVERSE_NAME_CAP = 60;
-const REVERSE_NAME_DEADLINE_MS = 12000;
+// Flush accumulated names to the server every this many resolved — batched so a
+// big import is a few cosmetic writes, not dozens.
+const NAME_FLUSH_EVERY = 8;
+// Bumped per import so a superseded background run (a second import) bails.
+let importGeneration = 0;
 
-/** Replace auto-assigned placeholder names ("Start", "Point 3", …) on imported
- *  waypoints with reverse-geocoded place names. Best-effort: any that fail, or
- *  don't resolve before the deadline, keep their placeholder. `onProgress`
- *  reports naming progress for the UI. */
-async function reverseNameImported(
-  wps: Omit<FlockWaypoint, "id">[],
-  onProgress?: (done: number, total: number) => void,
-): Promise<Omit<FlockWaypoint, "id">[]> {
-  const targets = wps
-    .map((w, i) => ({ w, i }))
-    .filter(({ w }) => isAutoWaypointName(w.name))
-    .slice(0, REVERSE_NAME_CAP);
-  if (targets.length === 0) return wps;
-  const labels = await reverseGeocodeBatch(targets.map(({ w }) => w.location), {
-    deadlineMs: REVERSE_NAME_DEADLINE_MS,
-    onResult: onProgress,
-  });
-  const out = wps.map((w) => ({ ...w }));
+/**
+ * After a GPX import, reverse-name the auto-named waypoints ("Start", "Point 3",
+ * …) in the BACKGROUND, in SERIES (one at a time — a gentle trickle the free
+ * geocoder tolerates, vs a burst it throttles). Names are flushed in small batches
+ * via renameWaypoints, which does NOT recompute the route AND only fills names
+ * still on placeholders (the server guard), so it never clobbers a user edit.
+ * Best-effort: any point the geocoder can't name keeps its placeholder.
+ */
+async function nameImportedInBackground(
+  flockId: string,
+  gen: number,
+  waypoints: FlockWaypoint[],
+  onProgress: (msg: string | null) => void,
+): Promise<void> {
+  const targets = waypoints.filter((w) => isAutoWaypointName(w.name)).slice(0, REVERSE_NAME_CAP);
+  if (targets.length === 0) return;
+
+  const store = useFlockStore;
+  const superseded = () => store.getState().flockId !== flockId || importGeneration !== gen;
+  let pending: Record<string, { name: string; address: string }> = {};
   let named = 0;
-  targets.forEach(({ i }, k) => {
-    const label = pinLabel(labels[k]);
-    if (label) {
-      out[i] = { ...out[i], name: label, address: label };
-      named++;
+
+  const flush = async () => {
+    if (Object.keys(pending).length === 0) return;
+    // Hold off ONLY while a route recalc is pending/in flight — a rename bumps
+    // updatedAt, and during the computed-null window of an active calc that would
+    // re-trigger / invalidate it. A recalc is pending when the route is null AND
+    // there's someone to route for; with no participants yet (e.g. importing into
+    // an empty flock) there's no calc, so naming proceeds immediately.
+    const s = store.getState().session;
+    const recalcPending = s?.computedRoutes == null && (s?.participants.some((p) => p.startLocation) ?? false);
+    if (recalcPending) return; // names keep accumulating until the route settles
+    const batch = pending;
+    pending = {};
+    try {
+      await renameWaypoints(flockId, batch); // server only fills ids still on placeholders
+    } catch (err) {
+      log.warn("background rename flush failed", { error: String(err) });
     }
-  });
-  log.info("reverse-named imported waypoints", { targets: targets.length, named });
-  return out;
+  };
+
+  for (let i = 0; i < targets.length; i++) {
+    if (superseded()) return; // flock switched / newer import — drop unsent names
+    try {
+      const r = await reverseGeocode(targets[i].location.lat, targets[i].location.lng);
+      if (superseded()) return;
+      const label = pinLabel(r);
+      if (label) {
+        pending[targets[i].id] = { name: label, address: label };
+        named++;
+      }
+    } catch (err) {
+      log.warn("background geocode failed", { error: String(err) }); // skip this one, keep going
+    }
+    onProgress(`Naming waypoints in the background… ${i + 1}/${targets.length}`);
+    if (Object.keys(pending).length >= NAME_FLUSH_EVERY) await flush();
+  }
+  await flush();
+  log.info("background naming complete", { targets: targets.length, named });
+  if (!superseded()) onProgress(named > 0 ? `Named ${named} of ${targets.length} imported waypoints.` : null);
 }
 
 interface EditorData {
@@ -163,23 +197,21 @@ export default function WaypointsSection() {
         setIoMsg(parsed.warnings[0] ?? "No route points found in that GPX.");
         return;
       }
-      // Points the GPX didn't name (a bare track, or unnamed pins) come in with
-      // placeholders ("Start", "Point 3", …). Reverse-geocode those into real place
-      // names — the same naming a tapped pin gets — then import once.
-      const needsNaming = parsed.waypoints.some((w) => isAutoWaypointName(w.name));
-      if (needsNaming) setIoMsg("Naming waypoints…");
-      const waypoints = needsNaming
-        ? await reverseNameImported(parsed.waypoints, (done, total) =>
-            setIoMsg(`Naming waypoints… ${done}/${total}`),
-          )
-        : parsed.waypoints;
-      await uImportRoute(flockId, waypoints, parsed.gpxPassthrough);
+      // Import immediately with whatever names the GPX provided (placeholders for
+      // unnamed points) — the route shows right away, no waiting on the geocoder.
+      const session = await uImportRoute(flockId, parsed.waypoints, parsed.gpxPassthrough);
       setIoMsg(
         parsed.warnings.length
           ? parsed.warnings.join(" ")
-          : `Imported ${waypoints.length} waypoints.`,
+          : `Imported ${session.waypoints.length} waypoints.`,
       );
-      log.info("route imported", { waypoints: waypoints.length });
+      log.info("route imported", { waypoints: session.waypoints.length });
+      // Then fill in real place names for the unnamed points in the background,
+      // in series (gentle on the free geocoder), updating the list as they resolve.
+      const gen = ++importGeneration;
+      void nameImportedInBackground(flockId, gen, session.waypoints, setIoMsg).catch((err) =>
+        log.warn("background naming failed", { error: String(err) }),
+      );
     } catch (err) {
       setIoMsg(
         err instanceof FlockApiError || err instanceof Error

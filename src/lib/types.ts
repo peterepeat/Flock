@@ -170,6 +170,13 @@ export type PatchAction =
   | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
   | { action: "removeWaypoint"; waypointId: string }
   | { action: "reorderWaypoints"; waypointIds: string[] }
+  | {
+      // Cosmetic bulk rename by waypoint id. Names don't affect routing, so this
+      // does NOT invalidate the computed route — it's how background reverse-naming
+      // (after a GPX import) fills in real names without a recalc per waypoint.
+      action: "renameWaypoints";
+      names: Record<string, { name: string; address: string }>;
+    }
   // Replace the whole route from an imported GPX (server assigns waypoint ids).
   | {
       action: "importRoute";
