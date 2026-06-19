@@ -611,14 +611,6 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
 
   const backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
 
-  // Solo-extension candidate: the single runner whose reach clears the backbone.
-  // The backbone stops at the second-longest reach, so for an auto backbone only
-  // the keenest qualifies; for an explicit (longer) waypoint skeleton, possibly
-  // none. Their surplus distance becomes a solo tail past the flock's peel-off.
-  const top = estsById[0];
-  const extendCandidateId =
-    top && Number.isFinite(top.est) && top.est > backbone.totalKm + MIN_EXTENSION_KM ? top.id : null;
-
   // Best-response: choose each runner's [enter, exit] to maximise together-time.
   const windows = optimizeWindows(
     runners.map((p) => ({
@@ -721,10 +713,14 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     b.departHomeSec = T0abs + b.enterClockSec - b.approachKm * b.ownPaceSec;
   }
 
-  // Solo extension: the keenest runner continues past the peel-off to make up
-  // the distance the (capped) backbone left short. Pure solo — no TM effect.
-  const candidate = extendCandidateId ? onBackbone.find((b) => b.p.id === extendCandidateId) : undefined;
-  if (candidate) await applyExtension(candidate, backbone, T0abs);
+  // Distance-soaking home tail: ANY runner who peels off short of their distance
+  // target runs a solo loop from their exit point to make it up — sent home on a
+  // route that absorbs the surplus rather than a direct egress. Pure solo, so no
+  // together-minutes effect. After the spine is grown to the two longest, most
+  // runners cover their distance ON the flock route and self-skip here (surplus <
+  // MIN_EXTENSION_KM is checked inside applyExtension BEFORE any ORS call), so only
+  // genuine outliers actually fetch a loop. Independent per runner → run together.
+  await Promise.all(onBackbone.map((b) => applyExtension(b, backbone, T0abs)));
 
   const soloRoutes = (await Promise.all(stranded.map((b) => soloLoop(b)))).filter(
     (r): r is ComputedRoute => r != null,
