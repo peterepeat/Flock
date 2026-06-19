@@ -22,30 +22,29 @@ import { useFlockStore } from "@/store/flockStore";
 const log = createLogger("waypoints");
 
 // Cap how many auto-named points we reverse-geocode on import (a huge route
-// shouldn't burst the geocoder); the rest keep their placeholder names. And a
-// deadline so a slow/unavailable geocoder never stalls the import itself.
+// shouldn't burst the geocoder); the rest keep their placeholder names. The
+// deadline bounds the wait — whatever resolved by then is KEPT (partial naming
+// beats none), so a slow geocoder degrades gracefully rather than stalling.
 const REVERSE_NAME_CAP = 60;
-const REVERSE_NAME_DEADLINE_MS = 8000;
+const REVERSE_NAME_DEADLINE_MS = 12000;
 
 /** Replace auto-assigned placeholder names ("Start", "Point 3", …) on imported
- *  waypoints with reverse-geocoded place names. Best-effort: any that fail or
- *  exceed the cap/deadline keep their placeholder. */
+ *  waypoints with reverse-geocoded place names. Best-effort: any that fail, or
+ *  don't resolve before the deadline, keep their placeholder. `onProgress`
+ *  reports naming progress for the UI. */
 async function reverseNameImported(
   wps: Omit<FlockWaypoint, "id">[],
+  onProgress?: (done: number, total: number) => void,
 ): Promise<Omit<FlockWaypoint, "id">[]> {
   const targets = wps
     .map((w, i) => ({ w, i }))
     .filter(({ w }) => isAutoWaypointName(w.name))
     .slice(0, REVERSE_NAME_CAP);
   if (targets.length === 0) return wps;
-  const labels = await Promise.race([
-    reverseGeocodeBatch(targets.map(({ w }) => w.location)),
-    new Promise<null>((res) => setTimeout(() => res(null), REVERSE_NAME_DEADLINE_MS)),
-  ]);
-  if (!labels) {
-    log.warn("reverse-naming timed out — importing with placeholder names", { count: targets.length });
-    return wps;
-  }
+  const labels = await reverseGeocodeBatch(targets.map(({ w }) => w.location), {
+    deadlineMs: REVERSE_NAME_DEADLINE_MS,
+    onResult: onProgress,
+  });
   const out = wps.map((w) => ({ ...w }));
   let named = 0;
   targets.forEach(({ i }, k) => {
@@ -168,8 +167,12 @@ export default function WaypointsSection() {
       // placeholders ("Start", "Point 3", …). Reverse-geocode those into real place
       // names — the same naming a tapped pin gets — then import once.
       const needsNaming = parsed.waypoints.some((w) => isAutoWaypointName(w.name));
-      if (needsNaming) setIoMsg("Importing — naming waypoints…");
-      const waypoints = needsNaming ? await reverseNameImported(parsed.waypoints) : parsed.waypoints;
+      if (needsNaming) setIoMsg("Naming waypoints…");
+      const waypoints = needsNaming
+        ? await reverseNameImported(parsed.waypoints, (done, total) =>
+            setIoMsg(`Naming waypoints… ${done}/${total}`),
+          )
+        : parsed.waypoints;
       await uImportRoute(flockId, waypoints, parsed.gpxPassthrough);
       setIoMsg(
         parsed.warnings.length

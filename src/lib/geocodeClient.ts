@@ -35,20 +35,37 @@ export function pinLabel(r: ReverseGeocodeResult | null): string | null {
 /**
  * Reverse-geocode many points with BOUNDED concurrency (best-effort) — used to
  * name a batch of imported GPX waypoints without bursting the provider. Results
- * align by index; failures are null. Throttle = max in-flight requests.
+ * align by index; failures are null.
+ *
+ * `deadlineMs` caps the wait: once it elapses we stop launching NEW calls and
+ * return whatever has resolved so far (in-flight calls just finish unobserved).
+ * This keeps PARTIAL progress on a slow provider instead of discarding it all.
+ * `onResult(done, total)` fires after each resolves, for progress UI.
  */
 export async function reverseGeocodeBatch(
   points: { lat: number; lng: number }[],
-  concurrency = 5,
+  opts: {
+    concurrency?: number;
+    deadlineMs?: number;
+    onResult?: (done: number, total: number) => void;
+  } = {},
 ): Promise<(ReverseGeocodeResult | null)[]> {
+  // Gentle by default: public geocoders throttle/ban bursts, so a low concurrency
+  // (a trickle, not a flood) is safer than a fast flood that gets blocked.
+  const { concurrency = 4, deadlineMs, onResult } = opts;
   const out: (ReverseGeocodeResult | null)[] = new Array(points.length).fill(null);
   let next = 0;
+  let done = 0;
+  let stopped = false;
+  const timer = deadlineMs ? setTimeout(() => (stopped = true), deadlineMs) : null;
   const worker = async () => {
-    while (next < points.length) {
+    while (next < points.length && !stopped) {
       const i = next++;
       out[i] = await reverseGeocode(points[i].lat, points[i].lng);
+      onResult?.(++done, points.length);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, points.length) }, worker));
+  if (timer) clearTimeout(timer);
   return out;
 }
