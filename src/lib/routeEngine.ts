@@ -47,6 +47,10 @@ const EPS = 1e-6;
 // (the "never solo on the backbone" invariant). The single longest's surplus
 // distance — when it clears this margin — becomes a solo tail past the peel-off.
 const MIN_EXTENSION_KM = 1.5;
+// Solo fill loops are requested a touch under their available room because ORS
+// round-trips overshoot the asked length and a loop can't be trimmed (it must
+// return to its start to egress) — so we leave headroom rather than bust a cap.
+const FILL_SAFETY = 0.85;
 // Opportunistic overlap: two runners on their APPROACH/EGRESS feeder legs count
 // as together when within this distance at the same instant, for at least this
 // long (filters incidental crossings). The backbone clock already handles the
@@ -157,7 +161,10 @@ function computeLegs(builds: RunnerBuild[], backbone: Backbone): Leg[] {
     const at = boundaries[k];
     const stop = backbone.stops.find((s) => Math.abs(s.km - at) < 1e-3);
     if (stop) {
-      const here = builds.filter((b) => b.enterKm <= at + EPS && b.exitKm >= at - EPS);
+      // Only runners CONTINUING past the stop sit through its dwell. A runner whose
+      // exit is AT the stop peels off the moment the flock arrives (no dwell), so
+      // their distance/time isn't charged for a stop they don't take.
+      const here = builds.filter((b) => b.enterKm <= at + EPS && b.exitKm > at + EPS);
       if (here.length > 0) {
         const startSec = clock;
         clock += stop.durationSec;
@@ -205,6 +212,16 @@ function arrivalAtKm(legs: Leg[], km: number): number | null {
     if (km >= lg.lo - EPS && km <= lg.hi + EPS) return lg.startSec + (km - lg.lo) * lg.paceSec;
   }
   return null;
+}
+
+/**
+ * Flock-clock seconds at which a runner LEAVES the flock if they peel off at `km`.
+ * Same as tAtLegs everywhere except AT a stop, where it's the pre-dwell arrival
+ * (the runner exits the instant the flock arrives — they don't sit through a stop
+ * they're peeling off at). Falls back to tAtLegs if no run leg reaches km.
+ */
+function exitClockOf(legs: Leg[], km: number): number {
+  return arrivalAtKm(legs, km) ?? tAtLegs(legs, km);
 }
 
 // --- opportunistic overlap on feeder (approach/egress) legs -----------------
@@ -437,12 +454,33 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
       if (arc < 0.01) continue;
       const dist = b.approachKm + arc + b.egressKm;
       const latest = b.p.latestFinishTime ? timeToSec(b.p.latestFinishTime) : Infinity;
-      const arrival = T0abs + tAtLegs(legs, b.exitKm) + b.egressKm * b.ownPaceSec;
-      let cut = 0;
-      if (b.p.maxDistance != null && dist > b.p.maxDistance + 0.4) cut = Math.max(cut, dist - b.p.maxDistance);
-      if (arrival > latest + 60) cut = Math.max(cut, (arrival - latest) / b.ownPaceSec);
-      if (cut <= 0.05) continue;
-      b.exitKm = Math.max(b.enterKm, b.exitKm - cut);
+      const arrival = T0abs + exitClockOf(legs, b.exitKm) + b.egressKm * b.ownPaceSec;
+
+      // Distance cap: stops save no distance, so trim the arc proportionally.
+      const distExit =
+        b.p.maxDistance != null && dist > b.p.maxDistance + 0.4
+          ? Math.max(b.enterKm, b.exitKm - (dist - b.p.maxDistance))
+          : b.exitKm;
+
+      // Latest-finish: the proportional trim, BUT prefer landing at the highest
+      // stop the runner can still reach and get home from in time — exiting at a
+      // stop sheds its dwell (and every dwell after it), buying back arc the
+      // proportional cut would have thrown away. Stop egress is a crow estimate
+      // here; the real ORS egress below re-checks it next pass.
+      let timeExit = b.exitKm;
+      if (arrival > latest + 60) {
+        timeExit = Math.max(b.enterKm, b.exitKm - (arrival - latest) / b.ownPaceSec);
+        for (const s of backbone.stops) {
+          if (s.km <= b.enterKm + EPS || s.km >= b.exitKm - EPS || s.km <= timeExit) continue;
+          const egEst = crowKm(pointAtKm(backbone, s.km), b.finishPt) * ROAD_FACTOR;
+          const arrAtStop = T0abs + exitClockOf(legs, s.km) + egEst * b.ownPaceSec;
+          if (arrAtStop <= latest + 60) timeExit = s.km; // keep the highest feasible
+        }
+      }
+
+      const newExit = Math.max(b.enterKm, Math.min(distExit, timeExit));
+      if (b.exitKm - newExit <= 0.05) continue;
+      b.exitKm = newExit;
       try {
         const eg = await legRoute(pointAtKm(backbone, b.exitKm), b.finishPt);
         b.egressKm = eg.distanceKm;
@@ -508,6 +546,23 @@ async function tryLoop(at: LatLng, km: number): Promise<{ km: number; geom: LatL
 }
 
 /**
+ * A solo loop that lands WITHIN `maxKm` (the room it must fit). ORS round-trips
+ * overshoot their requested length unpredictably and a loop can't be trimmed (it
+ * must return to its start), so we ask a touch under, and if the result still
+ * overshoots the ceiling we retry once scaled by the observed overshoot. Null if
+ * ORS fails or it still won't fit.
+ */
+async function fitLoop(at: LatLng, maxKm: number): Promise<{ km: number; geom: LatLng[] } | null> {
+  if (maxKm < MIN_EXTENSION_KM) return null;
+  const loop = await tryLoop(at, maxKm * FILL_SAFETY);
+  if (!loop || loop.km <= maxKm) return loop;
+  const scaled = maxKm * FILL_SAFETY * (maxKm / loop.km);
+  if (scaled < 1) return null;
+  const retry = await tryLoop(at, scaled);
+  return retry && retry.km <= maxKm ? retry : null;
+}
+
+/**
  * Fill a runner's distance deficit with SOLO loops placed in their time slack, so
  * the extra distance never costs flock time. The deficit is whatever the flock
  * route + feeders left short of their target; it's absorbed by:
@@ -523,49 +578,47 @@ async function applySoloFill(b: RunnerBuild, backbone: Backbone, T0abs: number):
   const target = targetDistanceKm(b.p);
   if (target == null) return;
   const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-  // Never let solo fill push past the distance cap (same +0.4 tolerance as enforce).
-  const capRoom = b.p.maxDistance != null ? b.p.maxDistance + 0.4 - built : Infinity;
-  let deficit = Math.min(target - built, capRoom);
+  // The cap is the most any loop may add (same +0.4 tolerance as enforce).
+  const capCeil = b.p.maxDistance != null ? b.p.maxDistance + 0.4 : Infinity;
+  let deficit = Math.min(target, capCeil) - built;
   if (deficit < MIN_EXTENSION_KM) return;
 
+  // Each "room" is the MAX km that side can absorb (cap + time tolerances baked in).
+  // We request a touch under it (round-trips overshoot, and a loop can't be trimmed
+  // without breaking its return to the start), and accept only a loop that lands
+  // within the room.
   const exitAbs = T0abs + b.exitClockSec;
-  const latest = b.p.latestFinishTime != null ? timeToSec(b.p.latestFinishTime) : Infinity;
+  const latest = b.p.latestFinishTime != null ? timeToSec(b.p.latestFinishTime) + 60 : Infinity;
 
-  // Cool-down loop from the exit, before egress: bounded by latest-finish.
+  // Cool-down loop from the exit, before egress: bounded by latest-finish + cap.
   const cooldownRoom = Math.min(
     deficit,
+    capCeil - built,
     (latest - exitAbs - b.egressKm * b.ownPaceSec) / b.ownPaceSec,
   );
   if (cooldownRoom >= MIN_EXTENSION_KM) {
-    const loop = await tryLoop(pointAtKm(backbone, b.exitKm), cooldownRoom);
+    const loop = await fitLoop(pointAtKm(backbone, b.exitKm), cooldownRoom);
     if (loop) {
-      const arrival = exitAbs + (loop.km + b.egressKm) * b.ownPaceSec;
-      const fitsCap = b.p.maxDistance == null || built + loop.km <= b.p.maxDistance + 0.4;
-      if (fitsCap && arrival <= latest + 60) {
-        b.cooldownKm = loop.km;
-        b.cooldownGeom = loop.geom;
-        deficit -= loop.km;
-      }
+      b.cooldownKm = loop.km;
+      b.cooldownGeom = loop.geom;
+      deficit -= loop.km;
     }
   }
 
-  // Warm-up loop from home, before setting off: uses the slack between the runner's
-  // earliest-start and when they'd otherwise leave. Shifts departure earlier only.
-  if (deficit >= MIN_EXTENSION_KM) {
-    const warmupRoom = Math.min(deficit, (b.departHomeSec - b.earliestSec) / b.ownPaceSec);
-    if (warmupRoom >= MIN_EXTENSION_KM) {
-      const loop = await tryLoop(b.home, warmupRoom);
-      if (loop) {
-        const newDepart = b.departHomeSec - loop.km * b.ownPaceSec;
-        const fitsCap =
-          b.p.maxDistance == null || built + b.cooldownKm + loop.km <= b.p.maxDistance + 0.4;
-        if (fitsCap && newDepart >= b.earliestSec - 60) {
-          b.warmupKm = loop.km;
-          b.warmupGeom = loop.geom;
-          b.departHomeSec = newDepart;
-          deficit -= loop.km;
-        }
-      }
+  // Warm-up loop from home, before setting off: uses the slack between earliest-start
+  // and when they'd otherwise leave (shifts departure earlier only) + cap.
+  const earliest = b.earliestSec - 60;
+  const warmupRoom = Math.min(
+    deficit,
+    capCeil - built - b.cooldownKm,
+    (b.departHomeSec - earliest) / b.ownPaceSec,
+  );
+  if (warmupRoom >= MIN_EXTENSION_KM) {
+    const loop = await fitLoop(b.home, warmupRoom);
+    if (loop) {
+      b.warmupKm = loop.km;
+      b.warmupGeom = loop.geom;
+      b.departHomeSec -= loop.km * b.ownPaceSec;
     }
   }
 
@@ -725,7 +778,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     const dist = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
     if (b.p.maxDistance != null && dist > b.p.maxDistance + 0.8) return true;
     if (b.p.latestFinishTime) {
-      const arrival = postT0 + tAtLegs(postLegs, b.exitKm) + b.egressKm * b.ownPaceSec;
+      const arrival = postT0 + exitClockOf(postLegs, b.exitKm) + b.egressKm * b.ownPaceSec;
       if (arrival > timeToSec(b.p.latestFinishTime) + 90) return true;
     }
     return false;
@@ -736,7 +789,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   T0abs = onBackbone.length ? anchorT0(onBackbone, legs) : postT0;
   for (const b of onBackbone) {
     b.enterClockSec = tAtLegs(legs, b.enterKm);
-    b.exitClockSec = tAtLegs(legs, b.exitKm);
+    b.exitClockSec = exitClockOf(legs, b.exitKm);
     b.departHomeSec = T0abs + b.enterClockSec - b.approachKm * b.ownPaceSec;
   }
 
