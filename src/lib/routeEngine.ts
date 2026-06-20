@@ -352,6 +352,28 @@ async function testAndApplyForcedD(
   return next;
 }
 
+/**
+ * Run ONE convergence ladder for either side (inbound F / outbound D): try the NATURAL
+ * common-tail merge first (free, from already-fetched feeders), and only if it didn't fire,
+ * try the FORCED synthesised meeting point (priced + gated). Mutually exclusive — a fired
+ * natural merge is returned as-is and forced is skipped; if neither clears its bar the
+ * backbone is returned unchanged (the no-merge no-op). The two sides differ ONLY in their
+ * per-side closures (front prepend vs back append, approach vs egress), so this one helper —
+ * called once per side — replaces the previously-duplicated F and D ladders.
+ *
+ * `natural` computes + gates + applies the common tail, returning the new backbone, or null
+ * when it didn't fire (leaving builds + backbone untouched). `forced` tries the synthesised
+ * meeting point on the (still-original) backbone and returns the result (unchanged on decline).
+ */
+async function runConvergenceLadder(
+  backbone: Backbone,
+  natural: () => Backbone | null,
+  forced: (bb: Backbone) => Promise<Backbone>,
+): Promise<Backbone> {
+  const merged = natural();
+  return merged ?? (await forced(backbone));
+}
+
 function targetDistanceKm(p: Participant): number | null {
   if (p.preferredDistance == null && p.maxDistance == null) return null;
   let t = p.preferredDistance ?? p.maxDistance ?? DEFAULT_LOOP_DISTANCE_KM;
@@ -1153,19 +1175,25 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   // egress). The auto/no-waypoint case (rendezvous = centroid of starts) is left out:
   // there is no fixed point the approaches funnel toward, so the merge doesn't apply.
   if (waypoints.length >= 1) {
+    // INBOUND (F): pull the rendezvous back to the real meeting point. The ladder tries the
+    // NATURAL common tail of the joiners' approaches first, then the FORCED synthesised P.
     const wp0 = backbone.coords[0]; // the ORS-snapped waypoint (km 0): corridor start or loop start
     const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
     const joiners = builds.filter(isJoiner);
-    let naturalFired = false;
-    if (joiners.length >= 2) {
-      const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
-      if (F.forkKm >= FORMATION_MIN_MERGE_KM) {
-        backbone = prependFormationLead(backbone, F.sharedFromForkToWp0, F.forkPoint);
-        // The km axis lengthened by forkKm at the FRONT (F is the new km 0, wp0 is now
-        // at km forkKm). Shift every runner onto it; re-anchor joiners to enter at F
-        // with their approach reduced to the solo home→F head (sliced from the cached
-        // geometry — no ORS). A deep-joiner's physical entry is unchanged, so only its
-        // km coordinate shifts and its approach is left alone.
+    backbone = await runConvergenceLadder(
+      backbone,
+      () => {
+        // NATURAL F — the start of the longest common tail of the joiners' approach routes
+        // (the shared road they were already funnelling down). FREE: zero extra ORS, a pure
+        // prepend. Needs ≥ FORMATION_MIN_MERGE_KM of genuinely shared road, else declines.
+        if (joiners.length < 2) return null;
+        const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
+        if (F.forkKm < FORMATION_MIN_MERGE_KM) return null;
+        const next = prependFormationLead(backbone, F.sharedFromForkToWp0, F.forkPoint);
+        // The km axis lengthened by forkKm at the FRONT (F is the new km 0, wp0 is now at km
+        // forkKm). Shift every runner onto it; re-anchor joiners to enter at F with their
+        // approach reduced to the solo home→F head (sliced from cached geometry — no ORS). A
+        // deep-joiner's physical entry is unchanged, so only its km shifts; its approach stays.
         for (const b of builds) {
           if (isJoiner(b)) {
             const head = approachHeadToFork(b.approachGeom, F.forkPoint);
@@ -1182,93 +1210,71 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
           flockId: session.id,
           forkKm: round2(F.forkKm),
           joiners: joiners.length,
-          backboneKm: round2(backbone.totalKm),
+          backboneKm: round2(next.totalKm),
         });
-        naturalFired = true;
-      }
-    }
+        return next;
+      },
+      // FORCED F — when no shared road exists, bend the candidates to a computed meeting point
+      // P, paying detour, when the together-time clearly beats the cost within their limits.
+      // Candidate set: a SINGLE waypoint routes everyone through the one café (the whole
+      // rendezvous — no mid-corridor "deep joiners"), so every runner is a candidate, which also
+      // sidesteps the tiny-loop optimizer seating a budget-tight runner's window a little way
+      // round the loop, outside natural F's arc threshold; a corridor uses the joiner set.
+      async (bb) => {
+        const forcedCandidates =
+          waypoints.length === 1 ? builds.filter((b) => b.approachGeom.length >= 2) : joiners;
+        if (forcedCandidates.length < 2) return bb;
+        return testAndApplyForcedF(forcedCandidates, builds, bb, wp0, session.id);
+      },
+    );
 
-    // FORCED convergence — when natural F didn't fire (the runners share no road into the
-    // waypoint), bend the candidates to a computed meeting point P, paying detour, when
-    // the together-time clearly beats the cost within their limits. Mutually exclusive
-    // with natural F (today's natural-F output is provably untouched); declines to the
-    // pinned model when not worth it. F = best of {natural tail, forced P, no merge}.
-    //
-    // Candidate set: with a SINGLE waypoint everyone routes through the one café (it is the
-    // whole rendezvous — no mid-corridor "deep joiners"), so every runner is a candidate;
-    // this also sidesteps the tiny-loop optimizer placing a budget-tight runner's window a
-    // little way round the loop, outside natural F's arc threshold. For a corridor, use the
-    // gather-at-the-start joiner set.
-    if (!naturalFired) {
-      const forcedCandidates =
-        waypoints.length === 1 ? builds.filter((b) => b.approachGeom.length >= 2) : joiners;
-      if (forcedCandidates.length >= 2) {
-        backbone = await testAndApplyForcedF(forcedCandidates, builds, backbone, wp0, session.id);
-      }
-    }
-
-    // --- D mirror: the dispersal point on the egress side ---------------------
-    // Symmetric to F. The dispersal-joiners — runners reaching the backbone END —
-    // run home along egress routes that share a corridor before splitting; D is where
-    // they diverge. The flock runs end→D together (a shared leg APPENDED at the back),
-    // then peels apart to their finishes. Same gates as F: D is computed from the
-    // egresses ALREADY fetched (zero extra ORS), the append is pure (zero ORS), and
-    // when finishes are disparate the shared tail is short, D collapses to the end,
-    // and this is a no-op. Unlike F's prepend, the append doesn't shift existing arc
-    // positions — only the dispersal-joiners' exit moves out to the new end (their
-    // egress shrinks to the solo D→finish tail). A fast disperser slowed on the shared
-    // end→D leg can't be made late: enforceConstraints below re-checks arrival and
-    // trims the exit (re-fetching egress) if the shared pace would bust a deadline.
+    // OUTBOUND (D): the egress-side mirror. The dispersal-joiners reach the backbone END and
+    // run home along egress routes that share a corridor before splitting; the flock runs
+    // end→D together (a shared leg APPENDED at the back), then peels apart. Same ladder, same
+    // gates; unlike F's prepend, the append doesn't shift existing arc positions — only the
+    // dispersers' exit moves out to the new end (their egress shrinks to the solo D→finish tail).
     const endKm = backbone.totalKm;
     const backboneEnd = backbone.coords[backbone.coords.length - 1];
-    // A dispersal-joiner reaches the backbone END *and* its egress genuinely STARTS
-    // there (within tolerance), so the reversed egresses share the anchor the common-
-    // tail search needs. Excluding near-end exiters whose egress starts elsewhere keeps
-    // D from seaming a kink / under-firing on a false anchor (it just won't merge them).
+    // A dispersal-joiner reaches the backbone END *and* its egress genuinely STARTS there
+    // (within tolerance), so the reversed egresses share the anchor the common-tail search needs.
     const isDispJoiner = (b: RunnerBuild) =>
       b.exitKm >= endKm - JOIN_AT_WP0_KM &&
       b.egressGeom.length >= 2 &&
       distanceMeters(b.egressGeom[0], backboneEnd) <= FORMATION_TOLERANCE_M;
     const dispJoiners = builds.filter(isDispJoiner);
-    let naturalDFired = false;
-    if (dispJoiners.length >= 2) {
-      const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
-      if (D.dispKm >= FORMATION_MIN_MERGE_KM) {
-        backbone = appendDispersalLead(backbone, D.sharedFromEndToD, D.dispPoint);
-        // Only the dispersal-joiners change: the append is past every other runner's
-        // exit, so non-dispersers' km are untouched. Re-anchor each disperser to exit at
-        // D with its egress sliced to the solo D→finish tail (no ORS).
+    backbone = await runConvergenceLadder(
+      backbone,
+      () => {
+        // NATURAL D — the egress-side common tail (computed from egresses already fetched).
+        if (dispJoiners.length < 2) return null;
+        const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
+        if (D.dispKm < FORMATION_MIN_MERGE_KM) return null;
+        const next = appendDispersalLead(backbone, D.sharedFromEndToD, D.dispPoint);
+        // Only the dispersal-joiners change: the append is past every other runner's exit, so
+        // non-dispersers' km are untouched. Re-anchor each disperser to exit at D with its
+        // egress sliced to the solo D→finish tail (no ORS).
         for (const b of dispJoiners) {
           const tail = egressTailFromDispersal(b.egressGeom, D.dispPoint);
           b.egressGeom = tail.geom;
           b.egressKm = tail.km;
-          b.exitKm = backbone.totalKm; // exit at the new end (D)
+          b.exitKm = next.totalKm; // exit at the new end (D)
         }
         log.info("dispersal point D", {
           flockId: session.id,
           dispKm: round2(D.dispKm),
           dispJoiners: dispJoiners.length,
-          backboneKm: round2(backbone.totalKm),
+          backboneKm: round2(next.totalKm),
         });
-        naturalDFired = true;
-      }
-    }
-
-    // FORCED dispersal — the egress mirror of forced F. When natural D didn't fire (the
-    // runners share no road HOME), bend the candidates to a computed split point P beyond
-    // the end and run end→P together before peeling apart, paying detour, when the together-
-    // time clearly beats the cost within their limits. Mutually exclusive with natural D;
-    // declines to the no-merge model when not worth it. Candidate set mirrors forced F: a
-    // SINGLE-waypoint loop uses every runner with an egress (the tiny-loop optimizer can
-    // peel a budget-tight runner off just before the loop close, outside the dispJoiner arc
-    // threshold); a corridor uses the reach-the-end dispJoiner set.
-    if (!naturalDFired) {
-      const forcedDispersers =
-        waypoints.length === 1 ? builds.filter((b) => b.egressGeom.length >= 2) : dispJoiners;
-      if (forcedDispersers.length >= 2) {
-        backbone = await testAndApplyForcedD(forcedDispersers, builds, backbone, backboneEnd, session.id);
-      }
-    }
+        return next;
+      },
+      // FORCED D — the egress mirror of forced F (same single-wp-everyone vs corridor-joiner rule).
+      async (bb) => {
+        const forcedDispersers =
+          waypoints.length === 1 ? builds.filter((b) => b.egressGeom.length >= 2) : dispJoiners;
+        if (forcedDispersers.length < 2) return bb;
+        return testAndApplyForcedD(forcedDispersers, builds, bb, backboneEnd, session.id);
+      },
+    );
   }
 
   // Flock-clock anchor (depends only on entries, stable through exit trimming).
