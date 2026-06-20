@@ -76,6 +76,32 @@ const OPP_MIN_SEC = 120;
 // onto the F-anchored axis.
 const JOIN_AT_WP0_KM = 0.15;
 
+// --- per-runner budget (Stage 2 foundation) ---------------------------------
+// One home for the distance-cap / latest-finish tolerances that were scattered as
+// magic numbers across enforceConstraints, applySoloFill and the strand check. The
+// graces stay distinct on purpose: a runner is TRIMMED past the smaller grace but
+// only STRANDED past the larger one (so a tiny overage re-fits rather than dropping
+// to a solo loop). `softness` is the Stage 2 pricing hook — 0 reproduces today's hard
+// behaviour exactly (guarded by the golden snapshot); a positive softness will later
+// let a runner spend headroom on together-time.
+const CAP_TRIM_GRACE_KM = 0.4; // enforce / solo-fill: only trim a cap overage past this
+const STRAND_GRACE_KM = 0.8; // strand only when the cap is busted by more than this
+const LATE_TRIM_GRACE_SEC = 60; // enforce / solo-fill: only count "late" past this
+const STRAND_GRACE_SEC = 90; // strand on lateness only past this
+
+interface RunnerBudget {
+  distanceCapKm: number; // hard distance cap (maxDistance), or Infinity
+  latestSec: number; // latest-finish, or Infinity
+  softness: number; // 0 = today's hard graces; >0 = priced relaxation (Stage 2 pricing)
+}
+function runnerBudget(p: Participant): RunnerBudget {
+  return {
+    distanceCapKm: p.maxDistance ?? Infinity,
+    latestSec: p.latestFinishTime != null ? timeToSec(p.latestFinishTime) : Infinity,
+    softness: 0,
+  };
+}
+
 const round2 = (v: number) => Number(v.toFixed(2));
 const crowKm = (a: LatLng, b: LatLng) => distanceMeters(a, b) / 1000;
 
@@ -529,14 +555,15 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
     for (const b of builds) {
       const arc = b.exitKm - b.enterKm;
       if (arc < 0.01) continue;
+      const bud = runnerBudget(b.p);
       const dist = b.approachKm + arc + b.egressKm;
-      const latest = b.p.latestFinishTime ? timeToSec(b.p.latestFinishTime) : Infinity;
+      const latest = bud.latestSec;
       const arrival = T0abs + exitClockOf(legs, b.exitKm) + b.egressKm * b.ownPaceSec;
 
       // Distance cap: stops save no distance, so trim the arc proportionally.
       const distExit =
-        b.p.maxDistance != null && dist > b.p.maxDistance + 0.4
-          ? Math.max(b.enterKm, b.exitKm - (dist - b.p.maxDistance))
+        dist > bud.distanceCapKm + CAP_TRIM_GRACE_KM
+          ? Math.max(b.enterKm, b.exitKm - (dist - bud.distanceCapKm))
           : b.exitKm;
 
       // Latest-finish: the proportional trim, BUT prefer landing at the highest
@@ -545,13 +572,13 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
       // proportional cut would have thrown away. Stop egress is a crow estimate
       // here; the real ORS egress below re-checks it next pass.
       let timeExit = b.exitKm;
-      if (arrival > latest + 60) {
+      if (arrival > latest + LATE_TRIM_GRACE_SEC) {
         timeExit = Math.max(b.enterKm, b.exitKm - (arrival - latest) / b.ownPaceSec);
         for (const s of backbone.stops) {
           if (s.km <= b.enterKm + EPS || s.km >= b.exitKm - EPS || s.km <= timeExit) continue;
           const egEst = crowKm(pointAtKm(backbone, s.km), b.finishPt) * ROAD_FACTOR;
           const arrAtStop = T0abs + exitClockOf(legs, s.km) + egEst * b.ownPaceSec;
-          if (arrAtStop <= latest + 60) timeExit = s.km; // keep the highest feasible
+          if (arrAtStop <= latest + LATE_TRIM_GRACE_SEC) timeExit = s.km; // keep the highest feasible
         }
       }
 
@@ -677,9 +704,10 @@ async function fitLoop(
 async function applySoloFill(b: RunnerBuild, backbone: Backbone, T0abs: number): Promise<void> {
   const target = targetDistanceKm(b.p);
   if (target == null) return;
+  const bud = runnerBudget(b.p);
   const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-  // The cap is the most the total may reach (same +0.4 tolerance as enforce).
-  const capCeil = b.p.maxDistance != null ? b.p.maxDistance + 0.4 : Infinity;
+  // The cap is the most the total may reach (same trim grace as enforce).
+  const capCeil = bud.distanceCapKm + CAP_TRIM_GRACE_KM; // Infinity when uncapped
   let want = Math.min(target, capCeil) - built; // distance still to fill toward target
   if (want < MIN_EXTENSION_KM) return;
 
@@ -687,7 +715,7 @@ async function applySoloFill(b: RunnerBuild, backbone: Backbone, T0abs: number):
   // bust (cap headroom + the relevant time tolerance) — so a runner with room reaches
   // their target, while a tight one is re-sized down rather than busting a limit.
   const exitAbs = T0abs + b.exitClockSec;
-  const latest = b.p.latestFinishTime != null ? timeToSec(b.p.latestFinishTime) + 60 : Infinity;
+  const latest = bud.latestSec + LATE_TRIM_GRACE_SEC; // Infinity when no deadline
 
   // Cool-down loop from the exit, before egress: ceiling = cap headroom ∧ time left.
   const cooldownMax = Math.min(
@@ -968,11 +996,12 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   const postLegs = computeLegs(builds, backbone);
   const postT0 = anchorT0(builds, postLegs);
   const stranded = builds.filter((b) => {
+    const bud = runnerBudget(b.p);
     const dist = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-    if (b.p.maxDistance != null && dist > b.p.maxDistance + 0.8) return true;
-    if (b.p.latestFinishTime) {
+    if (dist > bud.distanceCapKm + STRAND_GRACE_KM) return true;
+    if (Number.isFinite(bud.latestSec)) {
       const arrival = postT0 + exitClockOf(postLegs, b.exitKm) + b.egressKm * b.ownPaceSec;
-      if (arrival > timeToSec(b.p.latestFinishTime) + 90) return true;
+      if (arrival > bud.latestSec + STRAND_GRACE_SEC) return true;
     }
     return false;
   });
