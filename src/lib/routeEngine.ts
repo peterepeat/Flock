@@ -19,10 +19,13 @@
 import { closestPointOnSegment, distanceMeters } from "./geo";
 import { createLogger } from "./logger";
 import {
+  appendDispersalLead,
   buildBackbone,
   centroid,
+  computeDispersalPoint,
   computeFormationPoint,
   FORMATION_MIN_MERGE_KM,
+  FORMATION_TOLERANCE_M,
   nearestKm,
   pointAtKm,
   prependFormationLead,
@@ -102,6 +105,34 @@ function approachHeadToFork(approachGeom: LatLng[], fork: LatLng): { geom: LatLn
   // Head = vertices up to that segment's start, then the interpolated foot at F.
   const geom = approachGeom.slice(0, bestSeg + 1);
   if (distanceMeters(geom[geom.length - 1], bestFoot) > 1) geom.push(bestFoot);
+  let m = 0;
+  for (let i = 1; i < geom.length; i++) m += distanceMeters(geom[i - 1], geom[i]);
+  return { geom, km: m / 1000 };
+}
+
+/**
+ * The solo "tail" of a dispersal-joiner's egress: their cached egress polyline
+ * (end→finish) cut EXACTLY at D, i.e. D→finish. The end→D stretch becomes a shared
+ * backbone leg. Mirror of approachHeadToFork — D rarely lands on a vertex, so we cut
+ * at the interpolated foot on the nearest segment. Pure — no ORS.
+ */
+function egressTailFromDispersal(egressGeom: LatLng[], disp: LatLng): { geom: LatLng[]; km: number } {
+  if (egressGeom.length < 2) return { geom: egressGeom.slice(), km: 0 };
+  let bestSeg = 0; // segment [bestSeg, bestSeg+1] whose closest point to D is nearest
+  let bestFoot = egressGeom[egressGeom.length - 1];
+  let bestD = Infinity;
+  for (let i = 0; i < egressGeom.length - 1; i++) {
+    const foot = closestPointOnSegment(disp, egressGeom[i], egressGeom[i + 1]);
+    const d = distanceMeters(disp, foot);
+    if (d < bestD) {
+      bestD = d;
+      bestSeg = i;
+      bestFoot = foot;
+    }
+  }
+  // Tail = the interpolated foot at D, then vertices from bestSeg+1 onward to finish.
+  const geom = [bestFoot, ...egressGeom.slice(bestSeg + 1)];
+  if (geom.length >= 2 && distanceMeters(geom[0], geom[1]) <= 1) geom.shift();
   let m = 0;
   for (let i = 1; i < geom.length; i++) m += distanceMeters(geom[i - 1], geom[i]);
   return { geom, km: m / 1000 };
@@ -532,7 +563,17 @@ async function enforceConstraints(builds: RunnerBuild[], backbone: Backbone, T0a
         b.egressKm = eg.distanceKm;
         b.egressGeom = geomToLatLng(eg.geometry);
       } catch {
-        /* keep prior egress */
+        // Re-fetch failed. Keeping the prior egress is fine for a small trim (it still
+        // starts ~at the new exit), but NOT for a dispersal-joiner trimmed back past D:
+        // its egress is the D→finish tail, so keeping it would leave a gap in the route
+        // and undercount the distance (mis-feeding the strand check below). When the
+        // prior egress no longer starts near the new exit, fall back to a straight line
+        // so the geometry stays continuous and the distance bounded.
+        const exitPt = pointAtKm(backbone, b.exitKm);
+        if (b.egressGeom.length === 0 || distanceMeters(exitPt, b.egressGeom[0]) > 100) {
+          b.egressGeom = [exitPt, b.finishPt];
+          b.egressKm = crowKm(exitPt, b.finishPt) * ROAD_FACTOR;
+        }
       }
       changed = true;
     }
@@ -863,6 +904,51 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
           flockId: session.id,
           forkKm: round2(F.forkKm),
           joiners: joiners.length,
+          backboneKm: round2(backbone.totalKm),
+        });
+      }
+    }
+
+    // --- D mirror: the dispersal point on the egress side ---------------------
+    // Symmetric to F. The dispersal-joiners — runners reaching the backbone END —
+    // run home along egress routes that share a corridor before splitting; D is where
+    // they diverge. The flock runs end→D together (a shared leg APPENDED at the back),
+    // then peels apart to their finishes. Same gates as F: D is computed from the
+    // egresses ALREADY fetched (zero extra ORS), the append is pure (zero ORS), and
+    // when finishes are disparate the shared tail is short, D collapses to the end,
+    // and this is a no-op. Unlike F's prepend, the append doesn't shift existing arc
+    // positions — only the dispersal-joiners' exit moves out to the new end (their
+    // egress shrinks to the solo D→finish tail). A fast disperser slowed on the shared
+    // end→D leg can't be made late: enforceConstraints below re-checks arrival and
+    // trims the exit (re-fetching egress) if the shared pace would bust a deadline.
+    const endKm = backbone.totalKm;
+    const backboneEnd = backbone.coords[backbone.coords.length - 1];
+    // A dispersal-joiner reaches the backbone END *and* its egress genuinely STARTS
+    // there (within tolerance), so the reversed egresses share the anchor the common-
+    // tail search needs. Excluding near-end exiters whose egress starts elsewhere keeps
+    // D from seaming a kink / under-firing on a false anchor (it just won't merge them).
+    const isDispJoiner = (b: RunnerBuild) =>
+      b.exitKm >= endKm - JOIN_AT_WP0_KM &&
+      b.egressGeom.length >= 2 &&
+      distanceMeters(b.egressGeom[0], backboneEnd) <= FORMATION_TOLERANCE_M;
+    const dispJoiners = builds.filter(isDispJoiner);
+    if (dispJoiners.length >= 2) {
+      const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
+      if (D.dispKm >= FORMATION_MIN_MERGE_KM) {
+        backbone = appendDispersalLead(backbone, D.sharedFromEndToD, D.dispPoint);
+        // Only the dispersal-joiners change: the append is past every other runner's
+        // exit, so non-dispersers' km are untouched. Re-anchor each disperser to exit at
+        // D with its egress sliced to the solo D→finish tail (no ORS).
+        for (const b of dispJoiners) {
+          const tail = egressTailFromDispersal(b.egressGeom, D.dispPoint);
+          b.egressGeom = tail.geom;
+          b.egressKm = tail.km;
+          b.exitKm = backbone.totalKm; // exit at the new end (D)
+        }
+        log.info("dispersal point D", {
+          flockId: session.id,
+          dispKm: round2(D.dispKm),
+          dispJoiners: dispJoiners.length,
           backboneKm: round2(backbone.totalKm),
         });
       }

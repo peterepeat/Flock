@@ -26,8 +26,9 @@ const MIN_GROW_KM = 1.5;
 // the common tail is short and F collapses to the first waypoint (today's behaviour).
 //
 // A canonical-path vertex counts as on the shared corridor when every OTHER runner's
-// approach passes within this distance of it.
-const FORMATION_TOLERANCE_M = 35;
+// approach passes within this distance of it. Exported: the engine also uses it to
+// require a dispersal-joiner's egress to genuinely START at the backbone end.
+export const FORMATION_TOLERANCE_M = 35;
 // Don't pull the rendezvous back for a shared tail shorter than this — a sub-600m
 // merge isn't worth re-anchoring the flock (mirrors MIN_GROW_KM / MIN_EXTENSION_KM).
 // Exported: the engine gates its Phase-B rebuild on the same threshold.
@@ -232,6 +233,58 @@ export function prependFormationLead(backbone: Backbone, sharedTail: LatLng[], f
     dispersalPoint: backbone.dispersalPoint,
   };
   return next;
+}
+
+export interface DispersalPoint {
+  dispPoint: LatLng; // D — where the flock splits on the way out (== backbone end when nothing fired)
+  dispKm: number; // length of the shared end→D tail (0 ⇒ disparate finishes, leave the end)
+  sharedFromEndToD: LatLng[]; // the shared corridor polyline end→D (≥2 pts when fired)
+}
+
+/**
+ * The computed DISPERSAL POINT D — the egress-side MIRROR of F. The dispersal-joiners
+ * (runners reaching the backbone END) run home along egress routes that start at the
+ * end and share a corridor before splitting to their finishes; D is where they diverge.
+ * The flock runs end→D together, then peels apart. Implemented by REVERSING each egress
+ * (so it ends at the backbone end) and reusing computeFormationPoint's common-tail
+ * search, then reversing the shared geometry back. Pure + ORS-free. When finishes are
+ * disparate the shared tail is short and D collapses to the backbone end (dispKm 0).
+ */
+export function computeDispersalPoint(egressGeoms: LatLng[][], backboneEnd: LatLng): DispersalPoint {
+  const reversed = egressGeoms.map((g) => [...g].reverse()); // finish→end (so each ends at backboneEnd)
+  const F = computeFormationPoint(reversed, backboneEnd);
+  if (F.forkKm < FORMATION_MIN_MERGE_KM) {
+    return { dispPoint: backboneEnd, dispKm: 0, sharedFromEndToD: [] };
+  }
+  // F.sharedFromForkToWp0 is D→end (in the reversed order); reverse → end→D.
+  return {
+    dispPoint: F.forkPoint,
+    dispKm: F.forkKm,
+    sharedFromEndToD: [...F.sharedFromForkToWp0].reverse(),
+  };
+}
+
+/**
+ * Append the shared end→D tail to a backbone, so it ends at D and the flock runs the
+ * shared egress corridor together before splitting. PURE (no ORS) — mirror of
+ * prependFormationLead but at the BACK. Unlike the prepend, existing arc positions
+ * (and stops) are UNCHANGED — the extension is past the old end — so stops are kept
+ * verbatim (re-snapping could mis-bind them to the new geometry). The seam drops the
+ * tail's first vertex (≈ the backbone's current last vertex, both the old end).
+ */
+export function appendDispersalLead(backbone: Backbone, sharedTail: LatLng[], dispPoint: LatLng): Backbone {
+  if (sharedTail.length < 2) return backbone;
+  const coords = [...backbone.coords, ...sharedTail.slice(1)];
+  const { cumKm, totalKm } = withCum(coords);
+  return {
+    rendezvous: backbone.rendezvous,
+    coords,
+    cumKm,
+    totalKm,
+    stops: backbone.stops, // unchanged: the append is past every existing stop
+    formationPoint: backbone.formationPoint,
+    dispersalPoint: dispPoint,
+  };
 }
 
 export async function buildBackbone(opts: {

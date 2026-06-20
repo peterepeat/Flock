@@ -2,7 +2,7 @@
 //   npx --yes tsx scripts/_formation_test.ts
 // Pure geometry — no ORS, no server. Asserts the disparate no-op, full overlap,
 // partial shared tail, and the < MIN_MERGE rejection.
-import { computeFormationPoint, FORMATION_MIN_MERGE_KM } from "../src/lib/flockRoute";
+import { computeDispersalPoint, computeFormationPoint, FORMATION_MIN_MERGE_KM } from "../src/lib/flockRoute";
 import { distanceMeters } from "../src/lib/geo";
 import type { LatLng } from "../src/lib/types";
 
@@ -85,6 +85,40 @@ const corridorKm = (() => {
 {
   check("one approach → no-op", computeFormationPoint([[ll(-37.77, 144.95), wp0]], wp0).forkKm === 0);
   check("zero approaches → no-op", computeFormationPoint([], wp0).forkKm === 0);
+}
+
+// ---------------------------------------------------------------------------
+// computeDispersalPoint (D) — the egress-side mirror of F.
+// ---------------------------------------------------------------------------
+const end = ll(-37.805, 144.972); // backbone end (e.g. CarltonGardens)
+// A shared corridor heading EAST out of the end, then a split to NE / SE finishes.
+const eastCorridor = [end, ll(-37.805, 144.976), ll(-37.805, 144.98), ll(-37.805, 144.984)];
+const D_expected = eastCorridor[eastCorridor.length - 1]; // -37.805,144.984 — the split point
+const eastKm = (() => {
+  let m = 0;
+  for (let i = 1; i < eastCorridor.length; i++) m += distanceMeters(eastCorridor[i - 1], eastCorridor[i]);
+  return m / 1000;
+})();
+
+// (6) Shared egress corridor then split → D fires at the divergence.
+{
+  const egA = [...eastCorridor, ll(-37.8, 144.99)]; // end → D → NE finish
+  const egB = [...eastCorridor, ll(-37.81, 144.99)]; // end → D → SE finish
+  const D = computeDispersalPoint([egA, egB], end);
+  check("dispersal fires", D.dispKm >= FORMATION_MIN_MERGE_KM, `dispKm=${D.dispKm.toFixed(3)}`);
+  check("dispersal dispKm ≈ shared corridor", Math.abs(D.dispKm - eastKm) < 0.05, `dispKm=${D.dispKm.toFixed(3)} vs ${eastKm.toFixed(3)}`);
+  check("dispersal point ≈ D (split)", distanceMeters(D.dispPoint, D_expected) < 40, `dist=${distanceMeters(D.dispPoint, D_expected).toFixed(0)}m`);
+  check("shared geom starts at backbone end", distanceMeters(D.sharedFromEndToD[0], end) < 5);
+  check("shared geom ends at D", distanceMeters(D.sharedFromEndToD.at(-1)!, D_expected) < 40);
+}
+
+// (7) Disparate finishes (split immediately at the end) → no dispersal (byte-identical egress).
+{
+  const egA = [end, ll(-37.8, 144.978), ll(-37.795, 144.985)]; // straight NE
+  const egB = [end, ll(-37.81, 144.978), ll(-37.815, 144.985)]; // straight SE
+  const D = computeDispersalPoint([egA, egB], end);
+  check("disparate finishes → dispKm 0", D.dispKm === 0, `dispKm=${D.dispKm}`);
+  check("disparate finishes → empty shared geom", D.sharedFromEndToD.length === 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
