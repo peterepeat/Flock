@@ -7,7 +7,7 @@
 // km 0 is the rendezvous: where the flock gathers and the flock clock starts.
 // ---------------------------------------------------------------------------
 
-import { distanceMeters } from "./geo";
+import { distanceMeters, pointToSegmentMeters } from "./geo";
 import { createLogger } from "./logger";
 import { getRoundTrip, getRoute, type OrsRoute } from "./ors";
 import type { FlockWaypoint, LatLng } from "./types";
@@ -18,12 +18,38 @@ const log = createLogger("flock-route");
 // sub-1.5km loop isn't worth the ORS call (mirrors MIN_EXTENSION_KM in the engine).
 const MIN_GROW_KM = 1.5;
 
+// --- Stage 0: computed formation point F (longest common tail of approaches) ----
+// The convergence tree's degenerate, single-merge case. The rendezvous (km 0) used
+// to be PINNED to the first waypoint; F pulls it back to where the runners' approach
+// routes already coincide — the shared road they were all funnelling down — so that
+// stretch becomes flock-together time instead of solo feeders. When origins diverge
+// the common tail is short and F collapses to the first waypoint (today's behaviour).
+//
+// A canonical-path vertex counts as on the shared corridor when every OTHER runner's
+// approach passes within this distance of it.
+const FORMATION_TOLERANCE_M = 35;
+// Don't pull the rendezvous back for a shared tail shorter than this — a sub-600m
+// merge isn't worth re-anchoring the flock (mirrors MIN_GROW_KM / MIN_EXTENSION_KM).
+// Exported: the engine gates its Phase-B rebuild on the same threshold.
+export const FORMATION_MIN_MERGE_KM = 0.6;
+// Walking the tail back from the waypoint it must keep heading AWAY from it; a
+// momentary fold back toward it (a switchback / one-way pair) up to this far is
+// tolerated before we call it a divergence.
+const FORMATION_MONOTONE_SLACK_M = 60;
+
 export interface Backbone {
   rendezvous: LatLng; // km 0 — where the flock gathers
   coords: LatLng[]; // backbone polyline
   cumKm: number[]; // cumulative km at each vertex
   totalKm: number;
   stops: { km: number; durationSec: number; name: string; location: LatLng }[];
+  // The computed convergence points (Stage 0+). formationPoint = km 0 when the flock
+  // gathers BEFORE the first waypoint (a real common tail fired); undefined ⇒ the
+  // degenerate pinned case (== rendezvous == first waypoint). dispersalPoint is the
+  // egress mirror, added by a later stage. Both optional so existing callers/stored
+  // sessions are unaffected.
+  formationPoint?: LatLng;
+  dispersalPoint?: LatLng;
 }
 
 export function centroid(pts: LatLng[]): LatLng {
@@ -108,6 +134,104 @@ function fromOrs(ors: OrsRoute): Pick<Backbone, "coords" | "cumKm" | "totalKm"> 
     lng,
   }));
   return withCum(coords);
+}
+
+// --- computed formation point F --------------------------------------------
+
+/** Total length (m) of a polyline. */
+function lengthMeters(line: LatLng[]): number {
+  let m = 0;
+  for (let i = 1; i < line.length; i++) m += distanceMeters(line[i - 1], line[i]);
+  return m;
+}
+
+/** Shortest distance (m) from `p` to a polyline (min over its segments). */
+function pointToPolylineMeters(p: LatLng, line: LatLng[]): number {
+  let best = Infinity;
+  for (let i = 1; i < line.length; i++) {
+    const d = pointToSegmentMeters(p, line[i - 1], line[i]);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+export interface FormationPoint {
+  forkPoint: LatLng; // F — where the flock gathers (== wp0 when nothing fired)
+  forkKm: number; // length of the shared F→wp0 tail (0 ⇒ disparate, leave the pin)
+  sharedFromForkToWp0: LatLng[]; // the shared corridor polyline F→wp0 (≥2 pts when fired)
+}
+
+/**
+ * The computed FORMATION POINT F: the start of the longest COMMON TAIL of the
+ * runners' approach routes to the first waypoint — the shared road they were all
+ * funnelling down anyway. Pure + ORS-free: it reads the approach geometry the engine
+ * has ALREADY fetched.
+ *
+ * Method: take the longest approach as the canonical path and walk it BACKWARD from
+ * the waypoint end, keeping the contiguous run of vertices where (a) every other
+ * approach passes within FORMATION_TOLERANCE_M (nearest-segment distance, so vertex
+ * misalignment between routes doesn't matter) and (b) the path keeps heading away
+ * from the waypoint (a small fold-back is tolerated). F is the first vertex that
+ * fails — snapped to a REAL canonical vertex, never freely interpolated, so F always
+ * sits on an actually-routed road. When approaches diverge near the waypoint the tail
+ * is shorter than FORMATION_MIN_MERGE_KM and F collapses to wp0 (forkKm 0).
+ *
+ * `approachGeoms` must be the routes of the rendezvous-joiners (each ending at ~wp0);
+ * a runner joining deep in the corridor doesn't end at wp0 and must be excluded by
+ * the caller.
+ */
+export function computeFormationPoint(approachGeoms: LatLng[][], wp0: LatLng): FormationPoint {
+  const none: FormationPoint = { forkPoint: wp0, forkKm: 0, sharedFromForkToWp0: [] };
+  const geoms = approachGeoms.filter((g) => g.length >= 2);
+  if (geoms.length < 2) return none;
+
+  // Canonical = the longest approach (most likely to span the whole shared tail);
+  // every other approach is tested against its vertices.
+  const canonical = geoms.reduce((a, b) => (lengthMeters(b) > lengthMeters(a) ? b : a));
+  const others = geoms.filter((g) => g !== canonical);
+
+  let forkIdx = canonical.length - 1; // last vertex ≈ wp0
+  let maxDistToWp0 = distanceMeters(canonical[forkIdx], wp0);
+  for (let i = canonical.length - 2; i >= 0; i--) {
+    const v = canonical[i];
+    if (!others.every((o) => pointToPolylineMeters(v, o) <= FORMATION_TOLERANCE_M)) break;
+    const distToWp0 = distanceMeters(v, wp0);
+    // The tail must keep heading away from wp0; tolerate a brief fold back toward it.
+    if (distToWp0 < maxDistToWp0 - FORMATION_MONOTONE_SLACK_M) break;
+    maxDistToWp0 = Math.max(maxDistToWp0, distToWp0);
+    forkIdx = i;
+  }
+
+  const sharedFromForkToWp0 = canonical.slice(forkIdx);
+  const forkKm = lengthMeters(sharedFromForkToWp0) / 1000;
+  if (forkKm < FORMATION_MIN_MERGE_KM) return none;
+  return { forkPoint: canonical[forkIdx], forkKm, sharedFromForkToWp0 };
+}
+
+/**
+ * Prepend the shared F→wp0 tail to an already-built backbone, so km 0 becomes F and
+ * the flock runs the shared corridor together. PURE (no ORS) — reuses the corridor +
+ * any grown loop already in `backbone.coords`. Every arc position shifts forward by
+ * the tail length; stops are re-snapped onto the new axis (their km changes). The
+ * seam drops the backbone's first vertex (≈ the tail's last vertex, both the ORS-
+ * snapped wp0), mirroring the grow-loop seam handling.
+ */
+export function prependFormationLead(backbone: Backbone, sharedTail: LatLng[], forkPoint: LatLng): Backbone {
+  if (sharedTail.length < 2) return backbone;
+  const coords = [...sharedTail, ...backbone.coords.slice(1)];
+  const { cumKm, totalKm } = withCum(coords);
+  const next: Backbone = {
+    rendezvous: forkPoint,
+    coords,
+    cumKm,
+    totalKm,
+    stops: backbone.stops
+      .map((s) => ({ ...s, km: nearestKm({ ...backbone, coords, cumKm, totalKm }, s.location) }))
+      .sort((a, b) => a.km - b.km),
+    formationPoint: forkPoint,
+    dispersalPoint: backbone.dispersalPoint,
+  };
+  return next;
 }
 
 export async function buildBackbone(opts: {

@@ -16,9 +16,19 @@
 // no proximity guessing, no iterative distance padding.
 // ---------------------------------------------------------------------------
 
-import { distanceMeters } from "./geo";
+import { closestPointOnSegment, distanceMeters } from "./geo";
 import { createLogger } from "./logger";
-import { buildBackbone, centroid, nearestKm, pointAtKm, sliceKm, type Backbone } from "./flockRoute";
+import {
+  buildBackbone,
+  centroid,
+  computeFormationPoint,
+  FORMATION_MIN_MERGE_KM,
+  nearestKm,
+  pointAtKm,
+  prependFormationLead,
+  sliceKm,
+  type Backbone,
+} from "./flockRoute";
 import { getRoundTrip, getRoute, RouteError, type OrsRoute } from "./ors";
 import type {
   ComputedRoute,
@@ -55,9 +65,47 @@ const MIN_EXTENSION_KM = 1.5;
 // shared route; this catches neighbours who run to/from the flock together.
 const OPP_OVERLAP_M = 60;
 const OPP_MIN_SEC = 120;
+// Stage 0 (computed formation point F): a runner whose chosen entry is within this
+// of km 0 "gathered at the rendezvous" — they are the candidates whose approaches
+// funnel toward the first waypoint and can merge earlier at F. A runner entering
+// deeper than this joined the corridor mid-route (their approach doesn't end at the
+// waypoint), so they're excluded from the common-tail computation and just shift
+// onto the F-anchored axis.
+const JOIN_AT_WP0_KM = 0.15;
 
 const round2 = (v: number) => Number(v.toFixed(2));
 const crowKm = (a: LatLng, b: LatLng) => distanceMeters(a, b) / 1000;
+
+/**
+ * The solo "head" of a rendezvous-joiner's approach: their cached approach polyline
+ * (home→wp0) cut EXACTLY at F, i.e. home→F. The remaining F→wp0 stretch becomes a
+ * shared backbone leg. F (a vertex of the canonical approach) lies within
+ * FORMATION_TOLERANCE_M of this runner's route but rarely on a vertex, so we cut at
+ * the interpolated foot of F on the nearest SEGMENT — not the nearest vertex, which
+ * would leave approachKm (and thus departHomeSec / co-arrival) off by a vertex-spacing.
+ * Pure — no ORS. Returns the head geometry and its length (km).
+ */
+function approachHeadToFork(approachGeom: LatLng[], fork: LatLng): { geom: LatLng[]; km: number } {
+  if (approachGeom.length < 2) return { geom: approachGeom.slice(), km: 0 };
+  let bestSeg = 0; // segment [bestSeg, bestSeg+1] whose closest point to F is nearest
+  let bestFoot = approachGeom[0];
+  let bestD = Infinity;
+  for (let i = 0; i < approachGeom.length - 1; i++) {
+    const foot = closestPointOnSegment(fork, approachGeom[i], approachGeom[i + 1]);
+    const d = distanceMeters(fork, foot);
+    if (d < bestD) {
+      bestD = d;
+      bestSeg = i;
+      bestFoot = foot;
+    }
+  }
+  // Head = vertices up to that segment's start, then the interpolated foot at F.
+  const geom = approachGeom.slice(0, bestSeg + 1);
+  if (distanceMeters(geom[geom.length - 1], bestFoot) > 1) geom.push(bestFoot);
+  let m = 0;
+  for (let i = 1; i < geom.length; i++) m += distanceMeters(geom[i - 1], geom[i]);
+  return { geom, km: m / 1000 };
+}
 
 function targetDistanceKm(p: Participant): number | null {
   if (p.preferredDistance == null && p.maxDistance == null) return null;
@@ -698,7 +746,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   else targetKm = DEFAULT_BACKBONE_KM;
   targetKm = Math.max(1, Math.min(targetKm, DISTANCE_MAX_KM));
 
-  const backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
+  let backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
 
   // Best-response: choose each runner's [enter, exit] to maximise together-time.
   const windows = optimizeWindows(
@@ -771,6 +819,54 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   if (builds.length === 0) {
     done({ skipped: true });
     return empty(true);
+  }
+
+  // --- Phase B: computed formation point F (Stage 0 of the convergence tree) ----
+  // The pinned rendezvous (the first waypoint) is the LATEST the flock can gather;
+  // pull it back to F — the start of the longest common tail of the rendezvous-
+  // joiners' approach routes, the shared road they were already funnelling down. The
+  // F→wp0 corridor flips from solo feeders to flock-together time at ZERO extra
+  // distance and ZERO extra ORS (F is computed from the approaches already fetched
+  // above, and the rebuild is a pure prepend). When origins are disparate the common
+  // tail is shorter than FORMATION_MIN_MERGE_KM, F collapses to the waypoint, and
+  // this whole block is a no-op — the output is byte-identical to the pinned model.
+  //
+  // Done as ONE atomic block BEFORE the first computeLegs: after it, nothing from the
+  // pinned phase is reused except each runner's shifted enterKm/exitKm. Waypoint mode
+  // only (the auto/single-waypoint loop already computes its own rendezvous).
+  if (waypoints.length >= 2) {
+    const wp0 = backbone.coords[0]; // the ORS-snapped first waypoint (km 0 today)
+    const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
+    const joiners = builds.filter(isJoiner);
+    if (joiners.length >= 2) {
+      const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
+      if (F.forkKm >= FORMATION_MIN_MERGE_KM) {
+        backbone = prependFormationLead(backbone, F.sharedFromForkToWp0, F.forkPoint);
+        // The km axis lengthened by forkKm at the FRONT (F is the new km 0, wp0 is now
+        // at km forkKm). Shift every runner onto it; re-anchor joiners to enter at F
+        // with their approach reduced to the solo home→F head (sliced from the cached
+        // geometry — no ORS). A deep-joiner's physical entry is unchanged, so only its
+        // km coordinate shifts and its approach is left alone.
+        for (const b of builds) {
+          if (isJoiner(b)) {
+            const head = approachHeadToFork(b.approachGeom, F.forkPoint);
+            b.approachGeom = head.geom;
+            b.approachKm = head.km;
+            b.enterKm = 0;
+            b.exitKm += F.forkKm;
+          } else {
+            b.enterKm += F.forkKm;
+            b.exitKm += F.forkKm;
+          }
+        }
+        log.info("formation point F", {
+          flockId: session.id,
+          forkKm: round2(F.forkKm),
+          joiners: joiners.length,
+          backboneKm: round2(backbone.totalKm),
+        });
+      }
+    }
   }
 
   // Flock-clock anchor (depends only on entries, stable through exit trimming).

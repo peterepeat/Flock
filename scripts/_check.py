@@ -21,6 +21,10 @@ expect_together = int(sys.argv[3])
 expect_stop = int(sys.argv[4])
 expect_target = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 expect_second_target = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+# expect_formation=1 asserts the computed formation point F fired: the shared spine
+# starts measurably BEFORE the first waypoint (the flock gathers up the shared
+# corridor, not pinned at wp0). The convergent-pair guard for Stage 0.
+expect_formation = int(sys.argv[7]) if len(sys.argv) > 7 else 0
 
 s = json.load(sys.stdin)
 parts = {p["id"]: p for p in s["participants"]}
@@ -83,6 +87,23 @@ if expect_second_target:
         want = second["preferredDistance"]
         if dist < want - 2.0:
             fails.append(f"{names[second['id']]} (2nd-longest) reached {dist}km, short of {want}km (spine not grown)")
+
+if expect_formation:
+    fr = s.get("flockRoute")
+    wps = s.get("waypoints") or []
+    if not fr or not fr.get("coordinates") or not wps:
+        fails.append("expect_formation but no flockRoute/waypoints")
+    else:
+        import math
+        lng0, lat0 = fr["coordinates"][0][0], fr["coordinates"][0][1]  # spine start [lng,lat]
+        wp0 = wps[0]["location"]
+        dlat = math.radians(wp0["lat"] - lat0)
+        dlng = math.radians(wp0["lng"] - lng0)
+        a = (math.sin(dlat / 2) ** 2
+             + math.cos(math.radians(lat0)) * math.cos(math.radians(wp0["lat"])) * math.sin(dlng / 2) ** 2)
+        gap_km = 2 * 6371 * math.asin(math.sqrt(a))
+        if gap_km < 0.5:
+            fails.append(f"formation point did not fire (spine starts {round(gap_km*1000)}m from wp0, expected ≥500m before it)")
 
 totkm = round(sum(r["distanceKm"] for r in routes), 1)
 status = "PASS" if not fails else "FAIL"

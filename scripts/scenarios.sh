@@ -38,8 +38,8 @@ calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: applic
 # person NAME LAT LNG [extraJSON]
 person() { patch "$1" "{\"action\":\"addParticipant\",\"editToken\":\"$2\",\"participant\":{\"name\":\"$2\",\"startLocation\":{\"lat\":$3,\"lng\":$4},\"startAddress\":\"$2\",\"earliestStartTime\":\"07:00\",\"finishLocation\":null,\"finishAddress\":null,\"latestFinishTime\":${6:-null},\"preferredPace\":${7:-360},\"maxPace\":${8:-300},\"preferredDistance\":${5:-null},\"maxDistance\":${9:-null},\"restStop\":null}}" "$2"; }
 wp()     { patch "$1" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$2,\"lng\":$3},\"address\":\"$4\",\"name\":\"$4\",\"stopMinutes\":${5:-0}}}"; }
-# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET]
-check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
+# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET] [EXPECT_FORMATION]
+check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
 
 # 5 disparate people (shared across s4/s5/s6). args: FID
 add5() {
@@ -136,6 +136,23 @@ s12() {
   check "$F" "s12 ride-to-stop + deadline" 2 1 0 1
 }
 
+# Convergent pair (Stage 0 — computed formation point F): two runners funnelling
+# down the SAME arterial to the first waypoint (Princes Park), ~3km N and ~300m
+# apart, so their shortest ORS approaches share the final corridor. The pin would
+# start the spine AT the waypoint and score the shared approach only as a post-hoc
+# opportunistic feeder overlap; Stage 0 pulls the rendezvous back to F where they
+# merge, making that corridor a first-class shared backbone leg. expect_formation=1
+# asserts the spine starts ≥500m before wp0 (F fired). Together-time is preserved
+# (opp-overlap already caught the coincidence); this is the cohesive, planned form.
+cvg() {
+  local F; F=$(create); echo "cvg → $BASE/flock/$F"
+  wp "$F" -37.7840 144.9610 PrincesPark
+  wp "$F" -37.8050 144.9720 CarltonGardens
+  person "$F" Ana -37.7560 144.9590 16 null 360 300 18
+  person "$F" Bo  -37.7555 144.9625 15 null 360 300 17
+  check "$F" "cvg convergent-pair (F)" 2 1 0 0 0 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -153,7 +170,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

@@ -60,6 +60,39 @@ export function distanceMeters(a: LatLng, b: LatLng): number {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+/**
+ * The point on segment `a`–`b` closest to `p` (the perpendicular foot, clamped to
+ * the segment endpoints). Uses a local equirectangular projection around `p` so the
+ * planar geometry is in metres — exact enough for the short segments of an ORS
+ * polyline. Reused by the convergence-tree code to cut a runner's approach exactly
+ * at the formation point F (not a vertex short of or past it).
+ */
+export function closestPointOnSegment(p: LatLng, a: LatLng, b: LatLng): LatLng {
+  const kx = Math.cos((p.lat * Math.PI) / 180) * 111320; // m per ° lng at p's latitude
+  const ky = 110540; // m per ° lat
+  // p at the origin; a, b in metres relative to p.
+  const ax = (a.lng - p.lng) * kx;
+  const ay = (a.lat - p.lat) * ky;
+  const bx = (b.lng - p.lng) * kx;
+  const by = (b.lat - p.lat) * ky;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  // t = projection of (p − a) onto (b − a), clamped; p is the origin so (p − a) = (−a).
+  let t = len2 === 0 ? 0 : -(ax * dx + ay * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  // Apply the clamped fraction along a→b in lat/lng (linear over a short segment).
+  return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+}
+
+/**
+ * Shortest distance (metres) from point `p` to the segment `a`–`b`. Reused by the
+ * convergence-tree common-tail detection (how near a runner's path passes another's).
+ */
+export function pointToSegmentMeters(p: LatLng, a: LatLng, b: LatLng): number {
+  return distanceMeters(p, closestPointOnSegment(p, a, b));
+}
+
 // ---------------------------------------------------------------------------
 // De-spur: trim contiguous "dead folds" (out-and-back spurs) from a loop.
 //
