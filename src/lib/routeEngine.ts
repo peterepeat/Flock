@@ -23,6 +23,7 @@ import {
   buildBackbone,
   centroid,
   computeDispersalPoint,
+  computeForcedMeetingPoint,
   computeFormationPoint,
   FORMATION_MIN_MERGE_KM,
   FORMATION_TOLERANCE_M,
@@ -170,6 +171,97 @@ function egressTailFromDispersal(egressGeom: LatLng[], disp: LatLng): { geom: La
   let m = 0;
   for (let i = 1; i < geom.length; i++) m += distanceMeters(geom[i - 1], geom[i]);
   return { geom, km: m / 1000 };
+}
+
+/**
+ * FORCED convergence (Stage 1) — the disparate-origin tier of F. Run ONLY when natural F
+ * did NOT fire (the runners share no road into the waypoint). Bends the rendezvous-joiners
+ * to a computed meeting point P, paying detour distance, so they run P→waypoint together.
+ *
+ * Two budget gates, both in the engine's own currency so there's no unit mixing:
+ *   • HARD: every joiner's REAL detour (committed against the actual home→P route, not a
+ *     crow estimate, so enforceConstraints can't later invalidate it) fits their slack —
+ *     the km they can add under their HARD distance cap. → else decline (unchanged).
+ *   • VALUE: the together-time gained (companion-km, at flock pace by construction since
+ *     the shared leg runs at the slowest present) must beat the detour cost priced at
+ *     OVERAGE_PRICE. → else decline. This makes a slow runner whose drag would sink the
+ *     merge simply fail to clear the hurdle (supermodular-safe).
+ *
+ * On fire it PREPENDS P→waypoint and re-anchors joiners exactly like natural F (the same
+ * downstream machinery absorbs it). On any decline / ORS error it returns the backbone
+ * unchanged — byte-identical to the no-merge model. ORS cost: 1 (P→wp0) + N (home→P).
+ * Returns the (possibly new) backbone; mutates joiner builds only when it fires.
+ */
+async function testAndApplyForcedF(
+  joiners: RunnerBuild[],
+  builds: RunnerBuild[],
+  backbone: Backbone,
+  wp0: LatLng,
+  flockId: string,
+): Promise<Backbone> {
+  // Detour budget per joiner: km they can add under their hard cap, over the no-merge
+  // baseline (approach home→wp0 + their backbone arc + egress). User chose FULL headroom.
+  const slack = joiners.map((b) => {
+    const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+    const cap = (b.p.maxDistance ?? targetDistanceKm(b.p) ?? Infinity) + CAP_TRIM_GRACE_KM;
+    return Math.max(0, cap - built);
+  });
+  const P = computeForcedMeetingPoint(
+    joiners.map((b) => b.home),
+    joiners.map((b) => b.approachKm),
+    slack,
+    wp0,
+    ROAD_FACTOR,
+  );
+  if (!P) return backbone;
+
+  // Commit with REAL ORS: the shared lead P→wp0 + each joiner's detour home→P.
+  let lead: { geom: LatLng[]; km: number };
+  let homeToP: { geom: LatLng[]; km: number }[];
+  try {
+    const [leadRoute, ...heads] = await Promise.all([
+      legRoute(P, wp0),
+      ...joiners.map((b) => legRoute(b.home, P)),
+    ]);
+    lead = { geom: geomToLatLng(leadRoute.geometry), km: leadRoute.distanceKm };
+    homeToP = heads.map((r) => ({ geom: geomToLatLng(r.geometry), km: r.distanceKm }));
+  } catch {
+    return backbone; // ORS failed — leave the pinned model untouched
+  }
+
+  const sharedKm = lead.km;
+  // Real added km per joiner vs their no-merge baseline. Re-anchoring to enter at P (km 0)
+  // means they also run the backbone stretch [0, oldEnterKm] they used to skip (a tiny
+  // single-waypoint loop can seat a budget-tight runner partway round), so that arc counts
+  // toward the detour too — else the HARD gate could let them slip oldEnterKm over the cap.
+  const detours = joiners.map((b, i) => homeToP[i].km + sharedKm + b.enterKm - b.approachKm);
+  const m = joiners.length;
+  const togetherGain = sharedKm * (m - 1);
+  const detourCost = OVERAGE_PRICE * detours.reduce((s, d) => s + Math.max(0, d), 0);
+  if (detours.some((d, i) => d > slack[i] + EPS)) return backbone; // HARD gate
+  if (togetherGain <= detourCost) return backbone; // VALUE gate
+
+  // FIRE. Prepend P→wp0 (axis shifts +sharedKm at the front); re-anchor joiners to start
+  // at P with their detour approach; non-joiners just shift onto the new axis.
+  const next = prependFormationLead(backbone, lead.geom, P);
+  for (const b of builds) {
+    b.enterKm += sharedKm;
+    b.exitKm += sharedKm;
+  }
+  joiners.forEach((b, i) => {
+    b.approachGeom = homeToP[i].geom;
+    b.approachKm = homeToP[i].km;
+    b.enterKm = 0; // joiners start at P (the new km 0)
+  });
+  log.info("forced meeting point P", {
+    flockId,
+    sharedKm: round2(sharedKm),
+    joiners: m,
+    togetherGain: round2(togetherGain),
+    detourCost: round2(detourCost),
+    backboneKm: round2(next.totalKm),
+  });
+  return next;
 }
 
 function targetDistanceKm(p: Participant): number | null {
@@ -929,29 +1021,38 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     return empty(true);
   }
 
-  // --- Phase B: computed formation point F (Stage 0 of the convergence tree) ----
-  // The pinned rendezvous (the first waypoint) is the LATEST the flock can gather;
-  // pull it back to F — the start of the longest common tail of the rendezvous-
-  // joiners' approach routes, the shared road they were already funnelling down. The
-  // F→wp0 corridor flips from solo feeders to flock-together time at ZERO extra
-  // distance and ZERO extra ORS (F is computed from the approaches already fetched
-  // above, and the rebuild is a pure prepend). When origins are disparate the common
-  // tail is shorter than FORMATION_MIN_MERGE_KM, F collapses to the waypoint, and
-  // this whole block is a no-op — the output is byte-identical to the pinned model.
+  // --- Phase B: computed formation point F (convergence tree, Stages 0 + 1) -----
+  // The pinned rendezvous (the first waypoint) is the LATEST the flock can gather; pull
+  // it back to F, the real meeting point, and the F→wp0 corridor flips from solo feeders
+  // to flock-together time. F is the best of three, in order:
+  //
+  //   • NATURAL F (Stage 0) — the start of the longest common tail of the joiners'
+  //     approach routes (the shared road they were already funnelling down). FREE: zero
+  //     extra distance, zero extra ORS (computed from the approaches already fetched, a
+  //     pure prepend). Needs ≥ FORMATION_MIN_MERGE_KM of genuinely shared road.
+  //   • FORCED F (Stage 1) — when origins are disparate (no shared tail), SYNTHESISE a
+  //     meeting point P off their lines and bend everyone to it, paying detour, but only
+  //     when the together-time beats the cost within each runner's hard cap (the two gates
+  //     in testAndApplyForcedF). This is the "two runners, different roads, one café" win.
+  //   • NO MERGE — neither clears its bar → F collapses to the waypoint and this whole
+  //     block is a no-op, byte-identical to the pinned model.
+  //
+  // Why a single waypoint is still a LOOP, not a free out-and-back: with one café there is
+  // no second point to define an "out" direction, so the backbone is a loop based at the
+  // café. F/D do the real meeting — forced F bends disparate runners together on the way
+  // IN (and D on the way OUT) — so the loop is just the distance-making shape between them.
   //
   // Done as ONE atomic block BEFORE the first computeLegs: after it, nothing from the
-  // pinned phase is reused except each runner's shifted enterKm/exitKm.
-  //
-  // Runs for ANY nominated waypoint(s) — a multi-waypoint corridor OR a single-waypoint
-  // LOOP (the "meet at one café, run a loop" case). The loop's start AND end are both the
-  // waypoint (km 0 == backbone end), so F prepends the shared approach BEFORE it and D
-  // appends the shared egress AFTER the loop returns to it — exactly as for a corridor.
-  // The auto/no-waypoint case (rendezvous = centroid of starts) is left out: there is no
-  // fixed point the approaches funnel toward, so the common-tail merge doesn't apply.
+  // pinned phase is reused except each runner's shifted enterKm/exitKm. Runs for ANY
+  // nominated waypoint(s) — multi-waypoint corridor or single-waypoint loop alike (for a
+  // loop, km 0 == backbone end, so F prepends the shared approach and D appends the shared
+  // egress). The auto/no-waypoint case (rendezvous = centroid of starts) is left out:
+  // there is no fixed point the approaches funnel toward, so the merge doesn't apply.
   if (waypoints.length >= 1) {
     const wp0 = backbone.coords[0]; // the ORS-snapped waypoint (km 0): corridor start or loop start
     const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
     const joiners = builds.filter(isJoiner);
+    let naturalFired = false;
     if (joiners.length >= 2) {
       const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
       if (F.forkKm >= FORMATION_MIN_MERGE_KM) {
@@ -979,6 +1080,26 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
           joiners: joiners.length,
           backboneKm: round2(backbone.totalKm),
         });
+        naturalFired = true;
+      }
+    }
+
+    // FORCED convergence — when natural F didn't fire (the runners share no road into the
+    // waypoint), bend the candidates to a computed meeting point P, paying detour, when
+    // the together-time clearly beats the cost within their limits. Mutually exclusive
+    // with natural F (today's natural-F output is provably untouched); declines to the
+    // pinned model when not worth it. F = best of {natural tail, forced P, no merge}.
+    //
+    // Candidate set: with a SINGLE waypoint everyone routes through the one café (it is the
+    // whole rendezvous — no mid-corridor "deep joiners"), so every runner is a candidate;
+    // this also sidesteps the tiny-loop optimizer placing a budget-tight runner's window a
+    // little way round the loop, outside natural F's arc threshold. For a corridor, use the
+    // gather-at-the-start joiner set.
+    if (!naturalFired) {
+      const forcedCandidates =
+        waypoints.length === 1 ? builds.filter((b) => b.approachGeom.length >= 2) : joiners;
+      if (forcedCandidates.length >= 2) {
+        backbone = await testAndApplyForcedF(forcedCandidates, builds, backbone, wp0, session.id);
       }
     }
 

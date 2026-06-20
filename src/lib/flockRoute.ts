@@ -7,7 +7,7 @@
 // km 0 is the rendezvous: where the flock gathers and the flock clock starts.
 // ---------------------------------------------------------------------------
 
-import { distanceMeters, pointToSegmentMeters } from "./geo";
+import { bearingRad, destinationPoint, distanceMeters, pointToSegmentMeters } from "./geo";
 import { createLogger } from "./logger";
 import { getRoundTrip, getRoute, type OrsRoute } from "./ors";
 import type { FlockWaypoint, LatLng } from "./types";
@@ -37,6 +37,15 @@ export const FORMATION_MIN_MERGE_KM = 0.6;
 // momentary fold back toward it (a switchback / one-way pair) up to this far is
 // tolerated before we call it a divergence.
 const FORMATION_MONOTONE_SLACK_M = 60;
+
+// --- Stage 1: FORCED convergence (a computed meeting point off the runners' lines) ---
+// When runners DON'T share a road into the waypoint (natural F can't fire), we can still
+// bend them to MEET at a computed point P, then run P→waypoint together — paying a detour.
+// Only worth attempting in a band of origin spreads: below this the bearings are
+// near-collinear (natural F should have caught them), above it the road-detour discount
+// collapses (the sim: forced bonus ~0.67 of Euclidean at 120°, worse beyond).
+const FORCED_SPREAD_MIN_DEG = 20;
+const FORCED_SPREAD_MAX_DEG = 150;
 
 export interface Backbone {
   rendezvous: LatLng; // km 0 — where the flock gathers
@@ -285,6 +294,67 @@ export function appendDispersalLead(backbone: Backbone, sharedTail: LatLng[], di
     formationPoint: backbone.formationPoint,
     dispersalPoint: dispPoint,
   };
+}
+
+/** Largest angular gap (degrees) between any two bearings — the origin "spread". */
+function bearingSpreadDeg(homes: LatLng[], wp0: LatLng): number {
+  const degs = homes.map((h) => (bearingRad(h, wp0) * 180) / Math.PI);
+  let max = 0;
+  for (let i = 0; i < degs.length; i++)
+    for (let j = i + 1; j < degs.length; j++) {
+      const raw = Math.abs(degs[i] - degs[j]) % 360;
+      max = Math.max(max, Math.min(raw, 360 - raw));
+    }
+  return max;
+}
+
+/**
+ * The computed FORCED meeting point P — Stage 1's disparate-origin tier of F. When the
+ * runners don't share a road into the waypoint (natural F can't fire), find a point P
+ * to bend them to, off their shortest lines, so they run P→waypoint together. P is the
+ * slack-bound optimum (the sim's best_meet, discretised): the FARTHEST-BACK point along
+ * the centroid(homes)→waypoint funnel axis whose detour EVERY runner can afford. A 1-D
+ * scan of a few candidates — never a 2-D grid, never ORS (crow estimates pick P; the
+ * caller re-validates the winner with real ORS before committing).
+ *
+ * Returns null when the origins are too collinear or too splayed (the geometric gate),
+ * the waypoint sits among the homes (nothing to share), or no candidate is affordable.
+ *
+ * @param homes      each candidate joiner's start
+ * @param approachKm each joiner's natural home→waypoint distance (the no-merge baseline)
+ * @param slackKm    each joiner's detour budget (km they can add under their hard cap)
+ * @param roadFactor crow→road inflation, so the crow detour estimate isn't over-optimistic
+ */
+export function computeForcedMeetingPoint(
+  homes: LatLng[],
+  approachKm: number[],
+  slackKm: number[],
+  wp0: LatLng,
+  roadFactor: number,
+): LatLng | null {
+  if (homes.length < 2) return null;
+  const spread = bearingSpreadDeg(homes, wp0);
+  if (spread < FORCED_SPREAD_MIN_DEG || spread > FORCED_SPREAD_MAX_DEG) return null;
+
+  const c = centroid(homes);
+  const axisKm = distanceMeters(c, wp0) / 1000;
+  if (axisKm < MIN_GROW_KM) return null; // waypoint basically among the homes — nothing to share
+  const dir = bearingRad(c, wp0);
+
+  // Candidates spaced along the funnel axis. t→0 sits far back (more shared distance, but
+  // bigger detours); t→1 hugs the waypoint. We keep the affordable candidate with the
+  // MOST shared distance (farthest back), which is the kernel's argmax-feasible.
+  let best: { P: LatLng; sharedKm: number } | null = null;
+  for (const t of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+    const P = destinationPoint(c, dir, t * axisKm);
+    const sharedKm = distanceMeters(P, wp0) / 1000; // run together P→waypoint
+    const affordable = homes.every((h, i) => {
+      const detour = roadFactor * (distanceMeters(h, P) / 1000 + sharedKm) - approachKm[i];
+      return detour <= slackKm[i] + 1e-9;
+    });
+    if (affordable && (!best || sharedKm > best.sharedKm)) best = { P, sharedKm };
+  }
+  return best?.P ?? null;
 }
 
 export async function buildBackbone(opts: {

@@ -7,7 +7,7 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc ext cct all   (default: all)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc ext cvg sw fwd fwd0 cct all   (default: all)
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
@@ -166,6 +166,27 @@ sw() {
   person "$F" Bo  -37.7555 144.9625 11 null 360 300 13
   check "$F" "sw single-wp convergent (F/D)" 2 1 0 0 0 1
 }
+# FORCED convergence (Stage 1) — one café, two runners on DIFFERENT roads into it (~50°
+# apart) who share no tail, so natural F can't fire. With headroom they're bent to a
+# computed meeting point P before the café and run the lead together; together-min jumps
+# from ~0 and the spine starts measurably before the waypoint (expect_formation=1).
+fwd() {
+  local F; F=$(create); echo "fwd → $BASE/flock/$F"
+  wp "$F" -37.8284 144.9847 Anderson
+  person "$F" REB -37.8067 144.9694 null null 360 300 null   # unconstrained
+  person "$F" Nor -37.7812 144.9860 12   null 360 300 13.8   # pref 12 / cap 13.8
+  check "$F" "fwd forced-convergence (P)" 2 1 0 0 0 1
+}
+# FORCED convergence DECLINES — two runners on OPPOSITE sides of the café (~180° apart)
+# fall outside the spread ceiling, so no meeting point is synthesised and the model stays
+# pinned at the café (no formation point: baseline provably untouched).
+fwd0() {
+  local F; F=$(create); echo "fwd0 → $BASE/flock/$F"
+  wp "$F" -37.8284 144.9847 Anderson
+  person "$F" Nth -37.7900 144.9850 12 null 360 300 14   # ~4km N of café
+  person "$F" Sth -37.8700 144.9850 12 null 360 300 14   # ~4.5km S of café
+  check "$F" "fwd0 forced declines (pinned)" 2 0 0 0 0 0
+}
 
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
@@ -184,7 +205,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

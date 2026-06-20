@@ -2,7 +2,7 @@
 //   npx --yes tsx scripts/_formation_test.ts
 // Pure geometry — no ORS, no server. Asserts the disparate no-op, full overlap,
 // partial shared tail, and the < MIN_MERGE rejection.
-import { computeDispersalPoint, computeFormationPoint, FORMATION_MIN_MERGE_KM } from "../src/lib/flockRoute";
+import { computeDispersalPoint, computeForcedMeetingPoint, computeFormationPoint, FORMATION_MIN_MERGE_KM } from "../src/lib/flockRoute";
 import { distanceMeters } from "../src/lib/geo";
 import type { LatLng } from "../src/lib/types";
 
@@ -119,6 +119,55 @@ const eastKm = (() => {
   const D = computeDispersalPoint([egA, egB], end);
   check("disparate finishes → dispKm 0", D.dispKm === 0, `dispKm=${D.dispKm}`);
   check("disparate finishes → empty shared geom", D.sharedFromEndToD.length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// computeForcedMeetingPoint (Stage 1) — the synthetic meeting point P for runners
+// who share NO road into the waypoint. Pure geometry (crow + road factor); the
+// real ORS commit + value gate live in routeEngine.
+// ---------------------------------------------------------------------------
+{
+  const wpF = ll(-37.8, 144.98);
+  const hA = ll(-37.764, 144.98); //  ~4km due N  → bearing to wp0 ≈ 180°
+  const hB = ll(-37.78, 145.018); //  ~4km NE    → bearing to wp0 ≈ 237°  ⇒ spread ≈ 57°
+  const apprA = distanceMeters(hA, wpF) / 1000;
+  const apprB = distanceMeters(hB, wpF) / 1000;
+
+  // 57° V with generous slack → fires, and P sits measurably back from the waypoint.
+  const P = computeForcedMeetingPoint([hA, hB], [apprA, apprB], [10, 10], wpF, 1.3);
+  check("forced V (57°) with slack → fires", P !== null);
+  if (P) check("forced P sits back from wp0", distanceMeters(P, wpF) / 1000 > 0.3, `dist=${(distanceMeters(P, wpF) / 1000).toFixed(2)}km`);
+
+  // Same V, ~zero slack → nobody can afford the detour → null.
+  const tight = computeForcedMeetingPoint([hA, hB], [apprA, apprB], [0.1, 0.1], wpF, 1.3);
+  check("forced V no slack → null", tight === null);
+
+  // Near-collinear (~same bearing into wp0) → below the spread floor → null.
+  const c1 = ll(-37.764, 144.98);
+  const c2 = ll(-37.766, 144.981);
+  const collinear = computeForcedMeetingPoint(
+    [c1, c2],
+    [distanceMeters(c1, wpF) / 1000, distanceMeters(c2, wpF) / 1000],
+    [10, 10],
+    wpF,
+    1.3,
+  );
+  check("forced near-collinear → null", collinear === null);
+
+  // Opposite sides (~180° apart) → above the spread ceiling → null.
+  const o1 = ll(-37.764, 144.98); // N
+  const o2 = ll(-37.836, 144.98); // S
+  const opp = computeForcedMeetingPoint(
+    [o1, o2],
+    [distanceMeters(o1, wpF) / 1000, distanceMeters(o2, wpF) / 1000],
+    [10, 10],
+    wpF,
+    1.3,
+  );
+  check("forced opposite (~180°) → null", opp === null);
+
+  // Single home → no-op.
+  check("forced one home → null", computeForcedMeetingPoint([hA], [apprA], [10], wpF, 1.3) === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
