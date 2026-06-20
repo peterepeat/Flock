@@ -7,7 +7,7 @@
 // km 0 is the rendezvous: where the flock gathers and the flock clock starts.
 // ---------------------------------------------------------------------------
 
-import { bearingRad, destinationPoint, distanceMeters, pointToSegmentMeters } from "./geo";
+import { bearingRad, despurLoop, destinationPoint, distanceMeters, pointToSegmentMeters } from "./geo";
 import { createLogger } from "./logger";
 import { getRoundTrip, getRoute, type OrsRoute } from "./ors";
 import type { FlockWaypoint, LatLng } from "./types";
@@ -357,12 +357,89 @@ export function computeForcedMeetingPoint(
   return best?.P ?? null;
 }
 
+// --- Stage: PEEL-AT-HOME rosette (AUTO mode) --------------------------------
+// Build the auto backbone as NESTED return-to-base laps keyed on the constrained
+// runners' reaches, instead of one far-flung lobe. The spine returns to the rendezvous
+// at each reach, so a budget-limited runner finishes a WHOLE shared lap AT home rather
+// than peeling on the far side and trudging back solo. Distinct seeds per lap send
+// consecutive laps in DIFFERENT directions, so they don't share a spoke out of the root
+// — a shared spoke is a zero-area fold that despurLoop would delete, collapsing the seam
+// (the prototype's make-or-break finding). VALIDATED: if any lap's return-to-base didn't
+// survive de-spur, return null and the caller falls back to the single lobe (degrade,
+// never worse). ORS cost: one round-trip per lap (≈ the number of distinct reach tiers).
+const ROSETTE_SEEDS = [1, 13, 29, 47, 71, 97, 131];
+// A lap counts as returning home when it passes within this of the rendezvous.
+const ROSETTE_RETURN_TOL_M = 120;
+// De-spur shifts arc positions slightly; search this far either side of a breakpoint.
+const ROSETTE_RETURN_WINDOW_KM = 2;
+
+async function buildRosette(
+  center: LatLng,
+  targetKm: number,
+  innerReaches: number[],
+): Promise<Pick<Backbone, "coords" | "cumKm" | "totalKm"> | null> {
+  const breaks = innerReaches.filter((r) => r > MIN_GROW_KM && r < targetKm - MIN_GROW_KM);
+  if (breaks.length === 0) return null; // no inner peel point → plain lobe (today's behaviour)
+  const ends = [...breaks, targetKm];
+  const lapLens: number[] = [];
+  let prev = 0;
+  for (const e of ends) {
+    lapLens.push(e - prev);
+    prev = e;
+  }
+  if (lapLens.some((l) => l < MIN_GROW_KM)) return null; // a degenerate sliver lap — not worth it
+
+  // One return-to-base round-trip per lap, each with a DISTINCT seed (different bearings),
+  // concatenated at the rendezvous (drop the duplicate seam vertex).
+  let coords: LatLng[] = [];
+  try {
+    for (let i = 0; i < lapLens.length; i++) {
+      const lap = fromOrs(await getRoundTrip(center, lapLens[i], ROSETTE_SEEDS[i % ROSETTE_SEEDS.length]));
+      coords = i === 0 ? lap.coords : coords.concat(lap.coords.slice(1));
+    }
+  } catch (err) {
+    log.warn("rosette lap routing failed — falling back to single lobe", { error: String(err) });
+    return null;
+  }
+
+  // De-spur the FULL concatenation: a seam fold (two laps sharing a spoke) surfaces here.
+  const geom = withCum(despurLoop(coords).coords);
+
+  // Validate every intended peel point still returns to base after de-spur; else bail so
+  // we never ship a backbone that silently strands the runner it was shaped for.
+  for (const e of breaks) {
+    let nearM = Infinity;
+    for (let i = 1; i < geom.coords.length - 1; i++) {
+      if (Math.abs(geom.cumKm[i] - e) > ROSETTE_RETURN_WINDOW_KM) continue;
+      const d = distanceMeters(geom.coords[i], center);
+      if (d < nearM) nearM = d;
+    }
+    if (nearM > ROSETTE_RETURN_TOL_M) {
+      log.warn("rosette return-to-base lost to de-spur — falling back to single lobe", {
+        breakpointKm: Number(e.toFixed(2)),
+        nearM: Math.round(nearM),
+      });
+      return null;
+    }
+  }
+
+  log.info("rosette backbone built", {
+    laps: lapLens.length,
+    totalKm: Number(geom.totalKm.toFixed(2)),
+    peelKm: breaks.map((b) => Number(b.toFixed(2))),
+  });
+  return geom;
+}
+
 export async function buildBackbone(opts: {
   waypoints: FlockWaypoint[];
   starts: LatLng[];
   targetKm: number;
+  // Inner peel-at-home reaches (AUTO mode only): ascending, sub-targetKm runner reaches
+  // the rosette returns to base at. Empty / absent ⇒ today's single lobe (unchanged).
+  reaches?: number[];
 }): Promise<Backbone> {
-  const { waypoints, starts, targetKm } = opts;
+  const { waypoints, starts, targetKm, reaches = [] } = opts;
 
   let rendezvous: LatLng;
   let geom: Pick<Backbone, "coords" | "cumKm" | "totalKm">;
@@ -404,9 +481,17 @@ export async function buildBackbone(opts: {
       }
     }
   } else {
-    // Auto / single-waypoint: a loop from the rendezvous sized to the target.
+    // Auto / single-waypoint: a loop from the rendezvous sized to the target. For an AUTO
+    // flock (no waypoint to pin) with a spread of budgets, shape that loop as a PEEL-AT-HOME
+    // rosette — nested laps returning to the rendezvous at each constrained runner's reach —
+    // so they finish a whole shared lap at home instead of peeling far out on one lobe.
+    // Falls back to the single lobe when there's no inner tier, routing fails, or a lap's
+    // return didn't survive de-spur, so the no-spread case is byte-identical. Single-waypoint
+    // loops keep the plain lobe (forced F/D handle their convergence).
     rendezvous = waypoints.length === 1 ? waypoints[0].location : centroid(starts);
-    geom = fromOrs(await getRoundTrip(rendezvous, Math.max(1, targetKm)));
+    const rosette =
+      waypoints.length === 0 ? await buildRosette(rendezvous, Math.max(1, targetKm), reaches) : null;
+    geom = rosette ?? fromOrs(await getRoundTrip(rendezvous, Math.max(1, targetKm)));
   }
 
   const backbone: Backbone = { rendezvous, ...geom, stops: [] };

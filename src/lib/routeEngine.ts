@@ -1031,7 +1031,23 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   else targetKm = DEFAULT_BACKBONE_KM;
   targetKm = Math.max(1, Math.min(targetKm, DISTANCE_MAX_KM));
 
-  let backbone = await buildBackbone({ waypoints, starts: runners.map((p) => p.startLocation), targetKm });
+  // Inner PEEL-AT-HOME breakpoints (AUTO rosette): the reaches of runners who can't cover
+  // the whole spine, so the auto loop can return to base where they peel off (a budget-tight
+  // runner finishes a shared lap AT home instead of being stranded far out on one lobe).
+  // Ascending, de-duped by MIN_EXTENSION_KM, and only those a clear lap below targetKm. Empty
+  // for ≤2-runner / no-spread flocks ⇒ buildBackbone keeps today's single lobe (byte-identical).
+  const reaches: number[] = [];
+  for (const r of [...finite].sort((a, b) => a - b)) {
+    if (r <= MIN_EXTENSION_KM || r >= targetKm - MIN_EXTENSION_KM) continue;
+    if (!reaches.length || r - reaches[reaches.length - 1] >= MIN_EXTENSION_KM) reaches.push(r);
+  }
+
+  let backbone = await buildBackbone({
+    waypoints,
+    starts: runners.map((p) => p.startLocation),
+    targetKm,
+    reaches,
+  });
 
   // Best-response: choose each runner's [enter, exit] to maximise together-time.
   const windows = optimizeWindows(

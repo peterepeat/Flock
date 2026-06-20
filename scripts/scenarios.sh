@@ -7,7 +7,7 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd cct all   (default: all; 19 scenarios)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd ros cct all   (default: all; 20 scenarios)
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
@@ -201,6 +201,20 @@ dwd() {
   check "$F" "dwd forced-dispersal (P)" 2 1 0 0 0 1 1
 }
 
+# AUTO rosette (PEEL-AT-HOME) — no waypoints, 3 runners with a budget spread incl. one
+# constrained runner (Jimmy) living ~at the centroid. The auto loop is shaped as nested
+# return-to-base laps keyed on the reaches, so Jimmy finishes a whole SHARED lap at home
+# instead of peeling far out and trudging back solo. Mirrors the real flock 5e5qae: Jimmy's
+# together-share jumps ~48%→~93%, the all-three window ~53→~99min, caps respected. Asserts
+# 3 routes + together>0 + no cap bust (the rosette firing + the lift are in the engine logs).
+ros() {
+  local F; F=$(create); echo "ros → $BASE/flock/$F"
+  person "$F" Peter  -37.77068 144.99241 25   '"11:30"' 380 320 28.7  # keen anchor, NE
+  person "$F" Jimmy  -37.78839 144.97084 15   null      360 320 17.3  # constrained, ~at centroid
+  person "$F" Collin -37.81357 144.96897 null null      330 300 null  # unconstrained, S
+  check "$F" "ros auto rosette (peel-at-home)" 3 1 0
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -218,7 +232,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd ros cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"
