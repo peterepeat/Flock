@@ -264,6 +264,94 @@ async function testAndApplyForcedF(
   return next;
 }
 
+/**
+ * FORCED dispersal (Stage 1) — the egress-side MIRROR of testAndApplyForcedF. Run ONLY when
+ * natural D did NOT fire (the runners share no road HOME). Bends the dispersal candidates to
+ * a computed split point P BEYOND the backbone end, so they run end→P together, then peel
+ * apart to their finishes — paying detour distance. Same two gates as forced F, in the engine's
+ * own currency:
+ *   • HARD: every disperser's REAL detour (committed against the actual P→finish route) fits
+ *     their slack — the km they can add under their HARD cap. → else decline (unchanged).
+ *   • VALUE: the together-time gained (companion-km on the shared end→P leg) must beat the
+ *     detour cost priced at OVERAGE_PRICE. → else decline.
+ *
+ * On fire it APPENDS end→P and re-anchors dispersers to exit at P exactly like natural D (the
+ * same downstream machinery absorbs it). On any decline / ORS error it returns the backbone
+ * unchanged — byte-identical to the no-merge model. ORS cost: 1 (end→P) + N (P→finish).
+ * Returns the (possibly new) backbone; mutates disperser builds only when it fires.
+ *
+ * Slack already reflects any forced-F detour these runners just paid (`built` is read live), so
+ * a runner whose inbound merge ate their headroom simply fails the HARD gate here — the cap is
+ * never busted by stacking both merges.
+ */
+async function testAndApplyForcedD(
+  dispersers: RunnerBuild[],
+  builds: RunnerBuild[],
+  backbone: Backbone,
+  backboneEnd: LatLng,
+  flockId: string,
+): Promise<Backbone> {
+  const endKm = backbone.totalKm; // pre-append end; the arc a near-end disperser still skips
+  // Detour budget per disperser: km they can add under their hard cap, over their CURRENT
+  // built distance (approach home→enter + backbone arc + egress exit→finish).
+  const slack = dispersers.map((b) => {
+    const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+    const cap = (b.p.maxDistance ?? targetDistanceKm(b.p) ?? Infinity) + CAP_TRIM_GRACE_KM;
+    return Math.max(0, cap - built);
+  });
+  const P = computeForcedMeetingPoint(
+    dispersers.map((b) => b.finishPt),
+    dispersers.map((b) => b.egressKm),
+    slack,
+    backboneEnd,
+    ROAD_FACTOR,
+  );
+  if (!P) return backbone;
+
+  // Commit with REAL ORS: the shared lead end→P + each disperser's solo P→finish.
+  let lead: { geom: LatLng[]; km: number };
+  let pToFinish: { geom: LatLng[]; km: number }[];
+  try {
+    const [leadRoute, ...tails] = await Promise.all([
+      legRoute(backboneEnd, P),
+      ...dispersers.map((b) => legRoute(P, b.finishPt)),
+    ]);
+    lead = { geom: geomToLatLng(leadRoute.geometry), km: leadRoute.distanceKm };
+    pToFinish = tails.map((r) => ({ geom: geomToLatLng(r.geometry), km: r.distanceKm }));
+  } catch {
+    return backbone; // ORS failed — leave the model untouched
+  }
+
+  const sharedKm = lead.km;
+  // Real added km per disperser vs their no-merge baseline. Re-anchoring to exit at the new
+  // end (P) means they also run the backbone stretch [oldExitKm, endKm] they used to skip (a
+  // budget-tight runner can peel off a little before the loop close), so that arc counts too.
+  const detours = dispersers.map((b, i) => pToFinish[i].km + sharedKm + (endKm - b.exitKm) - b.egressKm);
+  const m = dispersers.length;
+  const togetherGain = sharedKm * (m - 1);
+  const detourCost = OVERAGE_PRICE * detours.reduce((s, d) => s + Math.max(0, d), 0);
+  if (detours.some((d, i) => d > slack[i] + EPS)) return backbone; // HARD gate
+  if (togetherGain <= detourCost) return backbone; // VALUE gate
+
+  // FIRE. Append end→P (axis extends +sharedKm at the back); re-anchor dispersers to exit at P
+  // with their detour egress; non-dispersers are untouched (the append is past their exit).
+  const next = appendDispersalLead(backbone, lead.geom, P);
+  dispersers.forEach((b, i) => {
+    b.egressGeom = pToFinish[i].geom;
+    b.egressKm = pToFinish[i].km;
+    b.exitKm = next.totalKm; // exit at the new end (P)
+  });
+  log.info("forced dispersal point P", {
+    flockId,
+    sharedKm: round2(sharedKm),
+    dispersers: m,
+    togetherGain: round2(togetherGain),
+    detourCost: round2(detourCost),
+    backboneKm: round2(next.totalKm),
+  });
+  return next;
+}
+
 function targetDistanceKm(p: Participant): number | null {
   if (p.preferredDistance == null && p.maxDistance == null) return null;
   let t = p.preferredDistance ?? p.maxDistance ?? DEFAULT_LOOP_DISTANCE_KM;
@@ -1126,6 +1214,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
       b.egressGeom.length >= 2 &&
       distanceMeters(b.egressGeom[0], backboneEnd) <= FORMATION_TOLERANCE_M;
     const dispJoiners = builds.filter(isDispJoiner);
+    let naturalDFired = false;
     if (dispJoiners.length >= 2) {
       const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
       if (D.dispKm >= FORMATION_MIN_MERGE_KM) {
@@ -1145,6 +1234,23 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
           dispJoiners: dispJoiners.length,
           backboneKm: round2(backbone.totalKm),
         });
+        naturalDFired = true;
+      }
+    }
+
+    // FORCED dispersal — the egress mirror of forced F. When natural D didn't fire (the
+    // runners share no road HOME), bend the candidates to a computed split point P beyond
+    // the end and run end→P together before peeling apart, paying detour, when the together-
+    // time clearly beats the cost within their limits. Mutually exclusive with natural D;
+    // declines to the no-merge model when not worth it. Candidate set mirrors forced F: a
+    // SINGLE-waypoint loop uses every runner with an egress (the tiny-loop optimizer can
+    // peel a budget-tight runner off just before the loop close, outside the dispJoiner arc
+    // threshold); a corridor uses the reach-the-end dispJoiner set.
+    if (!naturalDFired) {
+      const forcedDispersers =
+        waypoints.length === 1 ? builds.filter((b) => b.egressGeom.length >= 2) : dispJoiners;
+      if (forcedDispersers.length >= 2) {
+        backbone = await testAndApplyForcedD(forcedDispersers, builds, backbone, backboneEnd, session.id);
       }
     }
   }

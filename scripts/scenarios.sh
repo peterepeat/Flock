@@ -7,7 +7,7 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 cct all   (default: all; 18 scenarios)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd cct all   (default: all; 19 scenarios)
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
@@ -38,8 +38,8 @@ calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: applic
 # person NAME LAT LNG [extraJSON]
 person() { patch "$1" "{\"action\":\"addParticipant\",\"editToken\":\"$2\",\"participant\":{\"name\":\"$2\",\"startLocation\":{\"lat\":$3,\"lng\":$4},\"startAddress\":\"$2\",\"earliestStartTime\":\"07:00\",\"finishLocation\":null,\"finishAddress\":null,\"latestFinishTime\":${6:-null},\"preferredPace\":${7:-360},\"maxPace\":${8:-300},\"preferredDistance\":${5:-null},\"maxDistance\":${9:-null},\"restStop\":null}}" "$2"; }
 wp()     { patch "$1" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$2,\"lng\":$3},\"address\":\"$4\",\"name\":\"$4\",\"stopMinutes\":${5:-0}}}"; }
-# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET] [EXPECT_FORMATION]
-check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
+# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET] [EXPECT_FORMATION] [EXPECT_DISPERSAL]
+check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-0}" "${9:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
 
 # 5 disparate people (shared across s4/s5/s6). args: FID
 add5() {
@@ -187,6 +187,19 @@ fwd0() {
   person "$F" Sth -37.8700 144.9850 12 null 360 300 14   # ~4.5km S of café
   check "$F" "fwd0 forced declines (pinned)" 2 0 0 0 0 0
 }
+# FORCED dispersal (Stage 1, egress mirror) — the user's "converges in but not out" case.
+# Same one-café / different-roads geometry as fwd (~50° apart, no shared tail), but both
+# runners unconstrained so there's headroom for BOTH merges: forced F bends them together
+# on the way IN (expect_formation=1, spine starts before the café) AND forced D bends them
+# together on the way HOME (expect_dispersal=1, spine ends past the café), then they peel
+# apart to their homes. Guards the symmetry — convergence must work both directions.
+dwd() {
+  local F; F=$(create); echo "dwd → $BASE/flock/$F"
+  wp "$F" -37.8284 144.9847 Anderson
+  person "$F" Rho -37.8067 144.9694 null null 360 300 null   # unconstrained, NW of café
+  person "$F" Nyx -37.7812 144.9860 null null 360 300 null   # unconstrained, N of café
+  check "$F" "dwd forced-dispersal (P)" 2 1 0 0 0 1 1
+}
 
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
@@ -205,7 +218,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

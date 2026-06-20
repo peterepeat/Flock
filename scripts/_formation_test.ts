@@ -170,5 +170,40 @@ const eastKm = (() => {
   check("forced one home → null", computeForcedMeetingPoint([hA], [apprA], [10], wpF, 1.3) === null);
 }
 
+// ---------------------------------------------------------------------------
+// FORCED dispersal (Stage 1, egress side) — the SAME computeForcedMeetingPoint is
+// reused by testAndApplyForcedD with the backbone END as the funnel apex and the
+// runners' FINISHES as the spread origins. These lock the symmetry the engine relies
+// on: spread finishes off the end → a split point P sits back toward them; collinear
+// or opposite finishes → null (no forced D), mirroring the F-side gates exactly.
+{
+  const endPt = ll(-37.8, 144.98); // backbone end (the café / loop close)
+  const fA = ll(-37.764, 144.98); //  ~4km due N  → bearing end→finish ≈ 0°
+  const fB = ll(-37.78, 145.018); //  ~4km NE     → spread ≈ 57°  (same V as the F test)
+  const egA = distanceMeters(fA, endPt) / 1000;
+  const egB = distanceMeters(fB, endPt) / 1000;
+
+  // 57° V of finishes with slack → forced D fires, P sits back from the end toward them.
+  const P = computeForcedMeetingPoint([fA, fB], [egA, egB], [10, 10], endPt, 1.3);
+  check("forced-D V (57°) with slack → fires", P !== null);
+  if (P) check("forced-D P sits back from end", distanceMeters(P, endPt) / 1000 > 0.3, `dist=${(distanceMeters(P, endPt) / 1000).toFixed(2)}km`);
+
+  // Same V, ~zero slack → nobody can afford the homeward detour → null.
+  const tight = computeForcedMeetingPoint([fA, fB], [egA, egB], [0.1, 0.1], endPt, 1.3);
+  check("forced-D no slack → null", tight === null);
+
+  // Opposite-side finishes (~180° apart) → above the spread ceiling → null (no forced D).
+  const oN = ll(-37.764, 144.98); // N
+  const oS = ll(-37.836, 144.98); // S
+  const opp = computeForcedMeetingPoint(
+    [oN, oS],
+    [distanceMeters(oN, endPt) / 1000, distanceMeters(oS, endPt) / 1000],
+    [10, 10],
+    endPt,
+    1.3,
+  );
+  check("forced-D opposite (~180°) → null", opp === null);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

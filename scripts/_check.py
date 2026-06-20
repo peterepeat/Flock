@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compact pass/fail checker for a calculated flock (reads flock JSON on stdin).
 
-argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1> [expect_target 0|1] [expect_second_target 0|1]
+argv: <label> <expect_routes> <expect_together 0|1> <expect_stop 0|1> [expect_target 0|1] [expect_second_target 0|1] [expect_formation 0|1] [expect_dispersal 0|1]
 Exits non-zero on any failed assertion. Prints one PASS/FAIL line.
 
 expect_target=1 asserts the longest-targeted runner reaches near their
@@ -25,6 +25,10 @@ expect_second_target = int(sys.argv[6]) if len(sys.argv) > 6 else 0
 # starts measurably BEFORE the first waypoint (the flock gathers up the shared
 # corridor, not pinned at wp0). The convergent-pair guard for Stage 0.
 expect_formation = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+# expect_dispersal=1 is the egress mirror: the shared spine ENDS measurably PAST the
+# last waypoint (the flock runs home together to a split point D/P, not pinned at the
+# end). The convergent-pair guard for the dispersal side (natural D or forced D).
+expect_dispersal = int(sys.argv[8]) if len(sys.argv) > 8 else 0
 
 s = json.load(sys.stdin)
 parts = {p["id"]: p for p in s["participants"]}
@@ -104,6 +108,23 @@ if expect_formation:
         gap_km = 2 * 6371 * math.asin(math.sqrt(a))
         if gap_km < 0.5:
             fails.append(f"formation point did not fire (spine starts {round(gap_km*1000)}m from wp0, expected ≥500m before it)")
+
+if expect_dispersal:
+    fr = s.get("flockRoute")
+    wps = s.get("waypoints") or []
+    if not fr or not fr.get("coordinates") or not wps:
+        fails.append("expect_dispersal but no flockRoute/waypoints")
+    else:
+        import math
+        lngE, latE = fr["coordinates"][-1][0], fr["coordinates"][-1][1]  # spine END [lng,lat]
+        wpL = wps[-1]["location"]  # last waypoint (== wp0 for a single-waypoint loop)
+        dlat = math.radians(wpL["lat"] - latE)
+        dlng = math.radians(wpL["lng"] - lngE)
+        a = (math.sin(dlat / 2) ** 2
+             + math.cos(math.radians(latE)) * math.cos(math.radians(wpL["lat"])) * math.sin(dlng / 2) ** 2)
+        gap_km = 2 * 6371 * math.asin(math.sqrt(a))
+        if gap_km < 0.5:
+            fails.append(f"dispersal point did not fire (spine ends {round(gap_km*1000)}m from last wp, expected ≥500m past it)")
 
 totkm = round(sum(r["distanceKm"] for r in routes), 1)
 status = "PASS" if not fails else "FAIL"
