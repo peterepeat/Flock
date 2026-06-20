@@ -1069,6 +1069,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     starts: runners.map((p) => p.startLocation),
     targetKm,
     reaches,
+    finishes: runners.map(finishOf),
   });
 
   // Best-response: choose each runner's [enter, exit] to maximise together-time.

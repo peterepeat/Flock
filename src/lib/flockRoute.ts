@@ -7,7 +7,14 @@
 // km 0 is the rendezvous: where the flock gathers and the flock clock starts.
 // ---------------------------------------------------------------------------
 
-import { bearingRad, despurLoop, destinationPoint, distanceMeters, pointToSegmentMeters } from "./geo";
+import {
+  bearingRad,
+  closestPointOnSegment,
+  despurLoop,
+  destinationPoint,
+  distanceMeters,
+  pointToSegmentMeters,
+} from "./geo";
 import { createLogger } from "./logger";
 import { getRoundTrip, getRoute, type OrsRoute } from "./ors";
 import type { FlockWaypoint, LatLng } from "./types";
@@ -94,18 +101,29 @@ export function sliceKm(b: Backbone, fromKm: number, toKm: number): LatLng[] {
   return out;
 }
 
-/** Arc-distance (km) of the backbone vertex nearest to `ll`. */
+/**
+ * Arc-distance (km) along the backbone closest to `ll` — by SEGMENT projection (the
+ * interpolated foot on the nearest segment), not the nearest VERTEX, so a stop/waypoint
+ * binds to its true arc position rather than the spacing-quantised nearest vertex. Scans
+ * segments in arc order and only updates on a STRICTLY closer foot, so when the backbone
+ * revisits a point (a closed-tour corridor passes its rendezvous twice, an inner-lap rosette
+ * returns to base repeatedly) the FIRST (lowest-km) pass wins — the gather/outbound pass, not
+ * the return — which keeps a stop's dwell on the right pass and out of the maxExit filter.
+ * On a fake-ORS golden backbone every waypoint is an exact vertex, so the foot lands on it and
+ * this is byte-identical to the old nearest-vertex scan; it only diverges on real road geometry.
+ */
 export function nearestKm(b: Backbone, ll: LatLng): number {
-  let best = 0;
+  let bestKm = 0;
   let bestD = Infinity;
-  for (let i = 0; i < b.coords.length; i++) {
-    const d = distanceMeters(b.coords[i], ll);
+  for (let i = 0; i < b.coords.length - 1; i++) {
+    const foot = closestPointOnSegment(ll, b.coords[i], b.coords[i + 1]);
+    const d = distanceMeters(ll, foot);
     if (d < bestD) {
       bestD = d;
-      best = b.cumKm[i];
+      bestKm = b.cumKm[i] + distanceMeters(b.coords[i], foot) / 1000;
     }
   }
-  return best;
+  return bestKm;
 }
 
 /** The polyline truncated to the first `km` of arc-length (interpolating the cut
@@ -431,35 +449,77 @@ async function buildRosette(
   return geom;
 }
 
+// Waypoint-polygon mean width (enclosed area ÷ perimeter, in metres): large for a genuine
+// CIRCUIT, ~0 for a thin/linear or 2-point corridor. A corridor closes its tour back to R only
+// when this clears CIRCUIT_MIN_WIDTH_M — so closing yields a real loop, never a double-drawn
+// retrace of the outbound. (De-spur can't unwind a 2-point retrace: that fold IS the loop closure
+// it protects, so the decision must be made up front from the geometry.)
+const CIRCUIT_MIN_WIDTH_M = 100;
+function circuitMeanWidthM(wps: LatLng[]): number {
+  if (wps.length < 3) return 0;
+  const kx = Math.cos((wps[0].lat * Math.PI) / 180) * 111320;
+  const ky = 110540;
+  let area2 = 0;
+  let perim = 0;
+  for (let i = 0; i < wps.length; i++) {
+    const a = wps[i];
+    const b = wps[(i + 1) % wps.length];
+    const ax = a.lng * kx;
+    const ay = a.lat * ky;
+    const bx = b.lng * kx;
+    const by = b.lat * ky;
+    area2 += ax * by - bx * ay;
+    perim += Math.hypot(bx - ax, by - ay);
+  }
+  return perim > 0 ? Math.abs(area2) / 2 / perim : 0;
+}
+
 export async function buildBackbone(opts: {
   waypoints: FlockWaypoint[];
   starts: LatLng[];
   targetKm: number;
-  // Inner peel-at-home reaches (AUTO mode only): ascending, sub-targetKm runner reaches
-  // the rosette returns to base at. Empty / absent ⇒ today's single lobe (unchanged).
+  // Inner peel-at-home reaches (loop modes): ascending, sub-targetKm runner reaches the rosette
+  // returns to base at. Empty / absent ⇒ single lobe (unchanged).
   reaches?: number[];
+  // Each runner's finish, index-aligned with `starts`. A corridor closes its tour back to the
+  // rendezvous ONLY when every runner returns home (finish ≈ start); a distinct finish may lie
+  // past the far waypoint, where the open spine serves it better. Absent ⇒ treated as not-all-home.
+  finishes?: LatLng[];
 }): Promise<Backbone> {
-  const { waypoints, starts, targetKm, reaches = [] } = opts;
+  const { waypoints, starts, targetKm, reaches = [], finishes = [] } = opts;
 
   let rendezvous: LatLng;
   let geom: Pick<Backbone, "coords" | "cumKm" | "totalKm">;
 
   if (waypoints.length >= 2) {
-    // Backbone follows the nominated waypoints in order; km 0 = first waypoint.
+    // Backbone follows the nominated waypoints in order; km 0 = first waypoint = the rendezvous R.
     rendezvous = waypoints[0].location;
-    const corridor = fromOrs(await getRoute(waypoints.map((w) => w.location)));
+    // Data-driven CLOSURE: when every runner returns home (finish ≈ start), close the tour back
+    // to R, so completing the backbone lands the flock at the gather (egress ≈ approach — the
+    // loop's fairness) instead of stranded at the far waypoint. Keep it OPEN when any runner set
+    // a distinct finish: it may lie PAST the far end, where the wM-ending spine serves it better
+    // (the forward-finisher exception). Open ⇒ byte-identical to the prior corridor.
+    const allHome =
+      finishes.length === starts.length &&
+      starts.length > 0 &&
+      finishes.every((f, i) => distanceMeters(f, starts[i]) < 1);
+    const tour = waypoints.map((w) => w.location);
+    // Close the tour back to R only when every runner returns home AND the waypoints form a
+    // genuine CIRCUIT (enclose meaningful area) — so closing yields a real loop the flock runs
+    // round, not a double-drawn retrace of a linear corridor. Linear / 2-waypoint corridors and
+    // any forward-finish flock stay OPEN (byte-identical), ending at the last waypoint.
+    const close = allHome && circuitMeanWidthM(tour) >= CIRCUIT_MIN_WIDTH_M;
+    const corridor = fromOrs(await getRoute(close ? [...tour, rendezvous] : tour));
     geom = corridor;
-    // Grow the shared spine to the two-longest runners' reach (targetKm) so the
-    // flock runs together as far as they can handle — the waypoints stay anchors
-    // ON a longer route rather than capping it. We append ONE loop at the LAST
-    // waypoint: this keeps every waypoint's arc position fixed (ETAs, stop dwell
-    // and snapping below are untouched) and reuses the same round-trip primitive
-    // the solo extension already relies on. A long corridor (deficit ≤ 0) is left
-    // as-is — shorter runners just peel off early.
+    // Grow the shared spine to the two-longest runners' reach (targetKm). We append ONE loop at
+    // the spine's actual END — R for a surviving closed circuit (the grow loop concentric at the
+    // gather, a near-home peel), the last waypoint for an open/unwound one. Interior waypoint arc
+    // positions stay fixed; nearestKm's first-pass projection keeps stops on the outbound pass. A
+    // long corridor (deficit ≤ 0) is left as-is — shorter runners just peel off early.
     const deficit = targetKm - corridor.totalKm;
     if (deficit > MIN_GROW_KM) {
       try {
-        const last = waypoints[waypoints.length - 1].location;
+        const last = corridor.coords[corridor.coords.length - 1];
         const loop = fromOrs(await getRoundTrip(last, deficit));
         // Bound the loop to the requested deficit (ORS round-trips overshoot their
         // asked length): the grown spine lands at ~targetKm, so the two longest

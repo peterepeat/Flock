@@ -475,30 +475,34 @@
           -37.784
         ],
         [
-          144.9791,
-          -37.784
+          144.978,
+          -37.798
         ],
         [
-          144.9791,
-          -37.7697
+          144.9891,
+          -37.798
         ],
         [
-          144.961,
-          -37.7697
+          144.9891,
+          -37.7893
         ],
         [
-          144.961,
-          -37.7766
+          144.978,
+          -37.7893
+        ],
+        [
+          144.978,
+          -37.7935
         ]
       ],
       "type": "LineString"
     },
     "routes": [
       {
-        "arrivalTime": "08:26",
+        "arrivalTime": "08:12",
         "departureTime": "07:00",
-        "distanceKm": 11.84,
-        "estimatedDurationMinutes": 86,
+        "distanceKm": 9.56,
+        "estimatedDurationMinutes": 72,
         "geometry": {
           "coordinates": [
             [
@@ -522,24 +526,28 @@
               -37.784
             ],
             [
-              144.9791,
-              -37.784
+              144.978,
+              -37.798
             ],
             [
-              144.9791,
-              -37.7697
+              144.9891,
+              -37.798
             ],
             [
-              144.961,
-              -37.7697
+              144.9891,
+              -37.7893
             ],
             [
-              144.961,
-              -37.7766
+              144.978,
+              -37.7893
             ],
             [
-              144.961,
-              -37.7766
+              144.978,
+              -37.7935
+            ],
+            [
+              144.978,
+              -37.7935
             ],
             [
               144.9775,
@@ -610,12 +618,12 @@
               "b",
               "c"
             ],
-            "distanceKm": 5.07,
+            "distanceKm": 8.07,
             "endLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "endTime": "07:51",
+            "endTime": "08:09",
             "paceSecPerKm": 360,
             "startLocation": {
               "lat": -37.805,
@@ -625,35 +633,17 @@
             "type": "run"
           },
           {
-            "companionIds": [
-              "b"
-            ],
-            "distanceKm": 3,
-            "endLocation": {
-              "lat": -37.7766,
-              "lng": 144.961
-            },
-            "endTime": "08:09",
-            "paceSecPerKm": 360,
-            "startLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
-            },
-            "startTime": "07:51",
-            "type": "run"
-          },
-          {
             "companionIds": [],
-            "distanceKm": 2.79,
+            "distanceKm": 0.51,
             "endLocation": {
               "lat": -37.798,
               "lng": 144.9775
             },
-            "endTime": "08:26",
+            "endTime": "08:12",
             "paceSecPerKm": 360,
             "startLocation": {
-              "lat": -37.7766,
-              "lng": 144.961
+              "lat": -37.7935,
+              "lng": 144.978
             },
             "startTime": "08:09",
             "type": "run"
@@ -669,8 +659,8 @@
             "lng": 144.978
           },
           {
-            "lat": -37.7766,
-            "lng": 144.961
+            "lat": -37.7935,
+            "lng": 144.978
           },
           {
             "lat": -37.798,
@@ -679,10 +669,10 @@
         ]
       },
       {
-        "arrivalTime": "08:27",
+        "arrivalTime": "08:29",
         "departureTime": "07:00",
-        "distanceKm": 11.96,
-        "estimatedDurationMinutes": 87,
+        "distanceKm": 12.35,
+        "estimatedDurationMinutes": 89,
         "geometry": {
           "coordinates": [
             [
@@ -706,24 +696,48 @@
               -37.784
             ],
             [
-              144.9791,
-              -37.784
+              144.978,
+              -37.798
             ],
             [
-              144.9791,
-              -37.7697
+              144.9891,
+              -37.798
             ],
             [
-              144.961,
-              -37.7697
+              144.9891,
+              -37.7893
             ],
             [
-              144.961,
-              -37.7766
+              144.978,
+              -37.7893
             ],
             [
-              144.961,
-              -37.7766
+              144.978,
+              -37.7935
+            ],
+            [
+              144.978,
+              -37.7935
+            ],
+            [
+              144.9857,
+              -37.7935
+            ],
+            [
+              144.9857,
+              -37.7874
+            ],
+            [
+              144.978,
+              -37.7874
+            ],
+            [
+              144.978,
+              -37.7935
+            ],
+            [
+              144.978,
+              -37.7935
             ],
             [
               144.9785,
@@ -794,12 +808,12 @@
               "a",
               "c"
             ],
-            "distanceKm": 5.07,
+            "distanceKm": 8.07,
             "endLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "endTime": "07:51",
+            "endTime": "08:09",
             "paceSecPerKm": 360,
             "startLocation": {
               "lat": -37.805,
@@ -809,37 +823,35 @@
             "type": "run"
           },
           {
-            "companionIds": [
-              "a"
-            ],
-            "distanceKm": 3,
+            "companionIds": [],
+            "distanceKm": 2.71,
             "endLocation": {
-              "lat": -37.7766,
-              "lng": 144.961
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "endTime": "08:09",
+            "endTime": "08:26",
             "paceSecPerKm": 360,
             "startLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "startTime": "07:51",
+            "startTime": "08:09",
             "type": "run"
           },
           {
             "companionIds": [],
-            "distanceKm": 2.88,
+            "distanceKm": 0.56,
             "endLocation": {
               "lat": -37.7985,
               "lng": 144.9785
             },
-            "endTime": "08:27",
+            "endTime": "08:29",
             "paceSecPerKm": 360,
             "startLocation": {
-              "lat": -37.7766,
-              "lng": 144.961
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "startTime": "08:09",
+            "startTime": "08:26",
             "type": "run"
           }
         ],
@@ -853,8 +865,8 @@
             "lng": 144.978
           },
           {
-            "lat": -37.7766,
-            "lng": 144.961
+            "lat": -37.7935,
+            "lng": 144.978
           },
           {
             "lat": -37.7985,
@@ -863,10 +875,10 @@
         ]
       },
       {
-        "arrivalTime": "08:07",
+        "arrivalTime": "08:13",
         "departureTime": "07:00",
-        "distanceKm": 8.74,
-        "estimatedDurationMinutes": 67,
+        "distanceKm": 9.74,
+        "estimatedDurationMinutes": 73,
         "geometry": {
           "coordinates": [
             [
@@ -890,16 +902,28 @@
               -37.784
             ],
             [
-              144.9791,
-              -37.784
+              144.978,
+              -37.798
             ],
             [
-              144.9791,
-              -37.7755
+              144.9891,
+              -37.798
             ],
             [
-              144.9791,
-              -37.7755
+              144.9891,
+              -37.7893
+            ],
+            [
+              144.978,
+              -37.7893
+            ],
+            [
+              144.978,
+              -37.7935
+            ],
+            [
+              144.978,
+              -37.7935
             ],
             [
               144.978,
@@ -970,12 +994,12 @@
               "a",
               "b"
             ],
-            "distanceKm": 5.07,
+            "distanceKm": 8.07,
             "endLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "endTime": "07:51",
+            "endTime": "08:09",
             "paceSecPerKm": 360,
             "startLocation": {
               "lat": -37.805,
@@ -986,18 +1010,18 @@
           },
           {
             "companionIds": [],
-            "distanceKm": 2.62,
+            "distanceKm": 0.62,
             "endLocation": {
               "lat": -37.799,
               "lng": 144.978
             },
-            "endTime": "08:07",
+            "endTime": "08:13",
             "paceSecPerKm": 360,
             "startLocation": {
-              "lat": -37.7755,
-              "lng": 144.9791
+              "lat": -37.7935,
+              "lng": 144.978
             },
-            "startTime": "07:51",
+            "startTime": "08:09",
             "type": "run"
           }
         ],
@@ -1011,8 +1035,8 @@
             "lng": 144.978
           },
           {
-            "lat": -37.7755,
-            "lng": 144.9791
+            "lat": -37.7935,
+            "lng": 144.978
           },
           {
             "lat": -37.799,
@@ -1057,18 +1081,30 @@
               -37.784
             ],
             [
-              144.9791,
-              -37.784
+              144.978,
+              -37.798
             ],
             [
-              144.9791,
-              -37.7755
+              144.9891,
+              -37.798
+            ],
+            [
+              144.9891,
+              -37.7893
+            ],
+            [
+              144.978,
+              -37.7893
+            ],
+            [
+              144.978,
+              -37.7935
             ]
           ],
           "type": "LineString"
         },
         "isConvergence": false,
-        "overlapMinutes": 30.41,
+        "overlapMinutes": 48.43,
         "participantIds": [
           "a",
           "b",
@@ -1080,38 +1116,8 @@
         "geometry": {
           "coordinates": [
             [
-              144.9791,
-              -37.7755
-            ],
-            [
-              144.9791,
-              -37.7697
-            ],
-            [
-              144.961,
-              -37.7697
-            ],
-            [
-              144.961,
-              -37.7766
-            ]
-          ],
-          "type": "LineString"
-        },
-        "isConvergence": false,
-        "overlapMinutes": 18.02,
-        "participantIds": [
-          "a",
-          "b"
-        ],
-        "startTime": "07:51"
-      },
-      {
-        "geometry": {
-          "coordinates": [
-            [
-              144.961,
-              -37.7766
+              144.978,
+              -37.7935
             ],
             [
               144.9775,
@@ -1121,10 +1127,10 @@
           "type": "LineString"
         },
         "isConvergence": true,
-        "overlapMinutes": 16.73,
+        "overlapMinutes": 3.04,
         "participantIds": [
           "a",
-          "b"
+          "c"
         ],
         "startTime": "08:09"
       }
@@ -1135,25 +1141,30 @@
         {
           "participantA": "a",
           "participantB": "b",
-          "togetherMinutes": 85.8,
-          "togetherStretchCount": 4
+          "togetherMinutes": 69.07,
+          "togetherStretchCount": 2
         },
         {
           "participantA": "a",
           "participantB": "c",
-          "togetherMinutes": 51.05,
-          "togetherStretchCount": 2
+          "togetherMinutes": 72.1,
+          "togetherStretchCount": 3
         },
         {
           "participantA": "b",
           "participantB": "c",
-          "togetherMinutes": 51.05,
+          "togetherMinutes": 69.07,
           "togetherStretchCount": 2
         }
       ],
-      "totalTogetherMinutes": 85.8
+      "totalTogetherMinutes": 72.1
     },
-    "warnings": [],
+    "warnings": [
+      {
+        "message": "You go further than the rest, so you'll run the last 2.7km solo — the flock peels off where it reaches its turnaround.",
+        "participantId": "b"
+      }
+    ],
     "waypointEtas": {
       "w1": "07:00",
       "w2": "07:06",
