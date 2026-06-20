@@ -153,6 +153,20 @@ cvg() {
   check "$F" "cvg convergent-pair (F)" 2 1 0 0 0 1
 }
 
+# Single-waypoint convergent pair (F/D on a LOOP): the "meet at one café, run a loop"
+# case. ONE waypoint (Princes Park) + two runners funnelling down the same arterial.
+# The backbone is a loop at the waypoint; F prepends the shared approach BEFORE it and
+# D appends the shared egress AFTER it, so the pair flock in and out. expect_formation=1
+# asserts the spine starts ≥500m before the waypoint (F fired). Guards that Stage 0
+# convergence works for single-waypoint loops, not just multi-waypoint corridors.
+sw() {
+  local F; F=$(create); echo "sw → $BASE/flock/$F"
+  wp "$F" -37.7840 144.9610 PrincesPark
+  person "$F" Ana -37.7560 144.9590 12 null 360 300 14
+  person "$F" Bo  -37.7555 144.9625 11 null 360 300 13
+  check "$F" "sw single-wp convergent (F/D)" 2 1 0 0 0 1
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -170,7 +184,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

@@ -924,10 +924,16 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   // this whole block is a no-op — the output is byte-identical to the pinned model.
   //
   // Done as ONE atomic block BEFORE the first computeLegs: after it, nothing from the
-  // pinned phase is reused except each runner's shifted enterKm/exitKm. Waypoint mode
-  // only (the auto/single-waypoint loop already computes its own rendezvous).
-  if (waypoints.length >= 2) {
-    const wp0 = backbone.coords[0]; // the ORS-snapped first waypoint (km 0 today)
+  // pinned phase is reused except each runner's shifted enterKm/exitKm.
+  //
+  // Runs for ANY nominated waypoint(s) — a multi-waypoint corridor OR a single-waypoint
+  // LOOP (the "meet at one café, run a loop" case). The loop's start AND end are both the
+  // waypoint (km 0 == backbone end), so F prepends the shared approach BEFORE it and D
+  // appends the shared egress AFTER the loop returns to it — exactly as for a corridor.
+  // The auto/no-waypoint case (rendezvous = centroid of starts) is left out: there is no
+  // fixed point the approaches funnel toward, so the common-tail merge doesn't apply.
+  if (waypoints.length >= 1) {
+    const wp0 = backbone.coords[0]; // the ORS-snapped waypoint (km 0): corridor start or loop start
     const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
     const joiners = builds.filter(isJoiner);
     if (joiners.length >= 2) {

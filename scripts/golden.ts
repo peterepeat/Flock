@@ -147,6 +147,18 @@ const FIXTURES: Record<string, FlockSession> = {
     ],
     [wp("w1", -37.798, 144.978), wp("w2", -37.789, 144.995)],
   ),
+  // SINGLE waypoint with a stop → a loop based at the waypoint (the "meet at one café,
+  // run a loop" case). Exercises the Phase-B path for waypoints.length===1. (With the
+  // straight-line fake ORS, F/D don't fire — distinct homes share no tail — so this
+  // guards the loop path stays stable.)
+  g7_single_wp: session(
+    "g7",
+    [
+      person("s1", -37.806, 144.969),
+      person("s2", -37.781, 144.986, { preferredDistance: 12, maxDistance: 14 }),
+    ],
+    [wp("w1", -37.8284, 144.9847, 20)],
+  ),
   // finish-elsewhere keen runner (corridor egress)
   g5_finish: session(
     "g5",
