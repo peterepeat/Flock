@@ -148,9 +148,11 @@ const FIXTURES: Record<string, FlockSession> = {
     [wp("w1", -37.798, 144.978), wp("w2", -37.789, 144.995)],
   ),
   // SINGLE waypoint with a stop → a loop based at the waypoint (the "meet at one café,
-  // run a loop" case). Exercises the Phase-B path for waypoints.length===1. (With the
-  // straight-line fake ORS, F/D don't fire — distinct homes share no tail — so this
-  // guards the loop path stays stable.)
+  // run a loop" case). Exercises the Phase-B path for waypoints.length===1 AND the Stage 1
+  // FORCED-convergence fire path: the two distinct homes share no tail (natural F can't
+  // fire), but with one café every runner is a merge candidate, so forced F synthesises a
+  // meeting point P — this snapshot pins that FIRED output byte-identical (the deterministic
+  // regression guard for forced convergence).
   g7_single_wp: session(
     "g7",
     [

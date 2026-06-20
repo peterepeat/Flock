@@ -7,7 +7,7 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 pc ext cvg sw fwd fwd0 cct all   (default: all)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 cct all   (default: all; 18 scenarios)
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
