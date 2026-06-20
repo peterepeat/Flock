@@ -159,6 +159,13 @@ const FIXTURES: Record<string, FlockSession> = {
     ],
     [wp("w1", -37.8284, 144.9847, 20)],
   ),
+  // TWO stop-waypoints at the SAME spot → their dwells must SUM (10+15=25 min), not drop
+  // one. Guards the computeLegs .filter fix.
+  g8_dup_stop: session(
+    "g8",
+    [person("d1", -37.798, 144.9775), person("d2", -37.7985, 144.9785, { preferredDistance: 12, maxDistance: 14 })],
+    [wp("w1", -37.798, 144.978), wp("w2", -37.805, 144.972, 10), wp("w3", -37.805, 144.972, 15)],
+  ),
   // finish-elsewhere keen runner (corridor egress)
   g5_finish: session(
     "g5",

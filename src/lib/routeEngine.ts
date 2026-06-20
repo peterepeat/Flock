@@ -270,16 +270,19 @@ function computeLegs(builds: RunnerBuild[], backbone: Backbone): Leg[] {
   let clock = 0;
   for (let k = 0; k < boundaries.length; k++) {
     const at = boundaries[k];
-    const stop = backbone.stops.find((s) => Math.abs(s.km - at) < 1e-3);
-    if (stop) {
+    // ALL stops snapping to this km — two waypoints placed at ~the same spot both with
+    // a dwell must each be charged, so sum their durations (a single .find would drop
+    // all but the first). For one stop this is identical to before.
+    const stopsHere = backbone.stops.filter((s) => Math.abs(s.km - at) < 1e-3);
+    if (stopsHere.length > 0) {
       // Only runners CONTINUING past the stop sit through its dwell. A runner whose
       // exit is AT the stop peels off the moment the flock arrives (no dwell), so
       // their distance/time isn't charged for a stop they don't take.
       const here = builds.filter((b) => b.enterKm <= at + EPS && b.exitKm > at + EPS);
       if (here.length > 0) {
         const startSec = clock;
-        clock += stop.durationSec;
-        legs.push({ lo: at, hi: at, present: here.map((b) => b.p.id), paceSec: null, startSec, endSec: clock, name: stop.name });
+        clock += stopsHere.reduce((sum, s) => sum + s.durationSec, 0);
+        legs.push({ lo: at, hi: at, present: here.map((b) => b.p.id), paceSec: null, startSec, endSec: clock, name: stopsHere.map((s) => s.name).join(" + ") });
       }
     }
     if (k >= boundaries.length - 1) break;
@@ -317,7 +320,14 @@ function tAtLegs(legs: Leg[], km: number): number {
  */
 function arrivalAtKm(legs: Leg[], km: number): number | null {
   for (const lg of legs) {
-    if (lg.paceSec == null) continue; // rests don't define arrival; the run leg reaching km does
+    if (lg.paceSec == null) {
+      // A rest leg AT km is the arrival only when no run leg reaches km first — i.e. a
+      // stop at the very start (a café at the rendezvous, km 0): the flock arrives at
+      // the START of the dwell, not after it. A mid-route stop is preceded by the run
+      // leg that already gives the arrival, so this branch isn't reached for it.
+      if (Math.abs(lg.lo - km) < EPS) return lg.startSec;
+      continue;
+    }
     // km must actually fall WITHIN this run leg — otherwise (a leading gap where
     // nobody covers km, or km past the last leg) there's no arrival to report.
     if (km >= lg.lo - EPS && km <= lg.hi + EPS) return lg.startSec + (km - lg.lo) * lg.paceSec;
@@ -555,8 +565,14 @@ function optimizeWindows(items: OptItem[], backbone: Backbone): Map<string, Wind
 /** Flock-clock anchor: nobody leaves home before their earliest-start. */
 function anchorT0(builds: RunnerBuild[], legs: Leg[]): number {
   if (builds.length === 0) return 0;
+  // A runner joins the flock when it ARRIVES at their enter point — before any stop
+  // sitting there. Using tAtLegs (post-dwell) at a rendezvous café (km 0) would pull
+  // the anchor back by the whole dwell, mis-timing the rest leg (it'd appear to start
+  // before the runner set off). arrivalAtKm is the pre-dwell arrival, matching exitClockOf.
   return Math.max(
-    ...builds.map((b) => b.earliestSec + b.approachKm * b.ownPaceSec - tAtLegs(legs, b.enterKm)),
+    ...builds.map(
+      (b) => b.earliestSec + b.approachKm * b.ownPaceSec - (arrivalAtKm(legs, b.enterKm) ?? tAtLegs(legs, b.enterKm)),
+    ),
   );
 }
 
@@ -1039,7 +1055,11 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   legs = computeLegs(onBackbone, backbone);
   T0abs = onBackbone.length ? anchorT0(onBackbone, legs) : postT0;
   for (const b of onBackbone) {
-    b.enterClockSec = tAtLegs(legs, b.enterKm);
+    // enterClockSec is the approach's END (the runner ARRIVES at their enter point),
+    // before any stop sitting there — so it mirrors exitClockSec's pre-dwell arrival.
+    // Using tAtLegs (post-dwell) at a rendezvous café (km 0) would push the approach's
+    // end past the dwell, overlapping the rest leg with the approach.
+    b.enterClockSec = arrivalAtKm(legs, b.enterKm) ?? tAtLegs(legs, b.enterKm);
     b.exitClockSec = exitClockOf(legs, b.exitKm);
     b.departHomeSec = T0abs + b.enterClockSec - b.approachKm * b.ownPaceSec;
   }
