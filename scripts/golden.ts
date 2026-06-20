@@ -137,6 +137,16 @@ const FIXTURES: Record<string, FlockSession> = {
     person("near", -37.8, 144.967, { preferredDistance: 8, maxDistance: 9 }),
     person("far", -37.86, 145.06, { preferredDistance: 5, maxDistance: 6, latestFinishTime: "07:45" }),
   ]),
+  // ZERO HEADROOM (softness=0): max == preferred for both, so the Stage 2 priced
+  // relaxation must NOT fire — this fixture MUST stay byte-identical through pricing.
+  g6_tight: session(
+    "g6",
+    [
+      person("t1", -37.798, 144.9775, { preferredDistance: 10, maxDistance: 10 }),
+      person("t2", -37.7985, 144.9785, { preferredDistance: 8, maxDistance: 8 }),
+    ],
+    [wp("w1", -37.798, 144.978), wp("w2", -37.789, 144.995)],
+  ),
   // finish-elsewhere keen runner (corridor egress)
   g5_finish: session(
     "g5",
@@ -165,6 +175,8 @@ function norm(v: unknown): unknown {
   }
   return v;
 }
+
+export { FIXTURES };
 
 const GOLDEN_PATH = join(process.cwd(), "scripts", "golden.json");
 
@@ -207,4 +219,8 @@ async function main() {
   return 1;
 }
 
-main().then((code) => process.exit(code));
+declare const require: { main?: unknown };
+declare const module: unknown;
+if (typeof require === "undefined" || require.main === module) {
+  main().then((code) => process.exit(code));
+}

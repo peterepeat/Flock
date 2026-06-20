@@ -89,6 +89,14 @@ const STRAND_GRACE_KM = 0.8; // strand only when the cap is busted by more than 
 const LATE_TRIM_GRACE_SEC = 60; // enforce / solo-fill: only count "late" past this
 const STRAND_GRACE_SEC = 90; // strand on lateness only past this
 
+// Stage 2 pricing: a runner may spend their headroom (preferredDistance→maxDistance)
+// on together-time inside optimizeWindows, paying this many units of company-distance
+// (companion-km) per extra km run past the soft target. So they extend their flock arc
+// into the band only where the stretch is mostly shared (≈this fraction of a companion),
+// rather than doing a solo cool-down loop. Tunable; the hard cap is still enforced, and
+// zero headroom (max==preferred) reproduces today's hard cutoff exactly.
+const OVERAGE_PRICE = 0.6;
+
 interface RunnerBudget {
   distanceCapKm: number; // hard distance cap (maxDistance), or Infinity
   latestSec: number; // latest-finish, or Infinity
@@ -433,7 +441,8 @@ function opportunisticOverlap(builds: RunnerBuild[], T0abs: number): OppRun[] {
 
 interface OptItem {
   id: string;
-  budget: number | null; // null = unconstrained (takes the whole route)
+  budget: number | null; // SOFT target (today's hard budget); null = unconstrained
+  cap: number | null; // HARD distance ceiling (maxDistance); null = uncapped
   home: LatLng; // approach origin (start)
   finish: LatLng; // egress destination (chosen finish, else start)
 }
@@ -499,23 +508,34 @@ function optimizeWindows(items: OptItem[], backbone: Backbone): Map<string, Wind
       const prefix = new Array(NSEG + 1).fill(0);
       for (let k = 0; k < NSEG; k++) prefix[k + 1] = prefix[k] + presence[k] * segLen;
 
+      // Priced score: together-value minus OVERAGE_PRICE per km spent BEYOND the soft
+      // target (budget), with the HARD cap (cap) still rejecting outright. With no
+      // headroom (cap == budget) the penalty is never paid (cost over budget is also
+      // over cap → rejected), so this is byte-identical to the old hard cutoff.
+      const scoreOf = (ei: number, xi: number): number | null => {
+        const cost = apprStart[i][ei] + (pos[xi] - pos[ei]) + apprFinish[i][xi];
+        if (it.cap != null && cost > it.cap + EPS) return null;
+        const val = prefix[xi] - prefix[ei];
+        const overage = it.budget != null ? Math.max(0, cost - it.budget) : 0;
+        return val - OVERAGE_PRICE * overage;
+      };
+
       let best = cur;
-      let bestVal = prefix[idxOf(cur.exitKm)] - prefix[idxOf(cur.enterKm)];
+      let bestScore = scoreOf(idxOf(cur.enterKm), idxOf(cur.exitKm)) ?? -Infinity;
       let bestArc = cur.exitKm - cur.enterKm;
 
       for (let ei = 0; ei <= NSEG; ei++) {
-        if (it.budget != null && apprStart[i][ei] > it.budget) continue;
+        if (it.cap != null && apprStart[i][ei] > it.cap) continue;
         for (let xi = ei; xi <= NSEG; xi++) {
-          const cost = apprStart[i][ei] + (pos[xi] - pos[ei]) + apprFinish[i][xi];
-          if (it.budget != null && cost > it.budget + EPS) continue;
-          const val = prefix[xi] - prefix[ei];
+          const score = scoreOf(ei, xi);
+          if (score == null) continue;
           const arc = pos[xi] - pos[ei];
-          // Primary: maximise together-time. Tiebreak: maximise arc — so a runner
-          // with no company still runs their distance (and runners with company
+          // Primary: maximise the priced together-score. Tiebreak: maximise arc — so a
+          // runner with no company still runs their distance (and runners with company
           // prefer a longer shared stretch) rather than collapsing to zero.
-          if (val > bestVal + EPS || (Math.abs(val - bestVal) <= EPS && arc > bestArc + EPS)) {
+          if (score > bestScore + EPS || (Math.abs(score - bestScore) <= EPS && arc > bestArc + EPS)) {
             best = { enterKm: pos[ei], exitKm: pos[xi] };
-            bestVal = val;
+            bestScore = score;
             bestArc = arc;
           }
         }
@@ -821,7 +841,10 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   const windows = optimizeWindows(
     runners.map((p) => ({
       id: p.id,
-      budget: targetDistanceKm(p),
+      budget: targetDistanceKm(p), // soft target
+      // Hard ceiling = maxDistance; with none, fall back to the soft target so there's
+      // no headroom (priced relaxation off → byte-identical to the old hard cutoff).
+      cap: p.maxDistance ?? targetDistanceKm(p),
       home: p.startLocation,
       finish: finishOf(p),
     })),
