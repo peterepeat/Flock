@@ -7,7 +7,7 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd ros cct all   (default: all; 20 scenarios)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd ros swr cct all   (default: all; 21 scenarios)
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
@@ -215,6 +215,20 @@ ros() {
   check "$F" "ros auto rosette (peel-at-home)" 3 1 0
 }
 
+# Single-waypoint ROSETTE — the loop-mode unification: AUTO and single-wp share buildRosette.
+# One café + a budget spread incl. a constrained runner near the café. The lobe at the café is
+# now shaped as nested return-to-café laps keyed on the reaches, so the tight runner finishes a
+# whole shared lap AT the café (≈ home) instead of peeling far out. Asserts 3 routes + together
+# + no cap bust (rosette firing in the engine logs). Guards the single-wp peel-at-home win.
+swr() {
+  local F; F=$(create); echo "swr → $BASE/flock/$F"
+  wp "$F" -37.79085 144.97741 Café
+  person "$F" Peter  -37.77068 144.99241 25   '"11:30"' 380 320 28.7  # keen anchor, NE
+  person "$F" Jimmy  -37.78839 144.97084 15   null      360 320 17.3  # constrained, ~at café
+  person "$F" Collin -37.81357 144.96897 null null      330 300 null  # unconstrained, S
+  check "$F" "swr single-wp rosette" 3 1 0
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -232,7 +246,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd ros cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd ros swr cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

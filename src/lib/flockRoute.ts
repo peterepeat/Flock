@@ -484,13 +484,15 @@ export async function buildBackbone(opts: {
     // Auto / single-waypoint: a loop from the rendezvous sized to the target. For an AUTO
     // flock (no waypoint to pin) with a spread of budgets, shape that loop as a PEEL-AT-HOME
     // rosette — nested laps returning to the rendezvous at each constrained runner's reach —
-    // so they finish a whole shared lap at home instead of peeling far out on one lobe.
-    // Falls back to the single lobe when there's no inner tier, routing fails, or a lap's
-    // return didn't survive de-spur, so the no-spread case is byte-identical. Single-waypoint
-    // loops keep the plain lobe (forced F/D handle their convergence).
+    // so they finish a whole shared lap at home instead of peeling far out on one lobe. BOTH
+    // loop modes share this path: AUTO (R = centroid) and single-waypoint (R = the café) are
+    // the same construction — nested laps from R — differing only in where R sits. Falls back
+    // to the single lobe when there's no inner tier, routing fails, or a lap's return didn't
+    // survive de-spur, so every no-spread loop (incl. today's single-wp lobe) is byte-identical.
+    // The lone waypoint IS R, so it snaps to km 0 either way (no projector needed). Corridors
+    // (≥2 waypoints) are handled above — their ordered tour is a different shape.
     rendezvous = waypoints.length === 1 ? waypoints[0].location : centroid(starts);
-    const rosette =
-      waypoints.length === 0 ? await buildRosette(rendezvous, Math.max(1, targetKm), reaches) : null;
+    const rosette = await buildRosette(rendezvous, Math.max(1, targetKm), reaches);
     geom = rosette ?? fromOrs(await getRoundTrip(rendezvous, Math.max(1, targetKm)));
   }
 
