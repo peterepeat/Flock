@@ -231,14 +231,17 @@ swr() {
 }
 
 # ── FAIRNESS scenarios (per-runner shared fraction; the gap that let "Jimmy" slip) ──
-# jim: the 5e5qae regression guard — a far café (~5km) + a budget-tight runner whose commute
-# is ~86% of cap. His only alone-time lever is sharing BOTH approach AND egress; today forced-F
-# and forced-D are sequentially greedy (only one side shares), so Jimmy runs ~half solo. FAILS
-# NOW at Jimmy:0.85, PASSES after the F/D joint-slack-coordination fix. The RED→GREEN artifact.
+# jim: the 5e5qae regression guard — a FAR café + a budget-tight runner whose round-trip commute
+# (~14.9km by road) eats ~85% of his cap, so the L* distance-loop won't fit on top of it. His main
+# together-lever is sharing BOTH commute legs. Pre-fix the engine seats him at zero arc, he peels AT
+# the café and runs home solo (~46% shared). The fix sizes the shared loop to what HE can afford
+# (fairness-aware sizing) and rescues him into the shared egress → ~88% shared. RED→GREEN artifact.
+# (Cap is 17.5, not ~14.3: by-road the round-trip is 14.9km — a tighter cap is geometrically
+# infeasible, he can't reach the café and return at all. The original 14.3 assumed crow distance.)
 jim() {
   local F; F=$(create); echo "jim → $BASE/flock/$F"
   wp "$F" -37.7550 145.0150 FarCafe
-  person "$F" Jimmy  -37.7980 144.9700 14   null 360 320 14.3   # commute ≈ 86% of cap
+  person "$F" Jimmy  -37.7980 144.9700 15   null 360 320 17.5   # commute ≈ 85% of cap (by road)
   person "$F" Anchor -37.8010 144.9690 null null 360 300 null
   person "$F" Mae    -37.7950 144.9720 18   null 360 300 22
   check "$F" "jim FAR-café budget-tight (FAIRNESS regression)" 3 1 0 0 0 0 0 "Jimmy:0.85"

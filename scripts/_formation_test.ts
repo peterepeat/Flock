@@ -2,7 +2,7 @@
 //   npx --yes tsx scripts/_formation_test.ts
 // Pure geometry — no ORS, no server. Asserts the disparate no-op, full overlap,
 // partial shared tail, and the < MIN_MERGE rejection.
-import { computeDispersalPoint, computeForcedMeetingPoint, computeFormationPoint, FORMATION_MIN_MERGE_KM } from "../src/lib/flockRoute";
+import { computeDispersalPoint, computeForcedMeetingPoint, computeFormationPoint, FORMATION_MIN_MERGE_KM, scanMeetingPoint } from "../src/lib/flockRoute";
 import { distanceMeters } from "../src/lib/geo";
 import type { LatLng } from "../src/lib/types";
 
@@ -203,6 +203,60 @@ const eastKm = (() => {
     1.3,
   );
   check("forced-D opposite (~180°) → null", opp === null);
+}
+
+// ---------------------------------------------------------------------------
+// JOINT CO-SOLVE (Stage 1, commute-ledger) — scanMeetingPoint generalises the forced tier
+// for the "Jimmy" class: a TIGHT cluster of homes a long way from a single café. Their
+// bearings into the café are near-collinear (small spread), so the disparate-origin forced
+// tier's 20° floor REJECTS them even though the WHOLE commute is shareable. The co-solve
+// drops that floor (minSpread 0) and compares crow-to-crow (roadFactor×crow baseline), so
+// the road-factor inflation cancels and the detour of sliding the meet point back is ~0.
+// ---------------------------------------------------------------------------
+{
+  const RF = 1.3;
+  const cafe = ll(-37.755, 145.015); // ~6km from the cluster (the jim "FarCafe")
+  const homes = [ll(-37.798, 144.97), ll(-37.801, 144.969), ll(-37.795, 144.972)]; // tight cluster
+  const crowOneWay = homes.map((h) => distanceMeters(h, cafe) / 1000);
+  const spread = (() => {
+    // largest pairwise bearing gap to the café — confirm it's BELOW the 20° forced floor
+    const deg = homes.map((h) => (Math.atan2(cafe.lng - h.lng, cafe.lat - h.lat) * 180) / Math.PI);
+    let m = 0;
+    for (let i = 0; i < deg.length; i++) for (let j = i + 1; j < deg.length; j++) {
+      const raw = Math.abs(deg[i] - deg[j]) % 360;
+      m = Math.max(m, Math.min(raw, 360 - raw));
+    }
+    return m;
+  })();
+  check("jimmy-class cluster spread < 20° floor", spread < 20, `spread=${spread.toFixed(1)}°`);
+
+  // The OLD forced tier (20° floor) rejects the tight cluster — the blind spot that left Jimmy solo.
+  const oldForced = computeForcedMeetingPoint(homes, crowOneWay, [5, 5, 5], cafe, RF);
+  check("forced tier rejects tight cluster (the blind spot)", oldForced === null);
+
+  // The co-solve scan (minSpread 0, crow-canceling baseline) FIRES even on a SMALL slack, because
+  // the collinear detour ≈ 0 — and banks a substantial shared lead toward the café.
+  const baseline = crowOneWay.map((k) => RF * k);
+  const inbound = scanMeetingPoint(homes, baseline, [1, 1, 1], cafe, RF, 0);
+  check("co-solve fires on tight cluster (minSpread 0)", inbound !== null);
+  if (inbound) {
+    check("co-solve detours ≈ 0 for collinear cluster", inbound.detours.every((d) => d < 0.5), `detours=${inbound.detours.map((d) => d.toFixed(2))}`);
+    check("co-solve banks a real shared lead", inbound.sharedKm > 2, `lead=${inbound.sharedKm.toFixed(2)}km`);
+    check("co-solve detour vector is per-anchor", inbound.detours.length === homes.length);
+  }
+
+  // POOL SPLIT (the there-and-back): finishes == homes, so the egress mirror is symmetric. With a
+  // pool of ~2km split 50/50, BOTH the inbound and outbound scans fire and each side's detour fits
+  // its HALF — so a runner who could only afford ONE merge on the full pool shares BOTH on the split.
+  const pool = 2.0;
+  const inHalf = scanMeetingPoint(homes, baseline, homes.map(() => pool / 2), cafe, RF, 0);
+  const outHalf = scanMeetingPoint(homes, baseline, homes.map(() => pool / 2), cafe, RF, 0); // finishes==homes → identical
+  check("split: inbound half-pool fires", inHalf !== null);
+  check("split: outbound half-pool fires", outHalf !== null);
+  if (inHalf && outHalf) {
+    const jointDetourOk = inHalf.detours.every((d, i) => d + outHalf.detours[i] <= pool + 1e-9);
+    check("split: joint detour (in+out) ≤ pool", jointDetourOk);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -148,12 +148,13 @@ const FIXTURES: Record<string, FlockSession> = {
     [wp("w1", -37.798, 144.978), wp("w2", -37.789, 144.995)],
   ),
   // SINGLE waypoint with a stop → a loop based at the waypoint (the "meet at one café,
-  // run a loop" case). Exercises the Phase-B path for waypoints.length===1 AND BOTH Stage 1
-  // FORCED tiers: the two distinct homes share no tail (natural F/D can't fire), but with one
-  // café every runner is a merge candidate, so forced F synthesises a meeting point P on the
-  // way IN and forced D mirrors it on the way HOME (homes==finishes ⇒ the same P, so the spine
-  // runs P→café→loop→café→P). This snapshot pins that FIRED output byte-identical (the
-  // deterministic regression guard for forced convergence + dispersal).
+  // run a loop" case). Exercises the Phase-B path for waypoints.length===1 AND the joint
+  // FORCED co-solve: the two distinct homes share no tail (natural F/D can't fire), but with one
+  // café every runner is a merge candidate, so the co-solve synthesises meeting points P_F / P_D
+  // jointly. s1 is unconstrained and s2 is capped, so the meeting point is BIASED onto s2 (the
+  // constrained runner shares its WHOLE route, the unconstrained s1 absorbs the detour) — the
+  // fairness win. This snapshot pins that FIRED output byte-identical (the deterministic
+  // regression guard for the convergence co-solve + meeting-point bias).
   g7_single_wp: session(
     "g7",
     [

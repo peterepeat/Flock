@@ -23,15 +23,16 @@ import {
   buildBackbone,
   centroid,
   computeDispersalPoint,
-  computeForcedMeetingPoint,
   computeFormationPoint,
   FORMATION_MIN_MERGE_KM,
   FORMATION_TOLERANCE_M,
   nearestKm,
   pointAtKm,
   prependFormationLead,
+  scanMeetingPoint,
   sliceKm,
   type Backbone,
+  type MeetingScan,
 } from "./flockRoute";
 import { getRoundTrip, getRoute, RouteError, type OrsRoute } from "./ors";
 import type {
@@ -87,6 +88,14 @@ const JOIN_AT_WP0_KM = 0.15;
 // let a runner spend headroom on together-time.
 const CAP_TRIM_GRACE_KM = 0.4; // enforce / solo-fill: only trim a cap overage past this
 const STRAND_GRACE_KM = 0.8; // strand only when the cap is busted by more than this
+// Fairness-aware loop sizing (single-waypoint): the solo-stub headroom kept when capping the loop so
+// a commute-dominated runner can ride the whole shared spine (commute + loop) within cap as a full
+// member — covers their home→F approach + D→home egress stubs once F/D shares the commute.
+const FAIR_SOLO_MARGIN_KM = 1.0;
+// Only a runner whose round-trip commute is at least this fraction of their cap is "commute-
+// dominated" enough to shrink the shared loop for everyone — below it they have real loop headroom
+// and peel off normally, so shrinking would needlessly cut the keener runners' shared distance.
+const FAIR_DOMINANCE_FRAC = 0.85;
 const LATE_TRIM_GRACE_SEC = 60; // enforce / solo-fill: only count "late" past this
 const STRAND_GRACE_SEC = 90; // strand on lateness only past this
 
@@ -174,204 +183,348 @@ function egressTailFromDispersal(egressGeom: LatLng[], disp: LatLng): { geom: La
 }
 
 /**
- * FORCED convergence (Stage 1) — the disparate-origin tier of F. Run ONLY when natural F
- * did NOT fire (the runners share no road into the waypoint). Bends the rendezvous-joiners
- * to a computed meeting point P, paying detour distance, so they run P→waypoint together.
+ * The JOINT forced co-solve — Stage 1's commute-ledger merge, applied to whichever side(s) a
+ * free natural tail didn't already cover. Given the inbound forced candidates `fCands` and the
+ * outbound forced candidates `dCands` (≥2 on a side for that side to merge), it chooses an
+ * inbound meeting point P_F and an outbound split P_D TOGETHER from ONE conserved pool, so a
+ * budget-tight runner can share BOTH commute legs instead of whichever merge fired first eating
+ * the slack the other needed (the "Jimmy" gap the two sequential ladders left open).
  *
- * Two budget gates, both in the engine's own currency so there's no unit mixing:
- *   • HARD: every joiner's REAL detour (committed against the actual home→P route, not a
- *     crow estimate, so enforceConstraints can't later invalidate it) fits their slack —
- *     the km they can add under their HARD distance cap. → else decline (unchanged).
- *   • VALUE: the together-time gained (companion-km, at flock pace by construction since
- *     the shared leg runs at the slowest present) must beat the detour cost priced at
- *     OVERAGE_PRICE. → else decline. This makes a slow runner whose drag would sink the
- *     merge simply fail to clear the hurdle (supermodular-safe).
+ * Per forced member, the ledger is `pool = cap − obligated − arc`, where
+ *   • obligated = the irreducible REAL home→wp0 + end→finish commute (the runner's geometric
+ *     there-and-back, independent of where the optimiser seated their window), and
+ *   • arc = the shared spine every forced member runs (wp0→end).
+ * A separable crow scan over the pool SPLIT α (P_F under α·pool, P_D under (1−α)·pool, each a
+ * 1-D scanMeetingPoint) picks the farthest-back affordable (P_F, P_D); the winner is committed
+ * with REAL ORS and re-validated jointly — HARD (every member's real committed distance ≤ cap),
+ * VALUE (companion-km gained > priced detour) — so it stays DECLINABLE (opposite-home /
+ * no-headroom flocks find no affordable, valuable point and the model stays pinned, byte-
+ * identical). The scan baseline is roadFactor×crow (not the real one-way) so the road-factor
+ * inflation CANCELS for a tight near-collinear cluster, and the 20° lower spread floor is
+ * dropped — there a small spread means the WHOLE commute is shareable, the case the forced tier's
+ * floor used to reject.
  *
- * On fire it PREPENDS P→waypoint and re-anchors joiners exactly like natural F (the same
- * downstream machinery absorbs it). On any decline / ORS error it returns the backbone
- * unchanged — byte-identical to the no-merge model. ORS cost: 1 (P→wp0) + N (home→P).
- * Returns the (possibly new) backbone; mutates joiner builds only when it fires.
+ * Because each forced member enters at P_F (km 0) and exits at P_D (the new end) BY CONSTRUCTION,
+ * the phantom-lap re-anchor terms the sequential ladders carried are structurally absent.
  */
-async function testAndApplyForcedF(
-  joiners: RunnerBuild[],
+async function applyJointForced(
   builds: RunnerBuild[],
   backbone: Backbone,
   wp0: LatLng,
+  backboneEnd: LatLng,
+  arc: number,
+  fCands: RunnerBuild[],
+  dCands: RunnerBuild[],
   flockId: string,
 ): Promise<Backbone> {
-  // Detour budget per joiner: km they can add under their hard cap, over the no-merge
-  // baseline (approach home→wp0 + their backbone arc + egress). User chose FULL headroom.
-  const slack = joiners.map((b) => {
-    const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-    const cap = (b.p.maxDistance ?? targetDistanceKm(b.p) ?? Infinity) + CAP_TRIM_GRACE_KM;
-    return Math.max(0, cap - built);
-  });
-  const P = computeForcedMeetingPoint(
-    joiners.map((b) => b.home),
-    joiners.map((b) => b.approachKm),
-    slack,
-    wp0,
-    ROAD_FACTOR,
-  );
-  if (!P) return backbone;
+  const haveF = fCands.length >= 2;
+  const haveD = dCands.length >= 2;
+  if (!haveF && !haveD) return backbone;
 
-  // Commit with REAL ORS: the shared lead P→wp0 + each joiner's detour home→P.
-  let lead: { geom: LatLng[]; km: number };
-  let homeToP: { geom: LatLng[]; km: number }[];
+  // One ledger per forced member (a runner may converge in, disperse out, or both): obligated is
+  // the REAL home→wp0 + end→finish, so the detour the ledger prices is purely the EXTRA over the
+  // unavoidable commute. (May hit the optimizer's cached approach/egress legs when enter≈wp0.)
+  const members = [...new Set([...fCands, ...dCands])];
+  let obliged: { inKm: number; outKm: number }[];
   try {
-    const [leadRoute, ...heads] = await Promise.all([
-      legRoute(P, wp0),
-      ...joiners.map((b) => legRoute(b.home, P)),
-    ]);
-    lead = { geom: geomToLatLng(leadRoute.geometry), km: leadRoute.distanceKm };
-    homeToP = heads.map((r) => ({ geom: geomToLatLng(r.geometry), km: r.distanceKm }));
+    obliged = await Promise.all(
+      members.map(async (b) => {
+        const [inLeg, outLeg] = await Promise.all([legRoute(b.home, wp0), legRoute(backboneEnd, b.finishPt)]);
+        return { inKm: inLeg.distanceKm, outKm: outLeg.distanceKm };
+      }),
+    );
   } catch {
     return backbone; // ORS failed — leave the pinned model untouched
   }
+  const mIdx = new Map(members.map((b, i) => [b, i] as const));
+  const capOf = (b: RunnerBuild) => (b.p.maxDistance ?? targetDistanceKm(b.p) ?? Infinity) + CAP_TRIM_GRACE_KM;
+  const poolOf = (b: RunnerBuild) => {
+    const i = mIdx.get(b)!;
+    return capOf(b) - obliged[i].inKm - obliged[i].outKm - arc;
+  };
 
-  const sharedKm = lead.km;
-  // Real added km per joiner vs their no-merge baseline. Re-anchoring to enter at P (km 0)
-  // means they also run the backbone stretch [0, oldEnterKm] they used to skip (a tiny
-  // single-waypoint loop can seat a budget-tight runner partway round), so that arc counts
-  // toward the detour too — else the HARD gate could let them slip oldEnterKm over the cap.
-  const detours = joiners.map((b, i) => homeToP[i].km + sharedKm + b.enterKm - b.approachKm);
-  const m = joiners.length;
-  const togetherGain = sharedKm * (m - 1);
-  const detourCost = OVERAGE_PRICE * detours.reduce((s, d) => s + Math.max(0, d), 0);
-  if (detours.some((d, i) => d > slack[i] + EPS)) return backbone; // HARD gate
-  if (togetherGain <= detourCost) return backbone; // VALUE gate
-
-  // FIRE. Prepend P→wp0 (axis shifts +sharedKm at the front); re-anchor joiners to start
-  // at P with their detour approach; non-joiners just shift onto the new axis.
-  const next = prependFormationLead(backbone, lead.geom, P);
-  for (const b of builds) {
-    b.enterKm += sharedKm;
-    b.exitKm += sharedKm;
+  // Separable crow scan over the pool split. Baseline = roadFactor×crow so collinear detours → 0;
+  // minSpread 0 so a tight cluster (the whole commute shareable) isn't rejected by the 20° floor.
+  // axisFrom = the CONSTRAINED candidates' centroid, so the meeting point slides toward the
+  // budget-tight runners and the unconstrained absorb the longer detour (maximising the tight
+  // runner's share). With everyone equally (un)constrained this is just the centroid (unchanged).
+  const isConstrained = (b: RunnerBuild) => (b.p.maxDistance ?? targetDistanceKm(b.p)) != null;
+  // t=0 lets the meeting point sit right AT the constrained centroid (tight runner's solo stub → 0).
+  const FRACTIONS = [0, 0.2, 0.4, 0.6, 0.8];
+  const scanSide = (cands: RunnerBuild[], anchorOf: (b: RunnerBuild) => LatLng, toward: LatLng, frac: number) => {
+    if (cands.length < 2) return null;
+    const anchors = cands.map(anchorOf);
+    const baseline = anchors.map((a) => ROAD_FACTOR * crowKm(a, toward));
+    const slack = cands.map((b) => frac * poolOf(b));
+    const tight = cands.filter(isConstrained).map(anchorOf);
+    const axisFrom = tight.length ? centroid(tight) : centroid(anchors);
+    return scanMeetingPoint(anchors, baseline, slack, toward, ROAD_FACTOR, 0, axisFrom, FRACTIONS);
+  };
+  const splits = haveF && haveD ? [0.5, 0.35, 0.65, 0.25, 0.75] : haveF ? [1] : [0];
+  let best: { scanF: MeetingScan | null; scanD: MeetingScan | null; value: number } | null = null;
+  for (const a of splits) {
+    const scanF = haveF ? scanSide(fCands, (b) => b.home, wp0, a) : null;
+    const scanD = haveD ? scanSide(dCands, (b) => b.finishPt, backboneEnd, 1 - a) : null;
+    if (!scanF && !scanD) continue;
+    const value = (scanF ? scanF.sharedKm * (fCands.length - 1) : 0) + (scanD ? scanD.sharedKm * (dCands.length - 1) : 0);
+    if (!best || value > best.value) best = { scanF, scanD, value };
   }
-  joiners.forEach((b, i) => {
-    b.approachGeom = homeToP[i].geom;
-    b.approachKm = homeToP[i].km;
-    b.enterKm = 0; // joiners start at P (the new km 0)
-  });
-  log.info("forced meeting point P", {
+  if (!best) return backbone;
+  const { scanF, scanD } = best;
+
+  // Commit with REAL ORS: the shared leads + each member's solo head/tail.
+  let leadF: { geom: LatLng[]; km: number } | null = null;
+  let leadD: { geom: LatLng[]; km: number } | null = null;
+  let heads: { geom: LatLng[]; km: number }[] = [];
+  let tails: { geom: LatLng[]; km: number }[] = [];
+  try {
+    const tasks: Promise<OrsRoute>[] = [];
+    if (scanF) {
+      tasks.push(legRoute(scanF.P, wp0));
+      for (const b of fCands) tasks.push(legRoute(b.home, scanF.P));
+    }
+    if (scanD) {
+      tasks.push(legRoute(backboneEnd, scanD.P));
+      for (const b of dCands) tasks.push(legRoute(scanD.P, b.finishPt));
+    }
+    const res = await Promise.all(tasks);
+    let k = 0;
+    if (scanF) {
+      leadF = { geom: geomToLatLng(res[k].geometry), km: res[k].distanceKm };
+      k++;
+      heads = fCands.map(() => {
+        const r = res[k++];
+        return { geom: geomToLatLng(r.geometry), km: r.distanceKm };
+      });
+    }
+    if (scanD) {
+      leadD = { geom: geomToLatLng(res[k].geometry), km: res[k].distanceKm };
+      k++;
+      tails = dCands.map(() => {
+        const r = res[k++];
+        return { geom: geomToLatLng(r.geometry), km: r.distanceKm };
+      });
+    }
+  } catch {
+    return backbone;
+  }
+
+  const leadFkm = leadF?.km ?? 0;
+  const leadDkm = leadD?.km ?? 0;
+  const newEnd = arc + leadFkm + leadDkm;
+  const fSet = new Set(fCands);
+  const dSet = new Set(dCands);
+  const fHeadIdx = new Map(fCands.map((b, i) => [b, i] as const));
+  const dTailIdx = new Map(dCands.map((b, i) => [b, i] as const));
+
+  // Joint gates on REAL km. The committed distance is measured exactly as the rest of the engine
+  // does it (approach + on-spine arc + egress); a forced member enters at P_F (km 0) and exits at
+  // P_D (newEnd) by construction, so the old re-anchor over-count terms never enter.
+  let hardOk = true;
+  let detourSum = 0;
+  for (const b of members) {
+    // Forced on a side only when THAT side's scan actually fired — a member can be in dCands while
+    // the joint optimum left scanD null (e.g. homes converge but finishes splay past the spread
+    // gate), in which case they merely shift onto the F-anchored axis (no append, no D tail).
+    const forcedIn = !!scanF && fSet.has(b);
+    const forcedOut = !!scanD && dSet.has(b);
+    const oldTotal = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
+    const enterF = forcedIn ? 0 : b.enterKm + leadFkm;
+    const exitF = forcedOut ? newEnd : b.exitKm + leadFkm;
+    const apprF = forcedIn ? heads[fHeadIdx.get(b)!].km : b.approachKm;
+    const egrF = forcedOut ? tails[dTailIdx.get(b)!].km : b.egressKm;
+    const newTotal = apprF + (exitF - enterF) + egrF;
+    if (newTotal > capOf(b) + EPS) hardOk = false;
+    detourSum += Math.max(0, newTotal - oldTotal);
+  }
+  const togetherGain =
+    (leadF ? leadFkm * (fCands.length - 1) : 0) + (leadD ? leadDkm * (dCands.length - 1) : 0);
+  if (!hardOk) return backbone; // HARD gate — a member would bust their cap
+  if (togetherGain <= OVERAGE_PRICE * detourSum) return backbone; // VALUE gate
+
+  // FIRE. Prepend P_F→wp0 (axis shifts +leadF at the front), then append end→P_D (extends the
+  // back). Re-anchor forced members to enter at P_F / exit at P_D; everyone else just shifts.
+  if (leadF && scanF) {
+    backbone = prependFormationLead(backbone, leadF.geom, scanF.P);
+    for (const b of builds) {
+      b.enterKm += leadFkm;
+      b.exitKm += leadFkm;
+    }
+    fCands.forEach((b, i) => {
+      b.approachGeom = heads[i].geom;
+      b.approachKm = heads[i].km;
+      b.enterKm = 0;
+    });
+  }
+  if (leadD && scanD) {
+    backbone = appendDispersalLead(backbone, leadD.geom, scanD.P);
+    dCands.forEach((b, i) => {
+      b.egressGeom = tails[i].geom;
+      b.egressKm = tails[i].km;
+      b.exitKm = backbone.totalKm;
+    });
+  }
+  log.info("forced co-solve P_F/P_D", {
     flockId,
-    sharedKm: round2(sharedKm),
-    joiners: m,
+    leadFkm: round2(leadFkm),
+    leadDkm: round2(leadDkm),
+    fMembers: leadF ? fCands.length : 0,
+    dMembers: leadD ? dCands.length : 0,
     togetherGain: round2(togetherGain),
-    detourCost: round2(detourCost),
-    backboneKm: round2(next.totalKm),
+    detourCost: round2(OVERAGE_PRICE * detourSum),
+    backboneKm: round2(backbone.totalKm),
   });
-  return next;
+  return backbone;
 }
 
 /**
- * FORCED dispersal (Stage 1) — the egress-side MIRROR of testAndApplyForcedF. Run ONLY when
- * natural D did NOT fire (the runners share no road HOME). Bends the dispersal candidates to
- * a computed split point P BEYOND the backbone end, so they run end→P together, then peel
- * apart to their finishes — paying detour distance. Same two gates as forced F, in the engine's
- * own currency:
- *   • HARD: every disperser's REAL detour (committed against the actual P→finish route) fits
- *     their slack — the km they can add under their HARD cap. → else decline (unchanged).
- *   • VALUE: the together-time gained (companion-km on the shared end→P leg) must beat the
- *     detour cost priced at OVERAGE_PRICE. → else decline.
+ * The CONVERGENCE CO-SOLVE — Stage 1's unified inbound + outbound merge, replacing the two
+ * sequential per-side convergence ladders with a single joint solve. Order of preference, per the
+ * convergence tree:
+ *   1. NATURAL F / NATURAL D — the free common tails (zero extra distance, computed from the
+ *      already-fetched feeders). Tried first and applied independently; when both fire there is
+ *      nothing left to force and the result is byte-identical to the old naturals.
+ *   2. JOINT FORCED CO-SOLVE — for the side(s) no natural tail covered, synthesise meeting points
+ *      P_F / P_D TOGETHER on one conserved commute-ledger (applyJointForced), so a runner can
+ *      share both commute legs at once rather than just whichever forced merge fired first.
  *
- * On fire it APPENDS end→P and re-anchors dispersers to exit at P exactly like natural D (the
- * same downstream machinery absorbs it). On any decline / ORS error it returns the backbone
- * unchanged — byte-identical to the no-merge model. ORS cost: 1 (end→P) + N (P→finish).
- * Returns the (possibly new) backbone; mutates disperser builds only when it fires.
- *
- * Slack already reflects any forced-F detour these runners just paid (`built` is read live), so
- * a runner whose inbound merge ate their headroom simply fails the HARD gate here — the cap is
- * never busted by stacking both merges.
+ * Mutually exclusive with its naturals per side; declines leave the model pinned. Mutates `builds`
+ * windows/feeders only when a merge fires; returns the (possibly new) backbone.
  */
-async function testAndApplyForcedD(
-  dispersers: RunnerBuild[],
+/**
+ * Rescue a commute-sharer the natural-D dispersal EXCLUDED. After natural F/D on a single-waypoint
+ * loop, a budget-constrained runner who shares the inbound (joined at the café) but couldn't afford
+ * the distance loop is seated to peel AT the café — exiting BEFORE the shared egress leg — so they
+ * run home solo (the "Jimmy" gap). When the loop is small enough that running the WHOLE spine fits
+ * their cap (the fairness-aware sizing keeps it so), re-seat them as a FULL member: they run the loop
+ * with the flock and disperse on the shared egress, sharing BOTH commute legs. ORS: 1 per rescue
+ * (D→finish). Anyone for whom full membership wouldn't fit is left to peel (unchanged).
+ */
+async function rescueExcludedSharers(
   builds: RunnerBuild[],
   backbone: Backbone,
-  backboneEnd: LatLng,
   flockId: string,
-): Promise<Backbone> {
-  const endKm = backbone.totalKm; // pre-append end; the arc a near-end disperser still skips
-  // Detour budget per disperser: km they can add under their hard cap, over their CURRENT
-  // built distance (approach home→enter + backbone arc + egress exit→finish).
-  const slack = dispersers.map((b) => {
-    const built = b.approachKm + (b.exitKm - b.enterKm) + b.egressKm;
-    const cap = (b.p.maxDistance ?? targetDistanceKm(b.p) ?? Infinity) + CAP_TRIM_GRACE_KM;
-    return Math.max(0, cap - built);
-  });
-  const P = computeForcedMeetingPoint(
-    dispersers.map((b) => b.finishPt),
-    dispersers.map((b) => b.egressKm),
-    slack,
-    backboneEnd,
-    ROAD_FACTOR,
-  );
-  if (!P) return backbone;
-
-  // Commit with REAL ORS: the shared lead end→P + each disperser's solo P→finish.
-  let lead: { geom: LatLng[]; km: number };
-  let pToFinish: { geom: LatLng[]; km: number }[];
-  try {
-    const [leadRoute, ...tails] = await Promise.all([
-      legRoute(backboneEnd, P),
-      ...dispersers.map((b) => legRoute(P, b.finishPt)),
-    ]);
-    lead = { geom: geomToLatLng(leadRoute.geometry), km: leadRoute.distanceKm };
-    pToFinish = tails.map((r) => ({ geom: geomToLatLng(r.geometry), km: r.distanceKm }));
-  } catch {
-    return backbone; // ORS failed — leave the model untouched
+): Promise<void> {
+  const end = backbone.totalKm;
+  const D = backbone.dispersalPoint;
+  if (!D) return; // no shared egress to join
+  for (const b of builds) {
+    if (b.p.maxDistance == null) continue; // only a constrained runner is the excluded tight one
+    if (b.enterKm > JOIN_AT_WP0_KM) continue; // must share the inbound (joined at the café/F)
+    if (b.exitKm >= end - JOIN_AT_WP0_KM) continue; // already reaches the end — not excluded
+    let tail: { geom: LatLng[]; km: number };
+    try {
+      const r = await legRoute(D, b.finishPt);
+      tail = { geom: geomToLatLng(r.geometry), km: r.distanceKm };
+    } catch {
+      continue;
+    }
+    const newTotal = b.approachKm + end + tail.km; // full member: home→F + whole spine + D→finish
+    if (newTotal > (b.p.maxDistance ?? Infinity) + CAP_TRIM_GRACE_KM) continue; // doesn't fit → peels
+    b.exitKm = end;
+    b.egressGeom = tail.geom;
+    b.egressKm = tail.km;
+    b.rescued = true;
+    log.info("rescued commute-sharer to full member", {
+      flockId,
+      id: b.p.id.slice(0, 4),
+      newTotal: round2(newTotal),
+    });
   }
-
-  const sharedKm = lead.km;
-  // Real added km per disperser vs their no-merge baseline. Re-anchoring to exit at the new
-  // end (P) means they also run the backbone stretch [oldExitKm, endKm] they used to skip (a
-  // budget-tight runner can peel off a little before the loop close), so that arc counts too.
-  const detours = dispersers.map((b, i) => pToFinish[i].km + sharedKm + (endKm - b.exitKm) - b.egressKm);
-  const m = dispersers.length;
-  const togetherGain = sharedKm * (m - 1);
-  const detourCost = OVERAGE_PRICE * detours.reduce((s, d) => s + Math.max(0, d), 0);
-  if (detours.some((d, i) => d > slack[i] + EPS)) return backbone; // HARD gate
-  if (togetherGain <= detourCost) return backbone; // VALUE gate
-
-  // FIRE. Append end→P (axis extends +sharedKm at the back); re-anchor dispersers to exit at P
-  // with their detour egress; non-dispersers are untouched (the append is past their exit).
-  const next = appendDispersalLead(backbone, lead.geom, P);
-  dispersers.forEach((b, i) => {
-    b.egressGeom = pToFinish[i].geom;
-    b.egressKm = pToFinish[i].km;
-    b.exitKm = next.totalKm; // exit at the new end (P)
-  });
-  log.info("forced dispersal point P", {
-    flockId,
-    sharedKm: round2(sharedKm),
-    dispersers: m,
-    togetherGain: round2(togetherGain),
-    detourCost: round2(detourCost),
-    backboneKm: round2(next.totalKm),
-  });
-  return next;
 }
 
-/**
- * Run ONE convergence ladder for either side (inbound F / outbound D): try the NATURAL
- * common-tail merge first (free, from already-fetched feeders), and only if it didn't fire,
- * try the FORCED synthesised meeting point (priced + gated). Mutually exclusive — a fired
- * natural merge is returned as-is and forced is skipped; if neither clears its bar the
- * backbone is returned unchanged (the no-merge no-op). The two sides differ ONLY in their
- * per-side closures (front prepend vs back append, approach vs egress), so this one helper —
- * called once per side — replaces the previously-duplicated F and D ladders.
- *
- * `natural` computes + gates + applies the common tail, returning the new backbone, or null
- * when it didn't fire (leaving builds + backbone untouched). `forced` tries the synthesised
- * meeting point on the (still-original) backbone and returns the result (unchanged on decline).
- */
-async function runConvergenceLadder(
+async function runConvergenceCoSolve(
+  builds: RunnerBuild[],
   backbone: Backbone,
-  natural: () => Backbone | null,
-  forced: (bb: Backbone) => Promise<Backbone>,
+  flockId: string,
+  waypointCount: number,
 ): Promise<Backbone> {
-  const merged = natural();
-  return merged ?? (await forced(backbone));
+  // INBOUND — natural F first (the free common tail of the rendezvous-joiners' approaches), read
+  // before any axis shift. A pure prepend; every runner shifts onto the F-anchored axis.
+  const wp0 = backbone.coords[0];
+  const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
+  const joiners = builds.filter(isJoiner);
+  let naturalFFired = false;
+  if (joiners.length >= 2) {
+    const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
+    if (F.forkKm >= FORMATION_MIN_MERGE_KM) {
+      backbone = prependFormationLead(backbone, F.sharedFromForkToWp0, F.forkPoint);
+      for (const b of builds) {
+        if (isJoiner(b)) {
+          const head = approachHeadToFork(b.approachGeom, F.forkPoint);
+          b.approachGeom = head.geom;
+          b.approachKm = head.km;
+          b.enterKm = 0;
+          b.exitKm += F.forkKm;
+        } else {
+          b.enterKm += F.forkKm;
+          b.exitKm += F.forkKm;
+        }
+      }
+      naturalFFired = true;
+      log.info("formation point F", {
+        flockId,
+        forkKm: round2(F.forkKm),
+        joiners: joiners.length,
+        backboneKm: round2(backbone.totalKm),
+      });
+    }
+  }
+
+  // OUTBOUND — natural D first (the egress-side common tail), read AFTER F's shift. A pure append;
+  // only the dispersal-joiners' exits move out to the new end.
+  const endKm = backbone.totalKm;
+  const backboneEnd = backbone.coords[backbone.coords.length - 1];
+  const isDispJoiner = (b: RunnerBuild) =>
+    b.exitKm >= endKm - JOIN_AT_WP0_KM &&
+    b.egressGeom.length >= 2 &&
+    distanceMeters(b.egressGeom[0], backboneEnd) <= FORMATION_TOLERANCE_M;
+  const dispJoiners = builds.filter(isDispJoiner);
+  let naturalDFired = false;
+  if (dispJoiners.length >= 2) {
+    const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
+    if (D.dispKm >= FORMATION_MIN_MERGE_KM) {
+      backbone = appendDispersalLead(backbone, D.sharedFromEndToD, D.dispPoint);
+      for (const b of dispJoiners) {
+        const tail = egressTailFromDispersal(b.egressGeom, D.dispPoint);
+        b.egressGeom = tail.geom;
+        b.egressKm = tail.km;
+        b.exitKm = backbone.totalKm;
+      }
+      naturalDFired = true;
+      log.info("dispersal point D", {
+        flockId,
+        dispKm: round2(D.dispKm),
+        dispJoiners: dispJoiners.length,
+        backboneKm: round2(backbone.totalKm),
+      });
+    }
+  }
+
+  // RESCUE: with a shared egress now in place, pull any constrained inbound-sharer the natural-D
+  // dispersal excluded (peeled at the café before the loop) into full membership if it fits cap.
+  if (naturalDFired) await rescueExcludedSharers(builds, backbone, flockId);
+
+  // JOINT FORCED CO-SOLVE for whichever side a natural tail didn't cover. A SINGLE waypoint routes
+  // everyone through the one café (whole rendezvous — no mid-corridor deep joiners), so every
+  // runner with a feeder is a candidate (this also sidesteps a tiny-loop optimizer seating a
+  // budget-tight runner partway round the loop, outside natural F's arc threshold); a corridor
+  // uses the rendezvous-joiner / dispersal-joiner sets.
+  const needF = !naturalFFired;
+  const needD = !naturalDFired;
+  if (!needF && !needD) return backbone;
+  const fCands = needF
+    ? waypointCount === 1
+      ? builds.filter((b) => b.approachGeom.length >= 2)
+      : joiners
+    : [];
+  const dCands = needD
+    ? waypointCount === 1
+      ? builds.filter((b) => b.egressGeom.length >= 2)
+      : dispJoiners
+    : [];
+  if (fCands.length < 2 && dCands.length < 2) return backbone;
+  return applyJointForced(builds, backbone, wp0, backboneEnd, endKm, fCands, dCands, flockId);
 }
 
 function targetDistanceKm(p: Participant): number | null {
@@ -438,6 +591,10 @@ interface RunnerBuild {
   cooldownGeom: LatLng[]; // a loop from the exit point back to it
   warmupKm: number;
   warmupGeom: LatLng[]; // a loop from home back to it, run before setting off
+  // Re-seated by the co-solve rescue into full commute membership — already near their cap and
+  // maximally shared, so they SKIP solo fill (a cool-down would only add solo km, lowering their
+  // share and risking the cap via the grace band).
+  rescued: boolean;
 }
 
 interface Leg {
@@ -940,6 +1097,9 @@ async function fitLoop(
  * with zero ORS calls. Mutates the cooldown/warmup fields (and departHomeSec).
  */
 async function applySoloFill(b: RunnerBuild, backbone: Backbone, T0abs: number): Promise<void> {
+  // A rescued commute-member is already near cap and maximally shared; a solo cool-down would only
+  // add solo km (lowering their share, the opposite of the rescue) and could bust the cap grace band.
+  if (b.rescued) return;
   const target = targetDistanceKm(b.p);
   if (target == null) return;
   const bud = runnerBudget(b.p);
@@ -1053,6 +1213,33 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
   else targetKm = DEFAULT_BACKBONE_KM;
   targetKm = Math.max(1, Math.min(targetKm, DISTANCE_MAX_KM));
 
+  // FAIRNESS-AWARE LOOP SIZING (single-waypoint loops only). The shared loop is sized to L* (the
+  // 2nd-longest reach) so the two keenest cover it all — but a budget-tight runner whose round-trip
+  // COMMUTE to the café already eats most of their cap can't afford that loop ON TOP of the commute.
+  // The window optimiser then seats them at zero arc, so after F/D shares their inbound they peel AT
+  // the café and miss the shared egress (the "Jimmy" gap), running home solo. Sharing both commute
+  // legs is their main together-lever, NOT the distance loop. So cap the loop at what the tightest
+  // constrained runner can still afford as a FULL member (cap − their commute − a small margin), and
+  // let keen runners make their distance up with solo fill. With no constrained runner near their cap
+  // this is a no-op — the cap is non-binding and L* stands (g7/fwd keep their L*≈1 loops byte-for-
+  // byte). Corridors (≥2 waypoints) and auto (rosette) are exempt: peeling off an ordered route early
+  // is fine, and auto already peels at home via the rosette.
+  if (waypoints.length === 1 && runners.length >= 2) {
+    let fairCap = Infinity;
+    for (const p of runners) {
+      const cap = p.maxDistance; // HARD cap only — a soft target can be exceeded (priced), so it
+      if (cap == null) continue; // never forces the shrink; matches rescueExcludedSharers' gate.
+      const commute =
+        (crowKm(p.startLocation, rendezvous) + crowKm(finishOf(p), egressAnchor)) * ROAD_FACTOR;
+      // Cap the loop only for a runner who can REACH the café (commute fits cap — else they're
+      // stranded downstream and mustn't shrink the shared route) AND whose commute DOMINATES their
+      // budget (else they have loop headroom and peel off normally).
+      if (commute >= cap || commute < FAIR_DOMINANCE_FRAC * cap) continue;
+      fairCap = Math.min(fairCap, cap - commute - FAIR_SOLO_MARGIN_KM);
+    }
+    if (Number.isFinite(fairCap)) targetKm = Math.max(1, Math.min(targetKm, fairCap));
+  }
+
   // Inner PEEL-AT-HOME breakpoints (AUTO rosette): the reaches of runners who can't cover
   // the whole spine, so the auto loop can return to base where they peel off (a budget-tight
   // runner finishes a shared lap AT home instead of being stranded far out on one lobe).
@@ -1130,6 +1317,7 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
         cooldownGeom: [],
         warmupKm: 0,
         warmupGeom: [],
+        rescued: false,
       });
     } else {
       const code = r.reason instanceof RouteError ? r.reason.code : "ors-error";
@@ -1148,134 +1336,31 @@ export async function calculateRoutes(session: FlockSession): Promise<CalcResult
     return empty(true);
   }
 
-  // --- Phase B: computed formation point F (convergence tree, Stages 0 + 1) -----
-  // The pinned rendezvous (the first waypoint) is the LATEST the flock can gather; pull
-  // it back to F, the real meeting point, and the F→wp0 corridor flips from solo feeders
-  // to flock-together time. F is the best of three, in order:
+  // --- Phase B: convergence co-solve (tree Stages 0 + 1) — formation F + dispersal D -----
+  // The pinned rendezvous (the first waypoint) is the LATEST the flock can gather; the co-solve
+  // pulls the gather back to where the runners really meet (F) and pushes the split out to where
+  // they really part (D), flipping solo feeders into shared flock legs. Per side, in order:
   //
-  //   • NATURAL F (Stage 0) — the start of the longest common tail of the joiners'
-  //     approach routes (the shared road they were already funnelling down). FREE: zero
-  //     extra distance, zero extra ORS (computed from the approaches already fetched, a
-  //     pure prepend). Needs ≥ FORMATION_MIN_MERGE_KM of genuinely shared road.
-  //   • FORCED F (Stage 1) — when origins are disparate (no shared tail), SYNTHESISE a
-  //     meeting point P off their lines and bend everyone to it, paying detour, but only
-  //     when the together-time beats the cost within each runner's hard cap (the two gates
-  //     in testAndApplyForcedF). This is the "two runners, different roads, one café" win.
-  //   • NO MERGE — neither clears its bar → F collapses to the waypoint and this whole
-  //     block is a no-op, byte-identical to the pinned model.
+  //   • NATURAL F / D (Stage 0) — the longest common tail of the joiners' approach / egress
+  //     routes (the shared road they were already funnelling down). FREE: zero extra distance,
+  //     zero extra ORS (a pure prepend / append of already-fetched geometry).
+  //   • FORCED CO-SOLVE (Stage 1) — when origins/finishes are disparate (no shared tail),
+  //     SYNTHESISE meeting points P_F and P_D and bend everyone to them, paying detour, but only
+  //     when the together-time beats the cost within each runner's hard cap. F and D are chosen
+  //     JOINTLY from one conserved commute-ledger (pool = cap − obligated − arc), so a budget-
+  //     tight runner shares BOTH commute legs rather than just whichever side fired first (the
+  //     "Jimmy" gap the two old sequential ladders left open).
+  //   • NO MERGE — neither clears its bar → the gather/split collapse to the waypoint and this
+  //     whole block is a no-op, byte-identical to the pinned model.
   //
-  // Why a single waypoint is still a LOOP, not a free out-and-back: with one café there is
-  // no second point to define an "out" direction, so the backbone is a loop based at the
-  // café. F/D do the real meeting — forced F bends disparate runners together on the way
-  // IN (and D on the way OUT) — so the loop is just the distance-making shape between them.
-  //
-  // Done as ONE atomic block BEFORE the first computeLegs: after it, nothing from the
-  // pinned phase is reused except each runner's shifted enterKm/exitKm. Runs for ANY
-  // nominated waypoint(s) — multi-waypoint corridor or single-waypoint loop alike (for a
-  // loop, km 0 == backbone end, so F prepends the shared approach and D appends the shared
-  // egress). The auto/no-waypoint case (rendezvous = centroid of starts) is left out:
-  // there is no fixed point the approaches funnel toward, so the merge doesn't apply.
+  // Why a single waypoint is still a LOOP, not a free out-and-back: with one café there is no
+  // second point to define an "out" direction, so the backbone is a loop based at the café; F/D
+  // do the real meeting on the way IN and the way OUT, and the loop is the distance-making shape
+  // between them. Runs for ANY nominated waypoint(s) — multi-waypoint corridor or single-waypoint
+  // loop alike. The auto/no-waypoint case (rendezvous = centroid of starts) is left out: there is
+  // no fixed point the approaches funnel toward, so the merge doesn't apply.
   if (waypoints.length >= 1) {
-    // INBOUND (F): pull the rendezvous back to the real meeting point. The ladder tries the
-    // NATURAL common tail of the joiners' approaches first, then the FORCED synthesised P.
-    const wp0 = backbone.coords[0]; // the ORS-snapped waypoint (km 0): corridor start or loop start
-    const isJoiner = (b: RunnerBuild) => b.enterKm <= JOIN_AT_WP0_KM && b.approachGeom.length >= 2;
-    const joiners = builds.filter(isJoiner);
-    backbone = await runConvergenceLadder(
-      backbone,
-      () => {
-        // NATURAL F — the start of the longest common tail of the joiners' approach routes
-        // (the shared road they were already funnelling down). FREE: zero extra ORS, a pure
-        // prepend. Needs ≥ FORMATION_MIN_MERGE_KM of genuinely shared road, else declines.
-        if (joiners.length < 2) return null;
-        const F = computeFormationPoint(joiners.map((b) => b.approachGeom), wp0);
-        if (F.forkKm < FORMATION_MIN_MERGE_KM) return null;
-        const next = prependFormationLead(backbone, F.sharedFromForkToWp0, F.forkPoint);
-        // The km axis lengthened by forkKm at the FRONT (F is the new km 0, wp0 is now at km
-        // forkKm). Shift every runner onto it; re-anchor joiners to enter at F with their
-        // approach reduced to the solo home→F head (sliced from cached geometry — no ORS). A
-        // deep-joiner's physical entry is unchanged, so only its km shifts; its approach stays.
-        for (const b of builds) {
-          if (isJoiner(b)) {
-            const head = approachHeadToFork(b.approachGeom, F.forkPoint);
-            b.approachGeom = head.geom;
-            b.approachKm = head.km;
-            b.enterKm = 0;
-            b.exitKm += F.forkKm;
-          } else {
-            b.enterKm += F.forkKm;
-            b.exitKm += F.forkKm;
-          }
-        }
-        log.info("formation point F", {
-          flockId: session.id,
-          forkKm: round2(F.forkKm),
-          joiners: joiners.length,
-          backboneKm: round2(next.totalKm),
-        });
-        return next;
-      },
-      // FORCED F — when no shared road exists, bend the candidates to a computed meeting point
-      // P, paying detour, when the together-time clearly beats the cost within their limits.
-      // Candidate set: a SINGLE waypoint routes everyone through the one café (the whole
-      // rendezvous — no mid-corridor "deep joiners"), so every runner is a candidate, which also
-      // sidesteps the tiny-loop optimizer seating a budget-tight runner's window a little way
-      // round the loop, outside natural F's arc threshold; a corridor uses the joiner set.
-      async (bb) => {
-        const forcedCandidates =
-          waypoints.length === 1 ? builds.filter((b) => b.approachGeom.length >= 2) : joiners;
-        if (forcedCandidates.length < 2) return bb;
-        return testAndApplyForcedF(forcedCandidates, builds, bb, wp0, session.id);
-      },
-    );
-
-    // OUTBOUND (D): the egress-side mirror. The dispersal-joiners reach the backbone END and
-    // run home along egress routes that share a corridor before splitting; the flock runs
-    // end→D together (a shared leg APPENDED at the back), then peels apart. Same ladder, same
-    // gates; unlike F's prepend, the append doesn't shift existing arc positions — only the
-    // dispersers' exit moves out to the new end (their egress shrinks to the solo D→finish tail).
-    const endKm = backbone.totalKm;
-    const backboneEnd = backbone.coords[backbone.coords.length - 1];
-    // A dispersal-joiner reaches the backbone END *and* its egress genuinely STARTS there
-    // (within tolerance), so the reversed egresses share the anchor the common-tail search needs.
-    const isDispJoiner = (b: RunnerBuild) =>
-      b.exitKm >= endKm - JOIN_AT_WP0_KM &&
-      b.egressGeom.length >= 2 &&
-      distanceMeters(b.egressGeom[0], backboneEnd) <= FORMATION_TOLERANCE_M;
-    const dispJoiners = builds.filter(isDispJoiner);
-    backbone = await runConvergenceLadder(
-      backbone,
-      () => {
-        // NATURAL D — the egress-side common tail (computed from egresses already fetched).
-        if (dispJoiners.length < 2) return null;
-        const D = computeDispersalPoint(dispJoiners.map((b) => b.egressGeom), backboneEnd);
-        if (D.dispKm < FORMATION_MIN_MERGE_KM) return null;
-        const next = appendDispersalLead(backbone, D.sharedFromEndToD, D.dispPoint);
-        // Only the dispersal-joiners change: the append is past every other runner's exit, so
-        // non-dispersers' km are untouched. Re-anchor each disperser to exit at D with its
-        // egress sliced to the solo D→finish tail (no ORS).
-        for (const b of dispJoiners) {
-          const tail = egressTailFromDispersal(b.egressGeom, D.dispPoint);
-          b.egressGeom = tail.geom;
-          b.egressKm = tail.km;
-          b.exitKm = next.totalKm; // exit at the new end (D)
-        }
-        log.info("dispersal point D", {
-          flockId: session.id,
-          dispKm: round2(D.dispKm),
-          dispJoiners: dispJoiners.length,
-          backboneKm: round2(next.totalKm),
-        });
-        return next;
-      },
-      // FORCED D — the egress mirror of forced F (same single-wp-everyone vs corridor-joiner rule).
-      async (bb) => {
-        const forcedDispersers =
-          waypoints.length === 1 ? builds.filter((b) => b.egressGeom.length >= 2) : dispJoiners;
-        if (forcedDispersers.length < 2) return bb;
-        return testAndApplyForcedD(forcedDispersers, builds, bb, backboneEnd, session.id);
-      },
-    );
+    backbone = await runConvergenceCoSolve(builds, backbone, session.id, waypoints.length);
   }
 
   // Flock-clock anchor (depends only on entries, stable through exit trimming).

@@ -326,17 +326,78 @@ function bearingSpreadDeg(homes: LatLng[], wp0: LatLng): number {
   return max;
 }
 
+export interface MeetingScan {
+  P: LatLng; // the chosen meeting point on the centroid(anchors)→towardPt axis
+  sharedKm: number; // crow length of the shared lead P→towardPt (run together)
+  detours: number[]; // per-anchor crow detour estimate at P (anchor→P + lead − baseline)
+}
+
 /**
- * The computed FORCED meeting point P — Stage 1's disparate-origin tier of F. When the
- * runners don't share a road into the waypoint (natural F can't fire), find a point P
- * to bend them to, off their shortest lines, so they run P→waypoint together. P is the
- * slack-bound optimum (the sim's best_meet, discretised): the FARTHEST-BACK point along
- * the centroid(homes)→waypoint funnel axis whose detour EVERY runner can afford. A 1-D
- * scan of a few candidates — never a 2-D grid, never ORS (crow estimates pick P; the
- * caller re-validates the winner with real ORS before committing).
+ * Scan candidate meeting points along the centroid(anchors)→towardPt funnel axis and return
+ * the FARTHEST-BACK one EVERY anchor can afford within its slack — the shared-lead length and
+ * the per-anchor detour VECTOR alongside it, so a joint co-solve can compose an inbound and an
+ * outbound scan against one conserved pool. Pure + ORS-free (crow estimates pick the candidate;
+ * the caller re-validates the winner with real ORS before committing). t→0 sits far back (more
+ * shared distance, bigger detours), t→1 hugs the waypoint; we keep the affordable candidate with
+ * the MOST shared distance, the kernel's argmax-feasible.
  *
- * Returns null when the origins are too collinear or too splayed (the geometric gate),
- * the waypoint sits among the homes (nothing to share), or no candidate is affordable.
+ * Returns null on the geometric gate (spread outside [minSpreadDeg, FORCED_SPREAD_MAX_DEG]), the
+ * waypoint sitting among the anchors (nothing to share), or no candidate being affordable.
+ *
+ * @param anchors    each candidate's origin (homes for inbound F, finishes for outbound D)
+ * @param baselineKm each candidate's no-merge anchor→towardPt distance (subtracted from the detour)
+ * @param slackKm    each candidate's detour budget (km it can add under its share of the pool)
+ * @param roadFactor crow→road inflation applied to the candidate's anchor→P + lead estimate
+ * @param minSpreadDeg lower bearing-spread gate: FORCED_SPREAD_MIN_DEG for the disparate-origin
+ *   forced tier; 0 for the commute-ledger co-solve, where a TIGHT cluster (near-collinear bearings)
+ *   means the WHOLE commute is shareable — the case the 20° floor would wrongly reject.
+ * @param axisFrom  the point the candidate axis runs FROM toward towardPt (default centroid(anchors)).
+ *   The co-solve passes the CONSTRAINED runners' centroid so the meeting point slides toward the
+ *   budget-tight runners (the unconstrained absorb the longer detour), maximising the tight runners'
+ *   share. Affordability is still checked for EVERY anchor; only the scan axis moves.
+ * @param fractions candidate positions along axisFrom→towardPt (t=0 sits AT axisFrom, t=1 at the
+ *   waypoint). Default is the disparate-origin forced band; the co-solve includes t=0 so the meeting
+ *   point can sit right at the constrained centroid, driving the tight runner's solo stub to ~zero.
+ */
+export function scanMeetingPoint(
+  anchors: LatLng[],
+  baselineKm: number[],
+  slackKm: number[],
+  towardPt: LatLng,
+  roadFactor: number,
+  minSpreadDeg: number = FORCED_SPREAD_MIN_DEG,
+  axisFrom?: LatLng,
+  fractions: number[] = [0.2, 0.35, 0.5, 0.65, 0.8],
+): MeetingScan | null {
+  if (anchors.length < 2) return null;
+  const spread = bearingSpreadDeg(anchors, towardPt);
+  if (spread < minSpreadDeg || spread > FORCED_SPREAD_MAX_DEG) return null;
+
+  const c = axisFrom ?? centroid(anchors);
+  const axisKm = distanceMeters(c, towardPt) / 1000;
+  if (axisKm < MIN_GROW_KM) return null; // waypoint basically among the anchors — nothing to share
+  const dir = bearingRad(c, towardPt);
+
+  let best: MeetingScan | null = null;
+  for (const t of fractions) {
+    const P = destinationPoint(c, dir, t * axisKm);
+    const sharedKm = distanceMeters(P, towardPt) / 1000; // run together P→towardPt
+    const detours = anchors.map(
+      (h, i) => roadFactor * (distanceMeters(h, P) / 1000 + sharedKm) - baselineKm[i],
+    );
+    const affordable = detours.every((d, i) => d <= slackKm[i] + 1e-9);
+    if (affordable && (!best || sharedKm > best.sharedKm)) best = { P, sharedKm, detours };
+  }
+  return best;
+}
+
+/**
+ * The computed FORCED meeting point P — Stage 1's disparate-origin tier of F. When the runners
+ * don't share a road into the waypoint (natural F can't fire), find a point P to bend them to,
+ * off their shortest lines, so they run P→waypoint together — paying a detour. A thin wrapper
+ * over scanMeetingPoint that keeps the 20° lower spread floor (the disparate-origin band) and
+ * returns just the point. Returns null when the origins are too collinear/splayed, the waypoint
+ * sits among the homes, or no candidate is affordable.
  *
  * @param homes      each candidate joiner's start
  * @param approachKm each joiner's natural home→waypoint distance (the no-merge baseline)
@@ -350,29 +411,7 @@ export function computeForcedMeetingPoint(
   wp0: LatLng,
   roadFactor: number,
 ): LatLng | null {
-  if (homes.length < 2) return null;
-  const spread = bearingSpreadDeg(homes, wp0);
-  if (spread < FORCED_SPREAD_MIN_DEG || spread > FORCED_SPREAD_MAX_DEG) return null;
-
-  const c = centroid(homes);
-  const axisKm = distanceMeters(c, wp0) / 1000;
-  if (axisKm < MIN_GROW_KM) return null; // waypoint basically among the homes — nothing to share
-  const dir = bearingRad(c, wp0);
-
-  // Candidates spaced along the funnel axis. t→0 sits far back (more shared distance, but
-  // bigger detours); t→1 hugs the waypoint. We keep the affordable candidate with the
-  // MOST shared distance (farthest back), which is the kernel's argmax-feasible.
-  let best: { P: LatLng; sharedKm: number } | null = null;
-  for (const t of [0.2, 0.35, 0.5, 0.65, 0.8]) {
-    const P = destinationPoint(c, dir, t * axisKm);
-    const sharedKm = distanceMeters(P, wp0) / 1000; // run together P→waypoint
-    const affordable = homes.every((h, i) => {
-      const detour = roadFactor * (distanceMeters(h, P) / 1000 + sharedKm) - approachKm[i];
-      return detour <= slackKm[i] + 1e-9;
-    });
-    if (affordable && (!best || sharedKm > best.sharedKm)) best = { P, sharedKm };
-  }
-  return best?.P ?? null;
+  return scanMeetingPoint(homes, approachKm, slackKm, wp0, roadFactor)?.P ?? null;
 }
 
 // --- Stage: PEEL-AT-HOME rosette (AUTO mode) --------------------------------
