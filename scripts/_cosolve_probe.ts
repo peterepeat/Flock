@@ -23,12 +23,14 @@ const lerp = (a: LatLng, b: LatLng, t: number): LatLng => ({ lat: a.lat + (b.lat
 async function main() {
   const s = JSON.parse(readFileSync("/tmp/5e5qae_now.json", "utf8"));
   const cafe: LatLng = s.waypoints[0].location;
-  const runners = s.participants.map((p: { name: string; startLocation: LatLng; maxDistance: number | null; preferredPace: number | null }) => ({
-    name: p.name, home: p.startLocation, cap: p.maxDistance ?? Infinity,
-  }));
+  const runners: { name: string; home: LatLng; cap: number }[] = s.participants.map(
+    (p: { name: string; startLocation: LatLng; maxDistance: number | null }) => ({
+      name: p.name, home: p.startLocation, cap: p.maxDistance ?? Infinity,
+    }),
+  );
   const centroid: LatLng = {
-    lat: runners.reduce((a: number, r) => a + r.home.lat, 0) / runners.length,
-    lng: runners.reduce((a: number, r) => a + r.home.lng, 0) / runners.length,
+    lat: runners.reduce((a, r) => a + r.home.lat, 0) / runners.length,
+    lng: runners.reduce((a, r) => a + r.home.lng, 0) / runners.length,
   };
   console.log(`café ${f2(cafe.lat)},${f2(cafe.lng)} | centroid ${f2(centroid.lat)},${f2(centroid.lng)} | ${(distanceMeters(centroid, cafe) / 1000).toFixed(2)}km apart\n`);
 
