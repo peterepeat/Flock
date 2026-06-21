@@ -195,6 +195,9 @@ npx tsx scripts/_rank_probe.ts      # forced-weave selection: crow orders, ORS m
 Both load-bearing gates resolved favourably: the core is **correct** (the objective is the one place
 today's engine inherits a leaky proxy, and the fix is derived not guessed) and **buildable** (forced
 weaves are committable without an ORS blowup). The object, operation, and fixpoint-law are the frame
-to commit. Sequencing the migration is a separate exercise, to be re-derived *after* adopting the
-own-pace welfare unit — the structural roadmap that preceded this re-derivation assumed the leaky
-wall-minutes objective and must be redone on this base.
+to commit.
+
+**The build sequence derived from this model is [`ROADMAP.md`](./ROADMAP.md)** — greenfield
+`src/lib/flock/`, de-risk-first (the admissibility fixpoint and the space×time atom before breadth),
+own-pace welfare as the sole objective axis, legacy reused only as a parts quarry and a render sink,
+cut over at one call-site. Read this doc, then that one, and start at phase 0.
