@@ -7,7 +7,8 @@
 #
 # Usage:   ./scripts/scenarios.sh [PORT] [SCENARIO] [SLEEP]
 #   PORT     defaults to 3000.
-#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd ros swr cct all   (default: all; 21 scenarios)
+#   SCENARIO one of: s1 s2 s3 s4 s5 s6 s7 s9 s10 s11 s12 pc ext cvg sw fwd fwd0 dwd ros swr jim jone jfd tier fbwd opp cvgf cct all   (default: all; 28 scenarios)
+#   FAIRNESS guards: jim + jfd are RED until the F/D joint-slack fix lands (RED→GREEN regression artifacts).
 #   SLEEP    seconds between scenarios in "all" (default 20) — the free ORS tier
 #            allows ~40 reqs/min, and a 5-person scenario bursts ~11, so "all"
 #            must be paced or later scenarios get rate-limited (0 routes). With 9
@@ -38,8 +39,8 @@ calc()   { curl -s -X POST "$BASE/api/routes/calculate" -H 'Content-Type: applic
 # person NAME LAT LNG [extraJSON]
 person() { patch "$1" "{\"action\":\"addParticipant\",\"editToken\":\"$2\",\"participant\":{\"name\":\"$2\",\"startLocation\":{\"lat\":$3,\"lng\":$4},\"startAddress\":\"$2\",\"earliestStartTime\":\"07:00\",\"finishLocation\":null,\"finishAddress\":null,\"latestFinishTime\":${6:-null},\"preferredPace\":${7:-360},\"maxPace\":${8:-300},\"preferredDistance\":${5:-null},\"maxDistance\":${9:-null},\"restStop\":null}}" "$2"; }
 wp()     { patch "$1" "{\"action\":\"addWaypoint\",\"waypoint\":{\"location\":{\"lat\":$2,\"lng\":$3},\"address\":\"$4\",\"name\":\"$4\",\"stopMinutes\":${5:-0}}}"; }
-# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET] [EXPECT_FORMATION] [EXPECT_DISPERSAL]
-check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-0}" "${9:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
+# check FID LABEL EXPECT_ROUTES EXPECT_TOGETHER EXPECT_STOP [EXPECT_TARGET] [EXPECT_SECOND_TARGET] [EXPECT_FORMATION] [EXPECT_DISPERSAL] [EXPECT_MIN_SHARE "NAME:floor"|floor] [EXPECT_MAX_ALONE_KM]
+check()  { calc "$1"; if curl -s "$BASE/api/flocks/$1" | python3 "$DIR/_check.py" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-0}" "${9:-0}" "${10:-0}" "${11:-0}"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi; }
 
 # 5 disparate people (shared across s4/s5/s6). args: FID
 add5() {
@@ -229,6 +230,78 @@ swr() {
   check "$F" "swr single-wp rosette" 3 1 0
 }
 
+# ── FAIRNESS scenarios (per-runner shared fraction; the gap that let "Jimmy" slip) ──
+# jim: the 5e5qae regression guard — a far café (~5km) + a budget-tight runner whose commute
+# is ~86% of cap. His only alone-time lever is sharing BOTH approach AND egress; today forced-F
+# and forced-D are sequentially greedy (only one side shares), so Jimmy runs ~half solo. FAILS
+# NOW at Jimmy:0.85, PASSES after the F/D joint-slack-coordination fix. The RED→GREEN artifact.
+jim() {
+  local F; F=$(create); echo "jim → $BASE/flock/$F"
+  wp "$F" -37.7550 145.0150 FarCafe
+  person "$F" Jimmy  -37.7980 144.9700 14   null 360 320 14.3   # commute ≈ 86% of cap
+  person "$F" Anchor -37.8010 144.9690 null null 360 300 null
+  person "$F" Mae    -37.7950 144.9720 18   null 360 300 22
+  check "$F" "jim FAR-café budget-tight (FAIRNESS regression)" 3 1 0 0 0 0 0 "Jimmy:0.85"
+}
+# jone: one-sided home cluster + far café — forced-F should gather everyone up a shared arterial.
+# Bare derived floor (targets the largest commute/cap runner) — exercises the derivation.
+jone() {
+  local F; F=$(create); echo "jone → $BASE/flock/$F"
+  wp "$F" -37.8300 144.9700 SouthCafe
+  person "$F" Uma -37.7700 144.9620 14 null 360 300 15.5
+  person "$F" Vik -37.7720 144.9650 14 null 360 300 18
+  person "$F" Wes -37.7685 144.9600 14 null 360 300 18
+  check "$F" "jone one-sided cluster far café (derived floor)" 3 1 0 0 0 1 0 "0.70"
+}
+# jfd: both-sides-needed for a tight runner — different roads into a far café (~50°), headroom
+# for ~one merge. The corridor companion to jim; also RED now / GREEN after joint-slack.
+jfd() {
+  local F; F=$(create); echo "jfd → $BASE/flock/$F"
+  wp "$F" -37.8284 144.9847 Anderson
+  person "$F" Tight -37.7812 144.9860 12   null 360 320 14.0
+  person "$F" Roomy -37.8067 144.9694 null null 360 300 null
+  check "$F" "jfd both-sides tight (FAIRNESS joint-slack)" 2 1 0 0 0 1 0 "Tight:0.80"
+}
+# tier: graduated budget tiers (rosette) with a NAMED floor on the tightest tier — a rosette
+# that fails to nest depresses the inner tier's share. Named (not blanket) so the legit-short
+# tier isn't false-flagged.
+tier() {
+  local F; F=$(create); echo "tier → $BASE/flock/$F"
+  person "$F" Atlas -37.7980 144.9700 24 null 350 300 26
+  person "$F" Bo    -37.7990 144.9720 18 null 360 310 20
+  person "$F" Cy    -37.7975 144.9695 13 null 380 320 14
+  person "$F" Del   -37.7985 144.9710 9  null 420 350 10
+  check "$F" "tier graduated rosette (per-tier share)" 4 1 0 0 0 0 0 "Cy:0.60"
+}
+# fbwd: finish-elsewhere BACKWARD (finish on the home side, behind the café) — the open-corridor
+# direction that should NOT regress; named floor on the home-returner so the finisher's solo
+# off-corridor egress isn't blanket-flagged.
+fbwd() {
+  local F; F=$(create); echo "fbwd → $BASE/flock/$F"
+  wp "$F" -37.7980 144.9780 Fitzroy
+  patch "$F" "{\"action\":\"addParticipant\",\"editToken\":\"Cara\",\"participant\":{\"name\":\"Cara\",\"startLocation\":{\"lat\":-37.767,\"lng\":144.96},\"startAddress\":\"Cara\",\"earliestStartTime\":\"07:00\",\"finishLocation\":{\"lat\":-37.823,\"lng\":144.946},\"finishAddress\":\"finish\",\"latestFinishTime\":null,\"preferredPace\":360,\"maxPace\":300,\"preferredDistance\":12,\"maxDistance\":15,\"restStop\":null}}"
+  person "$F" Dan -37.7680 144.9610 11 null 360 300 14
+  check "$F" "fbwd finish-elsewhere BACKWARD + floor" 2 1 0 0 0 0 0 "Dan:0.50"
+}
+# opp: NEGATIVE CONTROL — opposite-side homes (~180°) → forced convergence MUST decline.
+# expect_together=0 so the floor is NOT evaluated; proves the gate (no blunt always-pass).
+opp() {
+  local F; F=$(create); echo "opp → $BASE/flock/$F"
+  wp "$F" -37.8284 144.9847 Anderson
+  person "$F" Nth -37.7850 144.9847 12 null 360 300 14
+  person "$F" Sth -37.8750 144.9847 12 null 360 300 14
+  check "$F" "opp opposite homes (forced declines)" 2 0 0 0 0 0 0 "0.70"
+}
+# cvgf: POSITIVE CONTROL — natural both-sides convergence on a shared arterial with headroom.
+# Named floor stays GREEN before and after the fix; guards that the floor doesn't break the easy case.
+cvgf() {
+  local F; F=$(create); echo "cvgf → $BASE/flock/$F"
+  wp "$F" -37.7840 144.9610 PrincesPark
+  person "$F" Ana -37.7560 144.9590 12 null 360 300 16
+  person "$F" Bo  -37.7555 144.9625 11 null 360 300 16
+  check "$F" "cvgf natural both-sides (control)" 2 1 0 0 0 1 0 "Ana:0.70"
+}
+
 cct() {
   local F; F=$(create); echo "cct → $BASE/flock/$F"
   wp "$F" -37.7980 144.9780 Fitzroy;   wp "$F" -37.7850 144.9520 Parkville; wp "$F" -37.8080 144.9450 NthMelb
@@ -246,7 +319,7 @@ cct() {
 curl -s "$BASE/api/flocks/__ping__" -o /dev/null || { echo "server not reachable at $BASE"; exit 2; }
 echo "Flock scenarios @ $BASE"
 case "$WHICH" in
-  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd ros swr cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
+  all) for sc in s1 s2 s3 s4 s5 s6 pc ext s7 s9 s10 s11 s12 cvg sw fwd fwd0 dwd ros swr jim jone jfd tier fbwd opp cvgf cct; do "$sc"; [ "$sc" = cct ] || sleep "$SLEEP"; done ;;
   *)   "$WHICH" ;;
 esac
 echo "── $PASS passed, $FAIL failed ──"

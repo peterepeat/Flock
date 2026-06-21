@@ -202,6 +202,26 @@ export { FIXTURES };
 
 const GOLDEN_PATH = join(process.cwd(), "scripts", "golden.json");
 
+type CalcResult = import("../src/lib/routeEngine").CalcResult;
+
+// Per-runner shared fraction (shared-TIME over RUN-ONLY time — stop dwell excluded, since it
+// isn't "alone" time). Snapshotted so an optimizer change that shifts WHO shares with whom
+// trips a fairness-labelled diff, not just a raw-coordinate one. Mirrors _check.py's metric.
+function fairness(res: CalcResult) {
+  const per = res.routes.map((r) => {
+    const rm = r.schedule
+      .filter((sg) => sg.type === "run" && sg.paceSecPerKm)
+      .reduce((a, sg) => a + (sg.distanceKm ?? 0) * (sg.paceSecPerKm ?? 0) / 60, 0);
+    const sm = res.sharedSegments
+      .filter((sg) => sg.participantIds.includes(r.participantId))
+      .reduce((a, sg) => a + sg.overlapMinutes, 0);
+    const frac = rm > 0 ? Math.min(sm / rm, 1) : sm === 0 ? 1 : 0;
+    return { id: r.participantId, frac, soloKm: r.distanceKm * (1 - frac) };
+  });
+  const fr = per.map((p) => p.frac);
+  return { per, minFrac: Math.min(...fr), maxFrac: Math.max(...fr) };
+}
+
 async function main() {
   // Import AFTER the fetch stub is installed.
   const { calculateRoutes } = await import("../src/lib/routeEngine");
@@ -209,7 +229,8 @@ async function main() {
 
   const results: Record<string, unknown> = {};
   for (const [name, s] of Object.entries(FIXTURES)) {
-    results[name] = norm(await calculateRoutes(s));
+    const res = await calculateRoutes(s);
+    results[name] = norm({ ...res, _fairness: fairness(res) });
   }
   const actual = JSON.stringify(results, null, 2);
 

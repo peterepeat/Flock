@@ -1,5 +1,16 @@
 {
   "g1_solo": {
+    "_fairness": {
+      "maxFrac": 0,
+      "minFrac": 0,
+      "per": [
+        {
+          "frac": 0,
+          "id": "solo",
+          "soloKm": 7.1
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -129,6 +140,22 @@
     "waypointEtas": null
   },
   "g2_pair": {
+    "_fairness": {
+      "maxFrac": 0.6924,
+      "minFrac": 0.6541,
+      "per": [
+        {
+          "frac": 0.6541,
+          "id": "anchor",
+          "soloKm": 3.4382
+        },
+        {
+          "frac": 0.6924,
+          "id": "capped",
+          "soloKm": 2.8917
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -460,6 +487,27 @@
     "waypointEtas": null
   },
   "g3_wp_stop": {
+    "_fairness": {
+      "maxFrac": 0.9956,
+      "minFrac": 0.7297,
+      "per": [
+        {
+          "frac": 0.9956,
+          "id": "a",
+          "soloKm": 0.0417
+        },
+        {
+          "frac": 0.7297,
+          "id": "b",
+          "soloKm": 3.3383
+        },
+        {
+          "frac": 0.9772,
+          "id": "c",
+          "soloKm": 0.2217
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -1172,6 +1220,22 @@
     }
   },
   "g4_strand": {
+    "_fairness": {
+      "maxFrac": 0,
+      "minFrac": 0,
+      "per": [
+        {
+          "frac": 0,
+          "id": "near",
+          "soloKm": 8.82
+        },
+        {
+          "frac": 0,
+          "id": "far",
+          "soloKm": 5.75
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -1338,6 +1402,22 @@
     "waypointEtas": null
   },
   "g6_tight": {
+    "_fairness": {
+      "maxFrac": 0.5304,
+      "minFrac": 0.3412,
+      "per": [
+        {
+          "frac": 0.3412,
+          "id": "t1",
+          "soloKm": 6.8049
+        },
+        {
+          "frac": 0.5304,
+          "id": "t2",
+          "soloKm": 3.1183
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -1713,6 +1793,22 @@
     }
   },
   "g7_single_wp": {
+    "_fairness": {
+      "maxFrac": 0.7766,
+      "minFrac": 0.6231,
+      "per": [
+        {
+          "frac": 0.7766,
+          "id": "s1",
+          "soloKm": 2.1378
+        },
+        {
+          "frac": 0.6231,
+          "id": "s2",
+          "soloKm": 4.5038
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -2154,6 +2250,22 @@
     }
   },
   "g8_dup_stop": {
+    "_fairness": {
+      "maxFrac": 0.9965,
+      "minFrac": 0.9855,
+      "per": [
+        {
+          "frac": 0.9965,
+          "id": "d1",
+          "soloKm": 0.04
+        },
+        {
+          "frac": 0.9855,
+          "id": "d2",
+          "soloKm": 0.17
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
@@ -2615,6 +2727,22 @@
     }
   },
   "g5_finish": {
+    "_fairness": {
+      "maxFrac": 0.6599,
+      "minFrac": 0.5467,
+      "per": [
+        {
+          "frac": 0.5467,
+          "id": "ava",
+          "soloKm": 6.4545
+        },
+        {
+          "frac": 0.6599,
+          "id": "ben",
+          "soloKm": 4.01
+        }
+      ]
+    },
     "flockRoute": {
       "coordinates": [
         [
