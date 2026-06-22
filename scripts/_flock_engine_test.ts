@@ -149,5 +149,26 @@ console.log("── FLOCK PLANNER — social-first behaviours ──\n");
   console.log("");
 }
 
+// === Scenario 7: deadline-snap — a deadline-bound runner finishes AT a reachable café ===
+{
+  console.log("[7] a tight deadline routes a fast runner to FINISH at the café, not peel off before it");
+  // FAST (4:00/km, must finish by 8500 s) + SLOW (6:00/km, free). Café @4km, dwell 2h. Under
+  // slowest-wins FAST is dragged to 6:00 and would clear the café only at ~9360 s — past the
+  // deadline — so the naive trim peels FAST off at ~2.4km BEFORE the café (14.5 pair-min). The
+  // reunion-aware deadline snap instead finishes FAST at the café and parks to the deadline.
+  const r = route(6, [{ km: 4, durationSec: 7200, name: "Café" }]);
+  const input: RunInput = {
+    route: r,
+    t0Sec: 0,
+    runners: [runner("FAST", 240, { latestSec: 8500 }), runner("SLOW", 360)],
+  };
+  const plan = planRun(input);
+  const FAST = plan.runners.find((p) => p.id === "FAST")!;
+  ok(Math.abs(FAST.exitKm - 4) < 1e-6, `FAST finishes AT the café (exit ${f2(FAST.exitKm)} km), not trimmed off before it`);
+  ok(FAST.arriveSec <= 8500 + 1e-6, `FAST honours the 8500 s deadline (finishes ${FAST.arriveSec} s)`);
+  ok(plan.togetherMinutes > 100, `the reunion is banked: ${f2(plan.togetherMinutes)} pair-min (vs 14.5 if peeled off before the café)`);
+  console.log("");
+}
+
 console.log(failures === 0 ? "✅ ALL PASS" : `❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

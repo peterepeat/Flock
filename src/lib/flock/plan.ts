@@ -209,9 +209,19 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
       // is kept, not cut.
       const arrive = span.last + r.egressKm * r.pace;
       if (arrive <= r.latestSec + EPS) continue;
-      // trim proportionally to the overshoot
+      // Default: trim the exit proportionally to the overshoot (peel off earlier on the arc).
       const over = arrive - r.latestSec;
-      const newExit = Math.max(w.enterKm, w.exitKm - over / r.pace);
+      let newExit = Math.max(w.enterKm, w.exitKm - over / r.pace);
+      // But if a dwell STOP inside the window is still reachable in time, FINISHING there beats
+      // peeling off at a bare point: the runner reaches the café with the flock and stays for the
+      // reunion (capped by their deadline) instead of being evicted before it by slowest-wins.
+      // Snap to the FARTHEST such stop past the bare trim. (Reachable = the flock arrives at the
+      // stop early enough that the runner can be there, then run home, by their deadline.)
+      for (const s of route.stops) {
+        if (s.km <= newExit + EPS || s.km > w.exitKm + EPS || s.km < w.enterKm - EPS) continue;
+        const cafeArrival = dwellStartAt(blocks, s.km);
+        if (cafeArrival != null && cafeArrival + r.egressKm * r.pace <= r.latestSec + EPS) newExit = s.km;
+      }
       if (w.exitKm - newExit > 0.05) {
         wins.set(r.id, { enterKm: w.enterKm, exitKm: newExit });
         changed = true;
@@ -293,6 +303,18 @@ export function runnerSpan(blocks: Block[], id: string): { first: number; last: 
     last = Math.max(last, b.endSec);
   }
   return first === Infinity ? null : { first, last };
+}
+
+// Flock-clock seconds the flock ARRIVES at a dwell stop (the start of its rest) — distinct
+// from arrivalAt(km), whose max-semantics returns the post-dwell leg time at that km. Null if
+// no dwell sits at km. Used to ask "can a deadline-bound runner reach this café in time?".
+function dwellStartAt(blocks: Block[], km: number): number | null {
+  let start: number | null = null;
+  for (const b of blocks) {
+    if (b.paceSec != null || Math.abs(b.loKm - km) > 1e-3) continue;
+    start = start == null ? b.startSec : Math.min(start, b.startSec);
+  }
+  return start;
 }
 
 // --- warnings: explain every deviation; flag the lonely --------------------

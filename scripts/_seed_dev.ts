@@ -50,6 +50,16 @@ async function main() {
     person("Remy"),
   ], [wp("home2", 51.5200, -0.1100), cafe, wp("park", 51.5400, -0.0800)], { intendedDistanceKm: 5 }));
 
+  // DEADLINE REUNION (Landing 3): a long café stop + a fast runner with a tight finish time.
+  // Slowest-wins would evict the fast runner before the café; the deadline-snap finishes them AT
+  // the café and parks them for the reunion until their deadline.
+  const bigCafe = wp("bigcafe", 51.5260, -0.1000, 60);
+  await seed("deadli", session([
+    person("Sam", { pace: 420 }),
+    person("Tess", { pace: 420 }),
+    person("Zoe", { pace: 300, latestFinishTime: "08:00" }),
+  ], [wp("startd", 51.5200, -0.1100), bigCafe, wp("endd", 51.5330, -0.0850)], { intendedDistanceKm: 6 }));
+
   // CONNECTOR ASYMMETRY: one runner with a near manual start + far manual finish — the
   // landing's headline case (departure must match the schedule, not be pulled early).
   const w1 = wp("w1", 51.5200, -0.1200);
