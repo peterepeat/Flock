@@ -1,0 +1,96 @@
+"use client";
+
+import { useRef } from "react";
+
+import Field from "@/components/ui/Field";
+import Slider from "@/components/ui/Slider";
+import Toggle from "@/components/ui/Toggle";
+import { setRunConfig } from "@/lib/flockApi";
+import type { TimeAnchor } from "@/lib/types";
+import { DISTANCE_MAX_KM, DISTANCE_MIN_KM, formatDistance } from "@/lib/units";
+import { useFlockStore } from "@/store/flockStore";
+
+/**
+ * Run-level config (defaults, never mandatory): when the flock departs and how far the
+ * run is. Both default to "auto" — 7:00 at the first waypoint, and the waypoint-tour
+ * length (or 10 km). Setting them is optional; the engine works without either.
+ */
+export default function RunSettings() {
+  const flockId = useFlockStore((s) => s.flockId);
+  const session = useFlockStore((s) => s.session);
+  const apply = useFlockStore((s) => s.applyServerSession);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  if (!session || !flockId) return null;
+  const { startAnchor, intendedDistanceKm: distance, waypoints, unitPreference } = session;
+
+  const save = (config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }, debounce = false) => {
+    const run = async () => {
+      try {
+        const s = await setRunConfig(flockId, config);
+        apply(s, true);
+      } catch {
+        /* a transient failure — the next edit or poll reconciles */
+      }
+    };
+    if (timer.current) clearTimeout(timer.current);
+    if (debounce) timer.current = setTimeout(run, 400);
+    else void run();
+  };
+
+  const timeSet = startAnchor.kind !== "auto";
+  const anchorTime = startAnchor.kind === "departure" || startAnchor.kind === "waypoint" ? startAnchor.time : "08:00";
+  const anchorTarget = startAnchor.kind === "waypoint" ? startAnchor.waypointId : "departure";
+  const setAnchor = (target: string, time: string) =>
+    save({ startAnchor: target === "departure" ? { kind: "departure", time } : { kind: "waypoint", waypointId: target, time } });
+
+  return (
+    <div className="space-y-4 rounded-xl bg-surface p-3">
+      <h3 className="text-sm font-semibold text-text">Run settings</h3>
+
+      <Field label="When does it start?" optional>
+        <Toggle
+          options={[{ value: "off", label: "7:00 default" }, { value: "on", label: "Set a time" }]}
+          value={timeSet ? "on" : "off"}
+          onChange={(v) => (v === "on" ? setAnchor("departure", anchorTime) : save({ startAnchor: { kind: "auto" } }))}
+        />
+        {timeSet && (
+          <div className="mt-2 flex gap-2">
+            {waypoints.length > 0 && (
+              <select
+                value={anchorTarget}
+                onChange={(e) => setAnchor(e.target.value, anchorTime)}
+                className="min-w-0 flex-1 rounded-lg border border-white/10 bg-surface-lift px-2 py-2 text-xs text-text outline-none focus:border-accent/60"
+              >
+                <option value="departure">Leave at</option>
+                {waypoints.map((w, i) => (
+                  <option key={w.id} value={w.id}>Be at {i + 1}. {w.name} by</option>
+                ))}
+              </select>
+            )}
+            <input
+              type="time"
+              value={anchorTime}
+              onChange={(e) => setAnchor(anchorTarget, e.target.value)}
+              className="rounded-lg border border-white/10 bg-surface-lift px-2 py-2 text-sm text-text outline-none focus:border-accent/60"
+            />
+          </div>
+        )}
+      </Field>
+
+      <Field label="How far is the run?" optional>
+        <Toggle
+          options={[{ value: "off", label: "Auto" }, { value: "on", label: "Set a distance" }]}
+          value={distance != null ? "on" : "off"}
+          onChange={(v) => save({ intendedDistanceKm: v === "on" ? 10 : null })}
+        />
+        {distance != null && (
+          <div className="mt-2">
+            <Slider min={DISTANCE_MIN_KM} max={DISTANCE_MAX_KM} value={distance} onChange={(v) => save({ intendedDistanceKm: v }, true)} format={(v) => formatDistance(v, unitPreference)} />
+            <p className="mt-1 text-xs text-fog">Otherwise we use the length of your waypoints (or 10 km).</p>
+          </div>
+        )}
+      </Field>
+    </div>
+  );
+}

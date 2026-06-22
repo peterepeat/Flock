@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 import ParticipantForm from "@/components/Panel/ParticipantForm";
 import ParticipantList from "@/components/Panel/ParticipantList";
+import RunSettings from "@/components/Panel/RunSettings";
 import TogetherStat from "@/components/Panel/TogetherStat";
 import WaypointsSection from "@/components/Panel/WaypointsSection";
 import { isMobileViewport } from "@/lib/viewport";
@@ -98,6 +99,11 @@ export default function FlockPanel() {
               </span>
             </div>
 
+            {/* The run skeleton FIRST — waypoints (where you meet / go) and the run
+                settings — then people join it. Waypoints-first by design. */}
+            {session && <WaypointsSection />}
+            {session && <RunSettings />}
+
             {!locked && (
               <button
                 type="button"
@@ -115,10 +121,6 @@ export default function FlockPanel() {
             )}
 
             <ParticipantList />
-
-            {/* Waypoints are universal — show them even before anyone joins, so a
-                flock can be sketched as a route first, people after. */}
-            {session && <WaypointsSection />}
 
             {calcError && (
               <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-text">

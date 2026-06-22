@@ -91,22 +91,28 @@ export function projectPlan(input: {
     };
   });
 
-  // --- shared segments (moving overlap only; the café glows via its waypoint) ---
+  // --- shared segments — moving stretches AND stops. A dwell counts as together-time
+  // (the café reunion is the point), so it's emitted too, as a zero-length segment at the
+  // stop; the map ignores the empty geometry but the displayed total includes it. Join
+  // detection (the "meet here" diamond) tracks the previous MOVING block so a dwell
+  // doesn't reset it. ---
   const sharedSegments: SharedSegment[] = [];
   let prevMembers: string[] = [];
   for (const b of plan.blocks) {
-    if (b.paceSec == null) continue; // a dwell — together-time counted in the summary, not a map line
     if (b.members.length >= 2) {
       const joined = b.members.some((id) => !prevMembers.includes(id));
+      const geometry = b.paceSec == null
+        ? toLine([pointAtKm(route, b.loKm), pointAtKm(route, b.loKm)])
+        : toLine(sliceKm(route, b.loKm, b.hiKm));
       sharedSegments.push({
         participantIds: b.members,
-        geometry: toLine(sliceKm(route, b.loKm, b.hiKm)),
+        geometry,
         overlapMinutes: round2((b.endSec - b.startSec) / 60),
         startTime: secToTime(b.startSec),
         isConvergence: joined,
       });
     }
-    prevMembers = b.members;
+    if (b.paceSec != null) prevMembers = b.members;
   }
 
   // --- together-time summary (wall minutes for display; pairwise per pair) ---
