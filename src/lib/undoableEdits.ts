@@ -46,32 +46,14 @@ const toInput = (w: FlockWaypoint): WaypointInput => ({
   ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
 });
 
-const fullConstraints = (p: {
-  name: string;
-  startLocation: ParticipantConstraints["startLocation"];
-  startAddress: string;
-  earliestStartTime: string | null;
-  finishLocation: ParticipantConstraints["finishLocation"];
-  finishAddress: string | null;
-  latestFinishTime: string | null;
-  preferredPace: number | null;
-  maxPace: number | null;
-  preferredDistance: number | null;
-  maxDistance: number | null;
-  restStop: ParticipantConstraints["restStop"];
-}): ParticipantConstraints => ({
+const fullConstraints = (p: ParticipantConstraints): ParticipantConstraints => ({
   name: p.name,
-  startLocation: p.startLocation,
-  startAddress: p.startAddress,
+  startPin: p.startPin,
+  finishPin: p.finishPin,
+  maxDistanceKm: p.maxDistanceKm,
+  pace: p.pace,
   earliestStartTime: p.earliestStartTime,
-  finishLocation: p.finishLocation,
-  finishAddress: p.finishAddress,
   latestFinishTime: p.latestFinishTime,
-  preferredPace: p.preferredPace,
-  maxPace: p.maxPace,
-  preferredDistance: p.preferredDistance,
-  maxDistance: p.maxDistance,
-  restStop: p.restStop,
 });
 
 export async function uAddWaypoint(flockId: string, data: WaypointInput): Promise<FlockSession> {

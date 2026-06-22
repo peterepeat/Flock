@@ -60,7 +60,7 @@ async function nameImportedInBackground(
     // there's someone to route for; with no participants yet (e.g. importing into
     // an empty flock) there's no calc, so naming proceeds immediately.
     const s = store.getState().session;
-    const recalcPending = s?.computedRoutes == null && (s?.participants.some((p) => p.startLocation) ?? false);
+    const recalcPending = s?.computedRoutes == null && (s?.participants.length ?? 0) > 0;
     if (recalcPending) return; // names keep accumulating until the route settles
     const batch = pending;
     pending = {};

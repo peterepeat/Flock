@@ -25,9 +25,7 @@ export default function ScheduleView({ participantId }: { participantId: string 
   if (!route) {
     return (
       <div className="mt-2 rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
-        {participant.startLocation
-          ? "Working out this route…"
-          : "No route yet — add a starting point."}
+        Working out this route…
       </div>
     );
   }

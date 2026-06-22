@@ -1,6 +1,5 @@
 "use client";
 
-import { flockInsight } from "@/lib/insight";
 import { formatDuration } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
 
@@ -16,7 +15,7 @@ export default function TogetherStat() {
   const shared = session.sharedSegments ?? [];
   const totalMinutes = shared.reduce((sum, s) => sum + s.overlapMinutes, 0);
   const stretches = shared.length;
-  const withDetails = session.participants.filter((p) => p.startLocation).length;
+  const withDetails = session.participants.length;
 
   // Staggered starts: everyone leaves home at their own time so they converge on
   // the flock together. Only worth saying when departures actually differ.
@@ -35,10 +34,6 @@ export default function TogetherStat() {
     );
   }
 
-  // The bottleneck certificate — who limits the time together, and why. Especially
-  // useful because each person's caps/deadlines are private to their device.
-  const insight = flockInsight(session);
-
   return (
     <div className="space-y-2">
       <div className="rounded-xl bg-together-glow p-4">
@@ -55,14 +50,6 @@ export default function TogetherStat() {
           </p>
         )}
       </div>
-      {insight && (
-        <div className="flex gap-2 rounded-xl bg-surface px-3 py-2.5 text-xs leading-snug text-text-dim">
-          <span aria-hidden className="mt-px shrink-0 text-fog">
-            ⓘ
-          </span>
-          <p>{insight.message}</p>
-        </div>
-      )}
     </div>
   );
 }

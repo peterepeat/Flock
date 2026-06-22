@@ -14,12 +14,22 @@ export interface LatLng {
 
 export type Unit = "km" | "miles";
 
-export interface RestStopPreference {
-  wantsStop: boolean;
-  durationMinutes: number; // default 30
-  location: LatLng | null; // null = "anywhere that works"
-  locationAddress: string | null;
-}
+// A location preference for where a runner joins (start) or leaves (finish) the flock.
+// "auto" = no preference — the engine places it to maximise togetherness (the default).
+// A pin to a waypoint travels WITH that waypoint if it moves and reverts to auto if the
+// waypoint is deleted. A manual pin is a specific point off the route (a connector run).
+export type LocationPin =
+  | { kind: "auto" }
+  | { kind: "waypoint"; waypointId: string }
+  | { kind: "manual"; location: LatLng; address: string };
+
+// When the flock departs. "auto" → 7:00 at the first waypoint (else first departure). A
+// departure time fixes the start; a waypoint time fixes when the flock reaches that
+// waypoint, back-computing the departure ("be at the café at 09:00").
+export type TimeAnchor =
+  | { kind: "auto" }
+  | { kind: "departure"; time: string } // "leave at 08:00"
+  | { kind: "waypoint"; waypointId: string; time: string };
 
 /**
  * A waypoint nominated for the whole flock — everyone's route passes through it,
@@ -44,22 +54,15 @@ export interface Participant {
   color: string; // assigned from palette, used on map
   addedAt: string; // ISO timestamp
 
-  // Constraints — all optional except start location.
-  startLocation: LatLng;
-  startAddress: string;
-  earliestStartTime: string | null; // "06:00" local time
-
-  finishLocation: LatLng | null; // null = return to start
-  finishAddress: string | null;
-  latestFinishTime: string | null; // "11:00" local time
-
-  preferredPace: number | null; // sec/km
-  maxPace: number | null; // faster end — must be ≤ preferredPace sec/km
-
-  preferredDistance: number | null; // km
-  maxDistance: number | null; // hard cap, km
-
-  restStop: RestStopPreference | null;
+  // Hard constraints — ALL optional. "No preference" everywhere = a full participant the
+  // engine joins to the flock wherever it maximises together-time. The objective is
+  // together-time alone; there is no distance TARGET (only a cap) and no pace floor.
+  startPin: LocationPin; // where they join — default { kind: "auto" }
+  finishPin: LocationPin; // where they leave — default { kind: "auto" }
+  maxDistanceKm: number | null; // "how far can you run" — hard cap; null = no cap
+  pace: number | null; // "how fast can you run" — sec/km; null = a sensible default
+  earliestStartTime: string | null; // optional "I can't start before…" ("06:00")
+  latestFinishTime: string | null; // optional "I must be done by…" ("11:00")
 }
 
 export interface ScheduleSegment {
@@ -104,6 +107,10 @@ export interface FlockSession {
   updatedAt: string; // ISO timestamp — used for polling change detection
   lockedAt: string | null; // set when group locks the plan
   unitPreference: Unit; // set by first participant, shown to all
+  // Run-level config (defaults, never mandatory). The flock's departure anchor and its
+  // intended distance; per-runner constraints are optional overrides.
+  startAnchor: TimeAnchor; // default { kind: "auto" } → 7:00
+  intendedDistanceKm: number | null; // set, or null → waypoint-tour length / 10 km
   participants: Participant[];
   waypoints: FlockWaypoint[]; // shared waypoints everyone routes through
   computedRoutes: ComputedRoute[] | null; // null until first calculation
@@ -144,6 +151,7 @@ export interface ReverseGeocodeResult {
 // keeps last-write-wins clobbering to a minimum and makes every change loggable.
 export type PatchAction =
   | { action: "setUnit"; unitPreference: Unit }
+  | { action: "setRunConfig"; startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }
   | { action: "addParticipant"; participant: NewParticipantInput; editToken: string }
   | {
       action: "updateParticipant";

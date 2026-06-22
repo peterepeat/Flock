@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { applyPatch, getFlock } from "@/lib/flockService";
 import { createLogger } from "@/lib/logger";
 import { RouteError } from "@/lib/ors";
-import { calculateRoutes } from "@/lib/routeEngine";
+import { calculateRoutes } from "@/lib/flock";
 
 const log = createLogger("api:routes/calculate");
 

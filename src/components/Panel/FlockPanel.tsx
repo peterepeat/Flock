@@ -29,7 +29,7 @@ export default function FlockPanel() {
   const placing = placingPin || placingFinish || placingWaypoint;
   const expanded = sheetExpanded && !placing;
   // Everyone has routes but nobody overlaps → too far apart.
-  const withStart = session?.participants.filter((p) => p.startLocation).length ?? 0;
+  const withStart = session?.participants.length ?? 0;
   const tooFarApart =
     !!session?.computedRoutes &&
     withStart >= 2 &&

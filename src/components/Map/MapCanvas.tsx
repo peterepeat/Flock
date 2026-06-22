@@ -18,7 +18,7 @@ import { ownsParticipant } from "@/lib/editTokens";
 import { uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
 import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
-import type { LatLng } from "@/lib/types";
+import type { LatLng, LocationPin } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { isMobileViewport } from "@/lib/viewport";
 import { useFlockStore } from "@/store/flockStore";
@@ -325,11 +325,15 @@ export default function MapCanvas() {
       log.error("waypoint move failed — reverted", { error: String(err) });
     }
   }
+  // A runner has a personal map marker only when their start/finish is a MANUAL pin —
+  // "no preference" and "at a waypoint" carry no separate marker.
+  const pinLoc = (pin: LocationPin): LatLng | null => (pin.kind === "manual" ? pin.location : null);
+
   async function moveStart(id: string, marker: L.Marker, origin: LatLng) {
     if (!flockId) return;
     const ll = marker.getLatLng();
     try {
-      await uUpdateParticipant(flockId, id, { startLocation: { lat: ll.lat, lng: ll.lng } }, "Move start");
+      await uUpdateParticipant(flockId, id, { startPin: { kind: "manual", location: { lat: ll.lat, lng: ll.lng }, address: "" } }, "Move start");
       log.info("start moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
     } catch (err) {
       marker.setLatLng(toLeaflet(origin));
@@ -344,8 +348,10 @@ export default function MapCanvas() {
   const allPoints = useMemo(() => {
     const pts: LatLng[] = [];
     for (const p of participants) {
-      pts.push(p.startLocation);
-      if (p.finishLocation) pts.push(p.finishLocation);
+      const sl = pinLoc(p.startPin);
+      if (sl) pts.push(sl);
+      const fl = pinLoc(p.finishPin);
+      if (fl) pts.push(fl);
     }
     for (const w of waypoints) pts.push(w.location);
     if (pendingStart) pts.push(pendingStart);
@@ -576,11 +582,13 @@ export default function MapCanvas() {
             tapping a waypoint), and you can drag it to move your start. Tapping
             someone else's (or anyone's once locked) just focuses their route. */}
         {participants.map((p) => {
+          const loc = pinLoc(p.startPin);
+          if (!loc) return null;
           const canDrag = !locked && !!flockId && ownsParticipant(flockId, p.id);
           return (
             <Marker
               key={`start-${p.id}`}
-              position={stablePos(`start-${p.id}`, p.startLocation)}
+              position={stablePos(`start-${p.id}`, loc)}
               icon={divMarker(p.color, initial(p.name), "start", canDrag)}
               draggable={canDrag}
               eventHandlers={{
@@ -593,11 +601,11 @@ export default function MapCanvas() {
                   // >3 m ground move as a real reposition. A sub-3 m "drag" is a tap
                   // with finger jitter — snap back and open the editor right here,
                   // because Leaflet swallows the click that would otherwise follow.
-                  const moved = distanceMeters(p.startLocation, { lat: ll.lat, lng: ll.lng }) > 3;
+                  const moved = distanceMeters(loc, { lat: ll.lat, lng: ll.lng }) > 3;
                   if (moved) {
-                    void moveStart(p.id, m, p.startLocation);
+                    void moveStart(p.id, m, loc);
                   } else {
-                    m.setLatLng(toLeaflet(p.startLocation));
+                    m.setLatLng(toLeaflet(loc));
                     if (canDrag) useFlockStore.getState().openEditForm(p.id);
                   }
                 },
@@ -622,11 +630,12 @@ export default function MapCanvas() {
           );
         })}
         {participants
-          .filter((p) => p.finishLocation)
-          .map((p) => (
+          .map((p) => ({ p, loc: pinLoc(p.finishPin) }))
+          .filter((x): x is { p: typeof x.p; loc: LatLng } => x.loc != null)
+          .map(({ p, loc }) => (
             <Marker
               key={`finish-${p.id}`}
-              position={toLeaflet(p.finishLocation!)}
+              position={toLeaflet(loc)}
               icon={divMarker(p.color, initial(p.name), "finish")}
             />
           ))}
@@ -682,7 +691,7 @@ export default function MapCanvas() {
       </MapContainer>
 
       {/* Gentle prompt when there isn't enough to compare yet */}
-      {participants.filter((p) => p.startLocation).length < 2 && !session?.lockedAt && (
+      {participants.length < 2 && !session?.lockedAt && (
         <div className="pointer-events-none absolute left-1/2 top-4 z-[500] -translate-x-1/2 rounded-full bg-surface-mid/90 px-4 py-2 text-xs text-text-dim shadow-panel backdrop-blur">
           Add another person to see where your routes overlap.
         </div>

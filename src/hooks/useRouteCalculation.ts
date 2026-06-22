@@ -36,7 +36,7 @@ export function useRouteCalculation(flockId: string) {
 
   const updatedAt = session?.updatedAt ?? null;
   const routesPresent = session?.computedRoutes != null;
-  const withStart = session?.participants.filter((p) => p.startLocation).length ?? 0;
+  const withStart = session?.participants.length ?? 0;
 
   useEffect(() => {
     const clearRetry = () => {

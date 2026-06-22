@@ -55,6 +55,8 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     updatedAt: ts,
     lockedAt: null,
     unitPreference,
+    startAnchor: { kind: "auto" },
+    intendedDistanceKm: null,
     participants: [],
     waypoints: [],
     computedRoutes: null,
@@ -70,9 +72,39 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
 
 export async function getFlock(id: string): Promise<FlockSession | null> {
   const session = await getStore().getFlock(id);
-  // Normalise sessions created before shared waypoints existed.
-  if (session && !session.waypoints) session.waypoints = [];
+  if (session) normalizeSession(session);
   return session;
+}
+
+/**
+ * Migrate a stored session to the social-first model in place: fill run-level defaults and
+ * convert any legacy participant (startLocation/preferredDistance/maxDistance/preferredPace)
+ * to the pin model — an old home becomes a manual start pin, an old finish a manual finish
+ * pin, the old hard cap becomes maxDistanceKm. Idempotent; a no-op for new sessions.
+ */
+function normalizeSession(session: FlockSession): void {
+  if (!session.waypoints) session.waypoints = [];
+  if (!session.startAnchor) session.startAnchor = { kind: "auto" };
+  if (session.intendedDistanceKm === undefined) session.intendedDistanceKm = null;
+  for (const p of session.participants) {
+    const legacy = p as unknown as Record<string, unknown>;
+    if (!p.startPin) {
+      const sl = legacy.startLocation;
+      p.startPin = isValidLatLng(sl)
+        ? { kind: "manual", location: sl, address: (legacy.startAddress as string) ?? "" }
+        : { kind: "auto" };
+    }
+    if (!p.finishPin) {
+      const fl = legacy.finishLocation;
+      p.finishPin = isValidLatLng(fl)
+        ? { kind: "manual", location: fl, address: (legacy.finishAddress as string) ?? "" }
+        : { kind: "auto" };
+    }
+    if (p.maxDistanceKm === undefined) p.maxDistanceKm = (legacy.maxDistance as number) ?? null;
+    if (p.pace === undefined) p.pace = (legacy.preferredPace as number) ?? null;
+    if (p.earliestStartTime === undefined) p.earliestStartTime = (legacy.earliestStartTime as string) ?? null;
+    if (p.latestFinishTime === undefined) p.latestFinishTime = (legacy.latestFinishTime as string) ?? null;
+  }
 }
 
 function isValidLatLng(v: unknown): v is { lat: number; lng: number } {
@@ -99,6 +131,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     action.action === "updateParticipant" ||
     action.action === "removeParticipant" ||
     action.action === "setUnit" ||
+    action.action === "setRunConfig" ||
     action.action === "addWaypoint" ||
     action.action === "updateWaypoint" ||
     action.action === "removeWaypoint" ||
@@ -118,11 +151,17 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       break;
     }
 
+    case "setRunConfig": {
+      if (action.startAnchor !== undefined) session.startAnchor = action.startAnchor;
+      if (action.intendedDistanceKm !== undefined) session.intendedDistanceKm = action.intendedDistanceKm;
+      clearComputed(session);
+      log.info("run config set", { id, anchor: session.startAnchor.kind, distance: session.intendedDistanceKm });
+      break;
+    }
+
     case "addParticipant": {
       const p = action.participant;
       if (!p?.name?.trim()) return { ok: false, status: 400, error: "Name is required" };
-      if (!isValidLatLng(p.startLocation))
-        return { ok: false, status: 400, error: "A start location is required" };
 
       const pid = p.id || newParticipantId();
       if (session.participants.some((x) => x.id === pid)) {
@@ -134,17 +173,12 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         name: p.name.trim(),
         color: nextColor(session.participants.map((x) => x.color)),
         addedAt: now(),
-        startLocation: p.startLocation,
-        startAddress: p.startAddress ?? "",
+        startPin: p.startPin ?? { kind: "auto" },
+        finishPin: p.finishPin ?? { kind: "auto" },
+        maxDistanceKm: p.maxDistanceKm ?? null,
+        pace: p.pace ?? null,
         earliestStartTime: p.earliestStartTime ?? null,
-        finishLocation: p.finishLocation ?? null,
-        finishAddress: p.finishAddress ?? null,
         latestFinishTime: p.latestFinishTime ?? null,
-        preferredPace: p.preferredPace ?? null,
-        maxPace: p.maxPace ?? null,
-        preferredDistance: p.preferredDistance ?? null,
-        maxDistance: p.maxDistance ?? null,
-        restStop: p.restStop ?? null,
       };
 
       session.participants.push(participant);
@@ -176,17 +210,12 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.participants[idx] = {
         ...current,
         name: u.name?.trim() || current.name,
-        startLocation: isValidLatLng(u.startLocation) ? u.startLocation : current.startLocation,
-        startAddress: u.startAddress ?? current.startAddress,
+        startPin: u.startPin !== undefined ? u.startPin : current.startPin,
+        finishPin: u.finishPin !== undefined ? u.finishPin : current.finishPin,
+        maxDistanceKm: u.maxDistanceKm !== undefined ? u.maxDistanceKm : current.maxDistanceKm,
+        pace: u.pace !== undefined ? u.pace : current.pace,
         earliestStartTime: u.earliestStartTime !== undefined ? u.earliestStartTime : current.earliestStartTime,
-        finishLocation: u.finishLocation !== undefined ? u.finishLocation : current.finishLocation,
-        finishAddress: u.finishAddress !== undefined ? u.finishAddress : current.finishAddress,
         latestFinishTime: u.latestFinishTime !== undefined ? u.latestFinishTime : current.latestFinishTime,
-        preferredPace: u.preferredPace !== undefined ? u.preferredPace : current.preferredPace,
-        maxPace: u.maxPace !== undefined ? u.maxPace : current.maxPace,
-        preferredDistance: u.preferredDistance !== undefined ? u.preferredDistance : current.preferredDistance,
-        maxDistance: u.maxDistance !== undefined ? u.maxDistance : current.maxDistance,
-        restStop: u.restStop !== undefined ? u.restStop : current.restStop,
       };
       clearComputed(session);
       log.info("participant updated", { id, participantId: action.participantId });
@@ -275,6 +304,15 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       const exists = session.waypoints.some((w) => w.id === action.waypointId);
       if (!exists) return { ok: false, status: 404, error: "Waypoint not found" };
       session.waypoints = session.waypoints.filter((w) => w.id !== action.waypointId);
+      // A pin to the deleted waypoint reverts to "no preference" (NOT decoupled to its
+      // last location) — the runner just rejoins wherever it's best. The time anchor too.
+      for (const p of session.participants) {
+        if (p.startPin.kind === "waypoint" && p.startPin.waypointId === action.waypointId) p.startPin = { kind: "auto" };
+        if (p.finishPin.kind === "waypoint" && p.finishPin.waypointId === action.waypointId) p.finishPin = { kind: "auto" };
+      }
+      if (session.startAnchor.kind === "waypoint" && session.startAnchor.waypointId === action.waypointId) {
+        session.startAnchor = { kind: "auto" };
+      }
       clearComputed(session);
       log.info("waypoint removed", { id, waypointId: action.waypointId });
       break;
@@ -282,13 +320,24 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
 
     case "reorderWaypoints": {
       // Reorder by the given id list; any waypoint not named keeps its relative
-      // order, appended after (defensive against a stale client list).
+      // order, appended after (defensive against a stale client list). Pins travel WITH
+      // their waypoint (they reference it by id), so no decoupling.
       const byId = new Map(session.waypoints.map((w) => [w.id, w]));
       const named = action.waypointIds
         .map((wid) => byId.get(wid))
         .filter((w): w is FlockWaypoint => w != null);
       const rest = session.waypoints.filter((w) => !action.waypointIds.includes(w.id));
       session.waypoints = [...named, ...rest];
+      // Keep the dropdown invariant: a finish pinned BEFORE the start (after reorder)
+      // reverts to "no preference".
+      const order = new Map(session.waypoints.map((w, i) => [w.id, i]));
+      for (const p of session.participants) {
+        if (p.startPin.kind === "waypoint" && p.finishPin.kind === "waypoint") {
+          const si = order.get(p.startPin.waypointId);
+          const fi = order.get(p.finishPin.waypointId);
+          if (si != null && fi != null && fi <= si) p.finishPin = { kind: "auto" };
+        }
+      }
       clearComputed(session);
       log.info("waypoints reordered", { id, order: session.waypoints.map((w) => w.id.slice(0, 4)) });
       break;

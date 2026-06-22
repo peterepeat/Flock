@@ -15,12 +15,11 @@ import {
 } from "@/lib/flockApi";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
-import type { LatLng, Participant, ParticipantConstraints, Unit } from "@/lib/types";
+import type { LatLng, LocationPin, Participant, ParticipantConstraints, Unit } from "@/lib/types";
 import { recordParticipantEdit, uSetUnit } from "@/lib/undoableEdits";
 import {
   DISTANCE_MAX_KM,
   DISTANCE_MIN_KM,
-  DISTANCE_TARGET_BAND,
   formatDistance,
   formatPace,
   PACE_MAX_SEC_PER_KM,
@@ -32,61 +31,70 @@ import { useFlockStore } from "@/store/flockStore";
 
 const log = createLogger("participant-form");
 
-// Time-of-day window for the "time constraints" slider (minutes since midnight).
 const TIME_MIN = 4 * 60; // 04:00
 const TIME_MAX = 22 * 60; // 22:00
 const TIME_STEP = 15;
 const toMin = (t: string | null, fallback: number) => (t ? Math.round(timeToSec(t) / 60) : fallback);
 
+// A start/finish preference: no preference (the engine places it), at a configured
+// waypoint, or a specific place (a map pin / address).
+type PinMode = "auto" | "waypoint" | "manual";
+interface PinDraft {
+  mode: PinMode;
+  waypointId: string; // when mode === "waypoint"
+  location: LatLng | null; // when mode === "manual"
+  address: string;
+}
+const emptyPin = (): PinDraft => ({ mode: "auto", waypointId: "", location: null, address: "" });
+
 interface Draft {
   name: string;
-  startLocation: LatLng | null;
-  startAddress: string;
-  finishMode: "start" | "elsewhere";
-  finishLocation: LatLng | null;
-  finishAddress: string | null;
-  distanceOn: boolean;
-  distanceKm: number; // single "how far" target
-  paceOn: boolean;
-  paceSec: number; // single comfortable pace (sec/km)
+  start: PinDraft;
+  finish: PinDraft;
+  distanceOn: boolean; // "how far can you run" — a hard cap
+  distanceKm: number;
+  paceOn: boolean; // "how fast can you run"
+  paceSec: number;
   timeOn: boolean;
-  earliestMin: number; // can't leave before (minutes since midnight)
-  latestMin: number; // must be done by
+  earliestMin: number;
+  latestMin: number;
 }
 
 function emptyDraft(): Draft {
   return {
     name: "",
-    startLocation: null,
-    startAddress: "",
-    finishMode: "start",
-    finishLocation: null,
-    finishAddress: null,
+    start: emptyPin(),
+    finish: emptyPin(),
     distanceOn: false,
     distanceKm: 8,
     paceOn: false,
-    paceSec: 360, // 6:00 /km — a comfortable default
+    paceSec: 360, // 6:00 /km
     timeOn: false,
-    earliestMin: 7 * 60, // 07:00
-    latestMin: 10 * 60, // 10:00
+    earliestMin: 7 * 60,
+    latestMin: 10 * 60,
   };
 }
 
-/** A participant's editable constraints — used to snapshot state at edit-open. */
+function pinToDraft(pin: LocationPin): PinDraft {
+  if (pin.kind === "waypoint") return { mode: "waypoint", waypointId: pin.waypointId, location: null, address: "" };
+  if (pin.kind === "manual") return { mode: "manual", waypointId: "", location: pin.location, address: pin.address };
+  return emptyPin();
+}
+function draftToPin(d: PinDraft): LocationPin {
+  if (d.mode === "waypoint" && d.waypointId) return { kind: "waypoint", waypointId: d.waypointId };
+  if (d.mode === "manual" && d.location) return { kind: "manual", location: d.location, address: d.address || "Dropped pin" };
+  return { kind: "auto" };
+}
+
 function toConstraints(p: Participant): ParticipantConstraints {
   return {
     name: p.name,
-    startLocation: p.startLocation,
-    startAddress: p.startAddress,
+    startPin: p.startPin,
+    finishPin: p.finishPin,
+    maxDistanceKm: p.maxDistanceKm,
+    pace: p.pace,
     earliestStartTime: p.earliestStartTime,
-    finishLocation: p.finishLocation,
-    finishAddress: p.finishAddress,
     latestFinishTime: p.latestFinishTime,
-    preferredPace: p.preferredPace,
-    maxPace: p.maxPace,
-    preferredDistance: p.preferredDistance,
-    maxDistance: p.maxDistance,
-    restStop: p.restStop,
   };
 }
 
@@ -108,6 +116,7 @@ export default function ParticipantForm() {
   const setPendingFinish = useFlockStore((s) => s.setPendingFinish);
 
   const unit: Unit = session?.unitPreference ?? "km";
+  const waypoints = useMemo(() => session?.waypoints ?? [], [session]);
   const isFirstParticipant = (session?.participants.length ?? 0) === 0 && !editingId;
 
   const existing = useMemo(
@@ -121,9 +130,6 @@ export default function ParticipantForm() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const initialised = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // For one-undo-per-edit-session: constraints at open vs the last value actually
-  // PERSISTED (a debounced edit cancelled on close was never saved, so recording
-  // the live draft would make redo restore a never-persisted state).
   const priorConstraintsRef = useRef<ParticipantConstraints | null>(null);
   const lastSavedConstraintsRef = useRef<ParticipantConstraints | null>(null);
 
@@ -136,15 +142,12 @@ export default function ParticipantForm() {
       priorConstraintsRef.current = toConstraints(existing);
       setDraft({
         name: existing.name,
-        startLocation: existing.startLocation,
-        startAddress: existing.startAddress,
-        finishMode: existing.finishLocation ? "elsewhere" : "start",
-        finishLocation: existing.finishLocation,
-        finishAddress: existing.finishAddress,
-        distanceOn: existing.preferredDistance != null,
-        distanceKm: existing.preferredDistance ?? 8,
-        paceOn: existing.preferredPace != null,
-        paceSec: existing.preferredPace ?? 360,
+        start: pinToDraft(existing.startPin),
+        finish: pinToDraft(existing.finishPin),
+        distanceOn: existing.maxDistanceKm != null,
+        distanceKm: existing.maxDistanceKm ?? 8,
+        paceOn: existing.pace != null,
+        paceSec: existing.pace ?? 360,
         timeOn: existing.earliestStartTime != null || existing.latestFinishTime != null,
         earliestMin: toMin(existing.earliestStartTime, 7 * 60),
         latestMin: toMin(existing.latestFinishTime, 10 * 60),
@@ -152,92 +155,57 @@ export default function ParticipantForm() {
     }
   }, [existing]);
 
-  // Publish the draft's start / finish to the map so the pins show live.
+  // Publish a manual start/finish pin to the map so it shows live.
   useEffect(() => {
-    setPendingStart(draft.startLocation);
-  }, [draft.startLocation, setPendingStart]);
+    setPendingStart(draft.start.mode === "manual" ? draft.start.location : null);
+  }, [draft.start.mode, draft.start.location, setPendingStart]);
   useEffect(() => {
-    setPendingFinish(draft.finishMode === "elsewhere" ? draft.finishLocation : null);
-  }, [draft.finishMode, draft.finishLocation, setPendingFinish]);
+    setPendingFinish(draft.finish.mode === "manual" ? draft.finish.location : null);
+  }, [draft.finish.mode, draft.finish.location, setPendingFinish]);
 
-  // Fold a map-dropped start pin into the draft, then reverse-geocode it to name
-  // the spot (a nearby POI / address) — non-blocking, and only if the user hasn't
-  // since typed an address or moved the pin.
+  // Fold a map-dropped start pin into the draft + reverse-name it.
   useEffect(() => {
     if (!draftStart) return;
     const ll = draftStart;
-    setDraft((d) => ({ ...d, startLocation: ll, startAddress: d.startAddress || "Dropped pin" }));
+    setDraft((d) => ({ ...d, start: { ...d.start, mode: "manual", location: ll, address: d.start.address || "Dropped pin" } }));
     setPlacingPin(false);
     setDraftStart(null);
-    log.debug("start pin dropped", { ll });
     reverseGeocode(ll.lat, ll.lng).then((r) => {
       const label = pinLabel(r);
       if (!label) return;
-      setDraft((d) => {
-        const same = d.startLocation?.lat === ll.lat && d.startLocation?.lng === ll.lng;
-        return same && (!d.startAddress || d.startAddress === "Dropped pin")
-          ? { ...d, startAddress: label }
-          : d;
-      });
+      setDraft((d) => (d.start.location?.lat === ll.lat && d.start.location?.lng === ll.lng && (!d.start.address || d.start.address === "Dropped pin") ? { ...d, start: { ...d.start, address: label } } : d));
     });
   }, [draftStart, setPlacingPin, setDraftStart]);
 
-  // Fold a map-dropped finish pin into the draft, then reverse-name it (as above).
   useEffect(() => {
     if (!draftFinish) return;
     const ll = draftFinish;
-    setDraft((d) => ({
-      ...d,
-      finishMode: "elsewhere",
-      finishLocation: ll,
-      finishAddress: d.finishAddress || "Dropped pin",
-    }));
+    setDraft((d) => ({ ...d, finish: { ...d.finish, mode: "manual", location: ll, address: d.finish.address || "Dropped pin" } }));
     setPlacingFinish(false);
     setDraftFinish(null);
-    log.debug("finish pin dropped", { ll });
     reverseGeocode(ll.lat, ll.lng).then((r) => {
       const label = pinLabel(r);
       if (!label) return;
-      setDraft((d) => {
-        const same = d.finishLocation?.lat === ll.lat && d.finishLocation?.lng === ll.lng;
-        return same && (!d.finishAddress || d.finishAddress === "Dropped pin")
-          ? { ...d, finishAddress: label }
-          : d;
-      });
+      setDraft((d) => (d.finish.location?.lat === ll.lat && d.finish.location?.lng === ll.lng && (!d.finish.address || d.finish.address === "Dropped pin") ? { ...d, finish: { ...d.finish, address: label } } : d));
     });
   }, [draftFinish, setPlacingFinish, setDraftFinish]);
 
   function buildConstraints(d: Draft): ParticipantConstraints | null {
-    if (!d.name.trim() || !d.startLocation) return null;
+    if (!d.name.trim()) return null;
     return {
       name: d.name.trim(),
-      startLocation: d.startLocation,
-      startAddress: d.startAddress || "Dropped pin",
+      startPin: draftToPin(d.start),
+      finishPin: draftToPin(d.finish),
+      maxDistanceKm: d.distanceOn ? d.distanceKm : null,
+      pace: d.paceOn ? d.paceSec : null,
       earliestStartTime: d.timeOn ? secToTime(d.earliestMin * 60) : null,
-      finishLocation: d.finishMode === "elsewhere" ? d.finishLocation : null,
-      finishAddress: d.finishMode === "elsewhere" ? d.finishAddress : null,
       latestFinishTime: d.timeOn ? secToTime(d.latestMin * 60) : null,
-      // One stated pace → the engine's only pace input. maxPace is unused by the
-      // engine (the flock runs at the slowest present preferred pace), so it's null.
-      preferredPace: d.paceOn ? d.paceSec : null,
-      maxPace: null,
-      // One stated distance → the engine's target. maxDistance is handed a small
-      // headroom band so the stated number reads as "about this far" (a target to
-      // centre on), not a hard ceiling. See DISTANCE_TARGET_BAND in units.ts.
-      preferredDistance: d.distanceOn ? d.distanceKm : null,
-      maxDistance: d.distanceOn ? Math.round(d.distanceKm * (1 + DISTANCE_TARGET_BAND) * 10) / 10 : null,
-      restStop: null, // stops are now shared waypoints, set by the flock
     };
   }
 
   const constraints = buildConstraints(draft);
   const canSave = constraints != null;
 
-  // On closing an EDIT session, record ONE undo step reverting to the open-time
-  // constraints — the per-keystroke autosaves below are deliberately not each
-  // undoable. `next` comes from the last PERSISTED constraints so undo/redo match
-  // the server. editingId/flockId from first render identify the session (null for
-  // a new-join, which isn't an undoable edit).
   useEffect(() => {
     return () => {
       const prior = priorConstraintsRef.current;
@@ -249,10 +217,9 @@ export default function ParticipantForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-save (edit mode only): debounce 500ms after the last change.
+  // Auto-save (edit mode): debounce 500ms.
   useEffect(() => {
-    if (!targetId) return; // creation uses the explicit button
-    if (!constraints) return;
+    if (!targetId || !constraints) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveState("saving");
     saveTimer.current = setTimeout(async () => {
@@ -261,11 +228,9 @@ export default function ParticipantForm() {
         applyServerSession(updated, true);
         lastSavedConstraintsRef.current = constraints;
         setSaveState("saved");
-        log.debug("autosaved", { targetId });
       } catch (err) {
         setSaveState("error");
         setErrorMsg(err instanceof FlockApiError ? err.message : "Could not save");
-        log.error("autosave failed", { targetId, error: String(err) });
       }
     }, 500);
     return () => {
@@ -283,12 +248,10 @@ export default function ParticipantForm() {
       applyServerSession(updated, true);
       setTargetId(participantId);
       setSaveState("saved");
-      log.info("created participant", { participantId });
       closeForm();
     } catch (err) {
       setSaveState("error");
       setErrorMsg(err instanceof FlockApiError ? err.message : "Could not save your details");
-      log.error("create failed", { error: String(err) });
     }
   }
 
@@ -297,26 +260,23 @@ export default function ParticipantForm() {
     try {
       const updated = await removeParticipant(flockId, targetId);
       applyServerSession(updated, true);
-      log.info("left the flock", { targetId });
       closeForm();
     } catch (err) {
       setErrorMsg(err instanceof FlockApiError ? err.message : "Could not remove");
     }
   }
 
-  function set<K extends keyof Draft>(key: K, value: Draft[K]) {
-    setDraft((d) => ({ ...d, [key]: value }));
-  }
+  const setStart = (patch: Partial<PinDraft>) => setDraft((d) => ({ ...d, start: { ...d.start, ...patch } }));
+  const setFinish = (patch: Partial<PinDraft>) => setDraft((d) => ({ ...d, finish: { ...d.finish, ...patch } }));
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
-  // Start / finish pin placement are mutually exclusive map modes.
-  const toggleStartPin = () => {
-    setPlacingFinish(false);
-    setPlacingPin(!placingPin);
-  };
-  const toggleFinishPin = () => {
-    setPlacingPin(false);
-    setPlacingFinish(!placingFinish);
-  };
+  const toggleStartPin = () => { setPlacingFinish(false); setPlacingPin(!placingPin); };
+  const toggleFinishPin = () => { setPlacingPin(false); setPlacingFinish(!placingFinish); };
+
+  // Finish may only pin to a waypoint AT OR AFTER the start waypoint (keep the order
+  // invariant), shown last-first per the design.
+  const startWpIndex = draft.start.mode === "waypoint" ? waypoints.findIndex((w) => w.id === draft.start.waypointId) : -1;
+  const finishWaypoints = waypoints.map((w, i) => ({ w, i })).filter(({ i }) => i > startWpIndex).reverse();
 
   return (
     <div className="space-y-6">
@@ -325,18 +285,9 @@ export default function ParticipantForm() {
         <span className="text-xs text-text-dim">This flock is using</span>
         {isFirstParticipant ? (
           <Toggle<Unit>
-            options={[
-              { value: "km", label: "km" },
-              { value: "miles", label: "miles" },
-            ]}
+            options={[{ value: "km", label: "km" }, { value: "miles", label: "miles" }]}
             value={unit}
-            onChange={async (u) => {
-              try {
-                await uSetUnit(flockId, u);
-              } catch (err) {
-                log.error("set unit failed", { error: String(err) });
-              }
-            }}
+            onChange={async (u) => { try { await uSetUnit(flockId, u); } catch (err) { log.error("set unit failed", { error: String(err) }); } }}
           />
         ) : (
           <span className="mono text-sm text-text">{unit}</span>
@@ -354,115 +305,64 @@ export default function ParticipantForm() {
         />
       </Field>
 
-      {/* Start */}
-      <Field label="Where are you starting from?">
-        <AddressSearch
-          initialValue={draft.startAddress === "Dropped pin" ? "" : draft.startAddress}
-          placeholder="Search for your starting point"
-          onSelect={(r) => {
-            set("startLocation", { lat: r.lat, lng: r.lng });
-            set("startAddress", r.shortName);
-          }}
+      {/* Start pin */}
+      <Field label="Where do you join?" optional>
+        <PinPicker
+          mode={draft.start.mode}
+          onMode={(m) => setStart({ mode: m })}
+          waypoints={waypoints.map((w, i) => ({ id: w.id, label: `${i + 1}. ${w.name}` }))}
+          waypointId={draft.start.waypointId}
+          onWaypoint={(id) => setStart({ waypointId: id })}
+          location={draft.start.location}
+          address={draft.start.address}
+          onSearch={(r) => setStart({ location: { lat: r.lat, lng: r.lng }, address: r.shortName })}
+          placing={placingPin}
+          onTogglePin={toggleStartPin}
         />
-        <div className="mt-2 flex items-center gap-3">
-          <button
-            type="button"
-            onClick={toggleStartPin}
-            className={`text-xs ${placingPin ? "text-accent" : "text-fog hover:text-text"}`}
-          >
-            {placingPin ? "Tap the map to drop your pin…" : "…or tap the map to drop a pin"}
-          </button>
-          {draft.startLocation && (
-            <span className="mono text-xs text-together">
-              ✓ {draft.startLocation.lat.toFixed(4)}, {draft.startLocation.lng.toFixed(4)}
-            </span>
-          )}
-        </div>
       </Field>
 
-      {/* Finish — right below start */}
-      <Field label="Where are you finishing?">
-        <Toggle
-          options={[
-            { value: "start", label: "Back where I started" },
-            { value: "elsewhere", label: "Somewhere else" },
-          ]}
-          value={draft.finishMode}
-          onChange={(v) => set("finishMode", v as "start" | "elsewhere")}
+      {/* Finish pin */}
+      <Field label="Where do you leave?" optional>
+        <PinPicker
+          mode={draft.finish.mode}
+          onMode={(m) => setFinish({ mode: m })}
+          waypoints={finishWaypoints.map(({ w, i }) => ({ id: w.id, label: `${i + 1}. ${w.name}` }))}
+          waypointId={draft.finish.waypointId}
+          onWaypoint={(id) => setFinish({ waypointId: id })}
+          location={draft.finish.location}
+          address={draft.finish.address}
+          onSearch={(r) => setFinish({ location: { lat: r.lat, lng: r.lng }, address: r.shortName })}
+          placing={placingFinish}
+          onTogglePin={toggleFinishPin}
         />
-        {draft.finishMode === "elsewhere" && (
-          <div className="mt-3">
-            <AddressSearch
-              initialValue={draft.finishAddress === "Dropped pin" ? "" : draft.finishAddress ?? ""}
-              placeholder="Where are you finishing?"
-              onSelect={(r) => {
-                set("finishLocation", { lat: r.lat, lng: r.lng });
-                set("finishAddress", r.shortName);
-              }}
-            />
-            <div className="mt-2 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={toggleFinishPin}
-                className={`text-xs ${placingFinish ? "text-accent" : "text-fog hover:text-text"}`}
-              >
-                {placingFinish ? "Tap the map to drop your pin…" : "…or tap the map to drop a pin"}
-              </button>
-              {draft.finishLocation && (
-                <span className="mono text-xs text-together">
-                  ✓ {draft.finishLocation.lat.toFixed(4)}, {draft.finishLocation.lng.toFixed(4)}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
       </Field>
 
-      {/* Distance — a single target the flock centres your run on, not a hard cap. */}
-      <Field label="How far do you want to run?" optional>
+      {/* How far can you run? — a hard cap */}
+      <Field label="How far can you run?" optional>
         <Toggle
-          options={[
-            { value: "off", label: "No preference" },
-            { value: "on", label: "Set a distance" },
-          ]}
+          options={[{ value: "off", label: "No limit" }, { value: "on", label: "Set a limit" }]}
           value={draft.distanceOn ? "on" : "off"}
           onChange={(v) => set("distanceOn", v === "on")}
         />
         {draft.distanceOn && (
           <div className="mt-3">
-            <Slider
-              min={DISTANCE_MIN_KM}
-              max={DISTANCE_MAX_KM}
-              value={draft.distanceKm}
-              onChange={(v) => set("distanceKm", v)}
-              format={(v) => formatDistance(v, unit)}
-            />
-            <p className="mt-1 text-xs text-fog">Roughly this far — we’ll get you close.</p>
+            <Slider min={DISTANCE_MIN_KM} max={DISTANCE_MAX_KM} value={draft.distanceKm} onChange={(v) => set("distanceKm", v)} format={(v) => formatDistance(v, unit)} />
+            <p className="mt-1 text-xs text-fog">The most you’ll run — you’ll peel off when you reach it.</p>
           </div>
         )}
       </Field>
 
-      {/* Pace — a single comfortable pace; the flock runs at the slowest one present. */}
-      <Field label="How fast do you run?" optional>
+      {/* How fast can you run? */}
+      <Field label="How fast can you run?" optional>
         <Toggle
-          options={[
-            { value: "off", label: "No preference" },
-            { value: "on", label: "Set a pace" },
-          ]}
+          options={[{ value: "off", label: "No preference" }, { value: "on", label: "Set a pace" }]}
           value={draft.paceOn ? "on" : "off"}
           onChange={(v) => set("paceOn", v === "on")}
         />
         {draft.paceOn && (
           <div className="mt-3">
-            <Slider
-              min={PACE_MIN_SEC_PER_KM}
-              max={PACE_MAX_SEC_PER_KM}
-              step={5}
-              value={draft.paceSec}
-              onChange={(v) => set("paceSec", v)}
-              format={(v) => formatPace(v, unit)}
-            />
-            <p className="mt-1 text-xs text-fog">Your comfortable pace — the flock keeps to its slowest.</p>
+            <Slider min={PACE_MIN_SEC_PER_KM} max={PACE_MAX_SEC_PER_KM} step={5} value={draft.paceSec} onChange={(v) => set("paceSec", v)} format={(v) => formatPace(v, unit)} />
+            <p className="mt-1 text-xs text-fog">The flock runs at its slowest, so everyone stays together.</p>
           </div>
         )}
       </Field>
@@ -470,30 +370,17 @@ export default function ParticipantForm() {
       {/* Time constraints */}
       <Field label="What are your time constraints?" optional>
         <Toggle
-          options={[
-            { value: "off", label: "No preference" },
-            { value: "on", label: "Set a range" },
-          ]}
+          options={[{ value: "off", label: "No preference" }, { value: "on", label: "Set a range" }]}
           value={draft.timeOn ? "on" : "off"}
           onChange={(v) => set("timeOn", v === "on")}
         />
         {draft.timeOn && (
           <div className="mt-3">
             <RangeSlider
-              min={TIME_MIN}
-              max={TIME_MAX}
-              step={TIME_STEP}
-              low={draft.earliestMin}
-              high={draft.latestMin}
-              onChange={(low, high) => {
-                set("earliestMin", low);
-                set("latestMin", high);
-              }}
+              min={TIME_MIN} max={TIME_MAX} step={TIME_STEP} low={draft.earliestMin} high={draft.latestMin}
+              onChange={(low, high) => { set("earliestMin", low); set("latestMin", high); }}
               format={(m) => secToTime(m * 60)}
-              leftThumb="square"
-              rightThumb="square"
-              leftLabel="Can't leave before"
-              rightLabel="Must be done by"
+              leftThumb="square" rightThumb="square" leftLabel="Can't leave before" rightLabel="Must be done by"
             />
           </div>
         )}
@@ -511,42 +398,73 @@ export default function ParticipantForm() {
               {saveState === "error" && "Couldn’t save"}
             </span>
             <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={handleRemove}
-                className="text-xs text-fog hover:text-accent"
-              >
-                Leave the flock
-              </button>
-              <button
-                type="button"
-                onClick={closeForm}
-                className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white hover:brightness-110"
-              >
-                Done
-              </button>
+              <button type="button" onClick={handleRemove} className="text-xs text-fog hover:text-accent">Leave the flock</button>
+              <button type="button" onClick={closeForm} className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white hover:brightness-110">Done</button>
             </div>
           </>
         ) : (
           <>
-            <button
-              type="button"
-              onClick={closeForm}
-              className="text-sm text-fog hover:text-text"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={!canSave || saveState === "saving"}
-              onClick={handleCreate}
-              className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {saveState === "saving" ? "Saving…" : "Save my details"}
+            <button type="button" onClick={closeForm} className="text-sm text-fog hover:text-text">Cancel</button>
+            <button type="button" disabled={!canSave || saveState === "saving"} onClick={handleCreate} className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50">
+              {saveState === "saving" ? "Saving…" : "Join the flock"}
             </button>
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// --- the start/finish pin selector --------------------------------------------
+function PinPicker(props: {
+  mode: PinMode;
+  onMode: (m: PinMode) => void;
+  waypoints: { id: string; label: string }[];
+  waypointId: string;
+  onWaypoint: (id: string) => void;
+  location: LatLng | null;
+  address: string;
+  onSearch: (r: { lat: number; lng: number; shortName: string }) => void;
+  placing: boolean;
+  onTogglePin: () => void;
+}) {
+  const { mode, onMode, waypoints, waypointId, onWaypoint, location, address, onSearch, placing, onTogglePin } = props;
+  const opts: { value: PinMode; label: string }[] = [
+    { value: "auto", label: "No preference" },
+    ...(waypoints.length ? [{ value: "waypoint" as const, label: "At a waypoint" }] : []),
+    { value: "manual", label: "A specific place" },
+  ];
+  return (
+    <div>
+      <Toggle options={opts} value={mode} onChange={(v) => onMode(v as PinMode)} />
+      {mode === "waypoint" && waypoints.length > 0 && (
+        <select
+          value={waypointId || waypoints[0]?.id}
+          onChange={(e) => onWaypoint(e.target.value)}
+          className="mt-3 w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none focus:border-accent/60"
+        >
+          {waypoints.map((w) => (
+            <option key={w.id} value={w.id}>{w.label}</option>
+          ))}
+        </select>
+      )}
+      {mode === "manual" && (
+        <div className="mt-3">
+          <AddressSearch
+            initialValue={address === "Dropped pin" ? "" : address}
+            placeholder="Search for a place"
+            onSelect={(r) => onSearch(r)}
+          />
+          <div className="mt-2 flex items-center gap-3">
+            <button type="button" onClick={onTogglePin} className={`text-xs ${placing ? "text-accent" : "text-fog hover:text-text"}`}>
+              {placing ? "Tap the map to drop your pin…" : "…or tap the map to drop a pin"}
+            </button>
+            {location && (
+              <span className="mono text-xs text-together">✓ {location.lat.toFixed(4)}, {location.lng.toFixed(4)}</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
