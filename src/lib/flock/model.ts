@@ -42,7 +42,8 @@ export interface Runner {
   pace: Pace; // "how fast can you run" — feeds slowest-present
   enter: Bound; // from the start pin
   exit: Bound; // from the finish pin
-  maxDistanceKm: number | null; // "how far can you run" — hard cap on covered arc; null = none
+  maxDistanceKm: number | null; // "how far can you run" — hard cap on TOTAL distance (connector + arc); null = none
+  earliestSec: number | null; // hard "can't start before" floor (absolute seconds); null = none
   latestSec: number | null; // hard finish deadline (absolute seconds); null = none
   connectorKm: number; // solo distance to/from a manual pin off the route (0 for auto/waypoint)
 }

@@ -93,18 +93,23 @@ function resolveWindows(input: RunInput): Map<string, Window> {
 
   const lowerOf = (r: Runner) => (r.enter.kind === "fixed" ? clamp(r.enter.km, 0, L) : null);
   const upperOf = (r: Runner) => (r.exit.kind === "fixed" ? clamp(r.exit.km, 0, L) : null);
+  // "How far can you run" caps the TOTAL distance — the connector commute to/from a manual
+  // pin counts against it — so the on-spine arc may be at most (cap − connector).
+  const arcCapOf = (r: Runner) => (r.maxDistanceKm != null ? Math.max(0, r.maxDistanceKm - r.connectorKm) : null);
   const wins = new Map<string, Window>();
   for (const r of runners) {
     const lo = lowerOf(r) ?? 0;
     let hi = upperOf(r) ?? L;
-    if (r.maxDistanceKm != null) hi = Math.min(hi, lo + r.maxDistanceKm);
+    const ac = arcCapOf(r);
+    if (ac != null) hi = Math.min(hi, lo + ac);
     wins.set(r.id, { enterKm: lo, exitKm: Math.max(lo, hi) });
   }
 
   // Only runners with genuine freedom need solving (a free end and/or a slack cap).
-  const free = runners.filter(
-    (r) => r.enter.kind === "free" || r.exit.kind === "free" || (r.maxDistanceKm != null && r.maxDistanceKm < L - EPS),
-  );
+  const free = runners.filter((r) => {
+    const ac = arcCapOf(r);
+    return r.enter.kind === "free" || r.exit.kind === "free" || (ac != null && ac < L - EPS);
+  });
   if (free.length === 0) return wins;
 
   const N = clamp(Math.round(L / 0.25), 16, 200);
@@ -138,7 +143,7 @@ function resolveWindows(input: RunInput): Map<string, Window> {
 
       const lo = lowerOf(r);
       const hi = upperOf(r);
-      const cap = r.maxDistanceKm ?? Infinity;
+      const cap = arcCapOf(r) ?? Infinity;
       const enters = lo != null ? [idx(lo)] : Array.from({ length: N + 1 }, (_, k) => k);
       let best = wins.get(r.id)!;
       let bestScore = -1;
@@ -189,6 +194,47 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
   }
 }
 
+// --- earliest-start: a runner can't leave home before their floor -----------
+// Push the join point forward to where the flock passes at/after (earliest + their
+// connector run), so they co-arrive without setting off too early. The mirror of
+// enforceDeadlines — a LOWER bound on the join rather than an upper bound on the leave.
+function enforceEarliest(wins: Map<string, Window>, route: Route, runners: Runner[], t0: number): void {
+  for (let pass = 0; pass < 4; pass++) {
+    const blocks = computeBlocks(wins, route, runners, t0);
+    let changed = false;
+    for (const r of runners) {
+      if (r.earliestSec == null) continue;
+      const w = wins.get(r.id)!;
+      if (w.exitKm - w.enterKm < EPS) continue;
+      const couldDepart = arrivalAt(blocks, w.enterKm) - r.connectorKm * r.pace; // when they'd have to leave now
+      if (couldDepart >= r.earliestSec - EPS) continue;
+      const newEnter = Math.min(w.exitKm, Math.max(w.enterKm, kmAtTime(blocks, r.earliestSec + r.connectorKm * r.pace)));
+      if (newEnter - w.enterKm > 0.05) {
+        wins.set(r.id, { enterKm: newEnter, exitKm: w.exitKm });
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+// first arc km the flock reaches at or after wall-clock time T (inverse of arrivalAt)
+function kmAtTime(blocks: Block[], T: number): number {
+  let last = 0;
+  for (const b of blocks) {
+    last = Math.max(last, b.hiKm);
+    if (b.paceSec == null) {
+      if (b.endSec >= T - EPS) return b.loKm;
+      continue;
+    }
+    if (b.endSec >= T - EPS) {
+      if (b.startSec >= T) return b.loKm;
+      return b.loKm + ((T - b.startSec) / (b.endSec - b.startSec)) * (b.hiKm - b.loKm);
+    }
+  }
+  return last;
+}
+
 // flock-clock seconds when the flock reaches `km` (start of the leg/dwell containing it)
 export function arrivalAt(blocks: Block[], km: number): number {
   let best = 0;
@@ -210,10 +256,14 @@ function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number):
   for (const p of plans) {
     const r = byId.get(p.id)!;
     const covered = p.exitKm - p.enterKm;
-    if (p.togetherMinutes < 1 && plans.length > 1) {
+    const short = covered < routeKm - 0.3;
+    // The lonely warning ("re-pin to join") only applies to a runner whose OWN window is
+    // short — never to a full-route runner whose together-time merely dipped because ANOTHER
+    // runner collapsed to a degenerate point. A full-coverage runner gets no warning.
+    if (short && p.togetherMinutes < 1 && plans.length > 1) {
       out.push({ id: p.id, message: "You barely overlap with anyone — pin your start to a waypoint the flock passes to join them." });
-    } else if (covered < routeKm - 0.3) {
-      const why = r.latestSec != null ? "to be done in time" : r.maxDistanceKm != null ? "to stay within your distance" : "where you join/leave";
+    } else if (short) {
+      const why = r.latestSec != null ? "to be done in time" : r.earliestSec != null ? "from when you can start" : r.maxDistanceKm != null ? "to stay within your distance" : "where you join/leave";
       out.push({ id: p.id, message: `You're with the flock for ${covered.toFixed(1)} of ${routeKm.toFixed(1)} km — ${why}.` });
     }
   }
@@ -224,6 +274,7 @@ function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number):
 export function planRun(input: RunInput): Plan {
   const { route, runners, t0Sec } = input;
   const wins = resolveWindows(input);
+  enforceEarliest(wins, route, runners, t0Sec);
   enforceDeadlines(wins, route, runners, t0Sec);
   const blocks = computeBlocks(wins, route, runners, t0Sec);
 

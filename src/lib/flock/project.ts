@@ -78,6 +78,13 @@ export function projectPlan(input: {
       });
     }
 
+    // A runner who fits no participation (zero-span window — e.g. an earliest-start after the
+    // flock finishes, or a degenerate pin) still needs a non-empty schedule so consumers never
+    // choke: a single 0-distance marker at their point. They're already flagged by a warning.
+    if (schedule.length === 0) {
+      schedule.push({ type: "run", startTime: secToTime(p.departSec), endTime: secToTime(p.arriveSec), startLocation: startPt, endLocation: finishPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(p.distanceKm) });
+    }
+
     const geometry = [...(conn?.approach ?? []), ...slice, ...(conn?.egress ?? [])];
     return {
       participantId: p.id,

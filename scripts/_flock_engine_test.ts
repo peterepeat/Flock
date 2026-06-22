@@ -25,7 +25,7 @@ function route(km: number, stops: Route["stops"]): Route {
 const free = { kind: "free" as const };
 const fixed = (km: number) => ({ kind: "fixed" as const, km });
 function runner(id: string, pace: number, extra: Partial<Runner> = {}): Runner {
-  return { id, pace, enter: free, exit: free, maxDistanceKm: null, latestSec: null, connectorKm: 0, ...extra };
+  return { id, pace, enter: free, exit: free, maxDistanceKm: null, earliestSec: null, latestSec: null, connectorKm: 0, ...extra };
 }
 const T0 = 7 * 3600;
 

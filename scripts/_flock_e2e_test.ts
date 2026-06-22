@@ -57,9 +57,9 @@ async function main() {
   ok(route.stops.length === 1 && Math.abs(route.stops[0].durationSec - 900) < 1, "café stop snapped with 15 min dwell");
 
   const runners: Runner[] = [
-    { id: "A", pace: 360, enter: free, exit: free, maxDistanceKm: null, latestSec: null, connectorKm: 0 },
-    { id: "B", pace: 420, enter: free, exit: free, maxDistanceKm: null, latestSec: null, connectorKm: 0 },
-    { id: "C", pace: 360, enter: free, exit: free, maxDistanceKm: route.totalKm * 0.6, latestSec: null, connectorKm: 0 },
+    { id: "A", pace: 360, enter: free, exit: free, maxDistanceKm: null, earliestSec: null, latestSec: null, connectorKm: 0 },
+    { id: "B", pace: 420, enter: free, exit: free, maxDistanceKm: null, earliestSec: null, latestSec: null, connectorKm: 0 },
+    { id: "C", pace: 360, enter: free, exit: free, maxDistanceKm: route.totalKm * 0.6, earliestSec: null, latestSec: null, connectorKm: 0 },
   ];
   const plan = planRun({ route, runners, t0Sec: 7 * 3600 });
   const result = projectPlan({ plan, route, runners, waypoints: wps });
