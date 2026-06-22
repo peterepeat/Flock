@@ -1,10 +1,15 @@
 # Flock — the model
 
-The conceptual core the route engine is an instance of. Written after a first-principles
-re-derivation (six independent framings, adversarially broken, synthesised and elegance-audited)
-plus two live make-or-break probes. The current `routeEngine.ts` / `flockRoute.ts` are one
-projection of this model; everything they do is a degenerate read of it. This doc is the thing to
-build against — not a description of today's code, but the object today's code approximates.
+The conceptual core the engine is an instance of. Written after a first-principles re-derivation (six
+independent framings, adversarially broken, synthesised and elegance-audited) plus two live
+make-or-break probes.
+
+> **✅ As-built (2026-06-22).** This model is realized in `src/lib/flock/` and shipped to production.
+> The shipped engine is the **social-first** read of it — one objective (summed pairwise co-present
+> minutes, slowest-wins, fairness = a warning), the common case being *participation windows on a known
+> route* ("read, not solve"). The full WEAVE / convergence solver described below is the **deferred
+> advanced mode** (dispersed homes / cold-start route generation), not what the common case needs. See
+> [`ROADMAP.md`](./ROADMAP.md) → "What's next" for the open frontier.
 
 > **One object (the company block), one operation (WEAVE), one law (an admissibility fixpoint).**
 > A flock plan is a *co-presence lamination* of runner world-lines over the road-graph × wall-clock
@@ -197,7 +202,10 @@ today's engine inherits a leaky proxy, and the fix is derived not guessed) and *
 weaves are committable without an ORS blowup). The object, operation, and fixpoint-law are the frame
 to commit.
 
-**The build sequence derived from this model is [`ROADMAP.md`](./ROADMAP.md)** — greenfield
-`src/lib/flock/`, de-risk-first (the admissibility fixpoint and the space×time atom before breadth),
-own-pace welfare as the sole objective axis, legacy reused only as a parts quarry and a render sink,
-cut over at one call-site. Read this doc, then that one, and start at phase 0.
+**As built, this model is realized in `src/lib/flock/`** (shipped 2026-06-22; the build sequence is
+[`ROADMAP.md`](./ROADMAP.md)). One deliberate divergence from the derivation above: the shipped welfare
+unit is summed pairwise co-present **minutes** (wall-time, slowest-wins) — *not* the "own-pace" unit
+explored earlier. The own-pace correction solved a *fitness*-frame tax that a social-first product
+(where fitness is never primary) doesn't have, so it was dropped and the original together-minutes
+objective vindicated. Convergence/forced-WEAVE and concurrent sub-flocks are the deferred advanced
+mode — see [`ROADMAP.md`](./ROADMAP.md) → "What's next".

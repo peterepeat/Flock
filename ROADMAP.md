@@ -1,12 +1,15 @@
 # Flock — the build roadmap
 
-How to build the model in [`MODEL.md`](./MODEL.md). Derived from the model, not from the current
-engine. A cold session reads `MODEL.md` (the *what*) then this (the *how*) and can start coding the
-first hour. The current `routeEngine.ts` / `flockRoute.ts` are a **projection to be superseded**, not
-a thing to morph — they reappear here only as a parts quarry and a render sink, never as a spec.
+> **✅ BUILT & SHIPPED — 2026-06-22.** This roadmap is complete. The social-first engine lives in
+> `src/lib/flock/` (`model` · `plan` · `route` · `project` · `index`); the legacy
+> `routeEngine.ts` / `flockRoute.ts` / `insight.ts` were deleted and it shipped to production on
+> `main`. Tests: `scripts/_st_*` (850+ assertions) + `scripts/_flock_*_test.ts`. The build plan below
+> is kept as the historical record of *what was built and why*. **For the current state and the open
+> frontier, jump to [What's next](#whats-next) at the bottom.**
 
-This roadmap was adversarially audited specifically for legacy encumbrance; the doctrines below are
-the load-bearing corrections. If a step ever seems to want the old engine's *shape*, re-read them.
+How it was built, from [`MODEL.md`](./MODEL.md) — not from the prior engine (that engine is gone, reused
+only as a parts quarry: the ORS client and geo math). The roadmap was adversarially audited for legacy
+encumbrance; the doctrines below were the load-bearing corrections.
 
 ---
 
@@ -198,3 +201,28 @@ Create `src/lib/flock/types.ts` (`Block`, `Plan`, `TimingSolver`), then `flock/a
 fixpoint, declining on non-convergence), then the micro-fixture unit test: a 2-clock case the single
 anchor cannot satisfy, a floor-break, a termination assertion. **Zero ORS, zero adapter; do not touch
 `routeEngine.ts`.** Everything phase 0 needs is in `MODEL.md`.
+
+---
+
+## What's next
+
+The product is live and correct; nothing below is blocking. In priority order:
+
+1. **Concurrent pace-cohorts at independent paces** — the biggest deferred win (the "north pair + east
+   pair reunite at the café" case; ~+71% pairwise togetherness in the sim for clustered groups). v1
+   peels constrained runners off as *singletons*; the real generalisation is sub-flocks that share the
+   route + a reunion window but run on their *own* clock. That needs a **temporal constraint network**
+   replacing the single global `t0Sec` anchor — `plan.ts`'s `computeBlocks`/`arrivalAt` currently assume
+   one clock. The "for, but not with" hook is already the block atom (a peel could be a `|S|≥2` block);
+   the engine just doesn't generate them yet.
+2. **Commuter / point-to-point (finish ≠ home, asymmetric)** — a small but loyal, uniquely-underserved
+   niche. A manual `finishPin` already works; the remaining piece is scoring the no-shared-finish case
+   cleanly.
+3. **UI polish not yet browser-driven** — the manual-pin address-search flow, the GPX import path, the
+   mobile bottom-sheet. **Per-pair affinity** ("I came to run with Sam") was deliberately left
+   *pluggable* in the objective but not wired — add a weight to the pairwise sum if wanted.
+4. **Minor cosmetic** (triaged, non-blocking): `departureTime` can read as *after* an opening café
+   dwell's rest segment in the schedule view.
+
+The conceptual bedrock is in [`MODEL.md`](./MODEL.md); the regression guard is `scripts/_st_*` (run any
+with `npx tsx scripts/_st_<name>.ts`).
