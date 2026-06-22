@@ -206,23 +206,37 @@ anchor cannot satisfy, a floor-break, a termination assertion. **Zero ORS, zero 
 
 ## What's next
 
-The product is live and correct; nothing below is blocking. In priority order:
+The product is live and correct; nothing below is blocking.
 
-1. **Concurrent pace-cohorts at independent paces** — the biggest deferred win (the "north pair + east
-   pair reunite at the café" case; ~+71% pairwise togetherness in the sim for clustered groups). v1
-   peels constrained runners off as *singletons*; the real generalisation is sub-flocks that share the
-   route + a reunion window but run on their *own* clock. That needs a **temporal constraint network**
-   replacing the single global `t0Sec` anchor — `plan.ts`'s `computeBlocks`/`arrivalAt` currently assume
-   one clock. The "for, but not with" hook is already the block atom (a peel could be a `|S|≥2` block);
-   the engine just doesn't generate them yet.
-2. **Commuter / point-to-point (finish ≠ home, asymmetric)** — a small but loyal, uniquely-underserved
-   niche. A manual `finishPin` already works; the remaining piece is scoring the no-shared-finish case
-   cleanly.
+**Resolved 2026-06-22 (this session):**
+
+1. ~~**Concurrent pace-cohorts at independent paces**~~ — **investigated and DELIBERATELY NOT
+   BUILT.** A 6-lens adversarial refutation panel + direct engine probes settled it: the ~+71%
+   sim win was an artifact of the *old pace-tax* (penalising dragging fast runners slow), which the
+   social-first rebuild deliberately dropped. Under the current pure co-presence objective,
+   independently-timed pace-cohorts are *strictly dominated* by the single clock (cross-pace moving
+   co-presence is measure-zero; cohorts forfeit it and recover only dwell-interval overlap ≤ what the
+   single clock already grants). A temporal constraint network would be unjustified complexity. **The
+   real win the panel surfaced is simpler and more general — FINISH-AT-REUNION:** a *dwell stop is a
+   reunion; everyone whose window includes it shares it — passing through OR finishing there.* Shipped:
+   a finisher-at-a-café now banks the dwell (was a defect — excluded by a strict `exitKm > at`); a
+   deadline-bound runner is steered to *finish at* a reachable café and park for the reunion instead of
+   being evicted before it (the one shape where the panel found cohorts beat the single clock — now
+   captured *without* per-cohort clocks). Per-runner timing now reads the runner's actual block span,
+   not `arrivalAt(km)`. See memory `flock-cohorts-verdict`. The *one* deferred residual (rare): a runner
+   who can't reach a café at slowest pace within deadline but could at their *own* pace (running ahead) —
+   the only case that would need a per-runner approach clock; documented, not built.
+2. ~~**Commuter / point-to-point (finish ≠ home, asymmetric)**~~ — scores cleanly now. A latent
+   connector bug (approach+egress were summed and applied to *both* departure and arrival) was fixed by
+   splitting `connectorKm` into `approachKm` (shifts departure) and `egressKm` (shifts arrival).
+4. ~~**Cosmetic: `departureTime` after an opening dwell**~~ — fixed by span-based per-runner timing.
+
+**Remaining:**
+
 3. **UI polish not yet browser-driven** — the manual-pin address-search flow, the GPX import path, the
    mobile bottom-sheet. **Per-pair affinity** ("I came to run with Sam") was deliberately left
-   *pluggable* in the objective but not wired — add a weight to the pairwise sum if wanted.
-4. **Minor cosmetic** (triaged, non-blocking): `departureTime` can read as *after* an opening café
-   dwell's rest segment in the schedule view.
+   *pluggable* in the objective but not wired — add a weight to the pairwise sum if wanted (only if a
+   real product need appears — it's complexity otherwise).
 
 The conceptual bedrock is in [`MODEL.md`](./MODEL.md); the regression guard is `scripts/_st_*` (run any
-with `npx tsx scripts/_st_<name>.ts`).
+with `npx tsx scripts/_st_<name>.ts`). Dev browser checks without a live ORS key: `scripts/_seed_dev.ts`.
