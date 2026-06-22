@@ -63,20 +63,21 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
       const pace = p.pace ?? DEFAULT_PACE;
       const s = resolve(p.startPin);
       const f = resolve(p.finishPin);
-      let connectorKm = 0;
+      let approachKm = 0;
+      let egressKm = 0;
       const conn: Connectors = {};
       if (s.connector && s.bound.kind === "fixed") {
         try {
           const r = await getRoute([s.connector, pointAtKm(route, s.bound.km)]);
           conn.approach = geomToLatLng(r.geometry);
-          connectorKm += r.distanceKm;
+          approachKm += r.distanceKm;
         } catch { /* leave the connector implicit */ }
       }
       if (f.connector && f.bound.kind === "fixed") {
         try {
           const r = await getRoute([pointAtKm(route, f.bound.km), f.connector]);
           conn.egress = geomToLatLng(r.geometry);
-          connectorKm += r.distanceKm;
+          egressKm += r.distanceKm;
         } catch { /* leave the connector implicit */ }
       }
       if (conn.approach || conn.egress) connectors.set(p.id, conn);
@@ -88,7 +89,8 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
         maxDistanceKm: p.maxDistanceKm,
         earliestSec: p.earliestStartTime != null ? timeToSec(p.earliestStartTime) : null,
         latestSec: p.latestFinishTime != null ? timeToSec(p.latestFinishTime) : null,
-        connectorKm,
+        approachKm,
+        egressKm,
       };
     }),
   );

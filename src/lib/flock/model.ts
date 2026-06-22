@@ -45,7 +45,12 @@ export interface Runner {
   maxDistanceKm: number | null; // "how far can you run" — hard cap on TOTAL distance (connector + arc); null = none
   earliestSec: number | null; // hard "can't start before" floor (absolute seconds); null = none
   latestSec: number | null; // hard finish deadline (absolute seconds); null = none
-  connectorKm: number; // solo distance to/from a manual pin off the route (0 for auto/waypoint)
+  // Solo connector runs to/from a manual pin off the route (0 for auto/waypoint). Kept as
+  // two physical legs because they affect timing ASYMMETRICALLY: the approach (home→enter)
+  // shifts the DEPARTURE earlier; the egress (exit→home) shifts the ARRIVAL later. Only the
+  // distance cap sees them together (the sum).
+  approachKm: number; // home → enter point
+  egressKm: number; // exit point → home
 }
 
 export interface RunInput {

@@ -93,9 +93,9 @@ function resolveWindows(input: RunInput): Map<string, Window> {
 
   const lowerOf = (r: Runner) => (r.enter.kind === "fixed" ? clamp(r.enter.km, 0, L) : null);
   const upperOf = (r: Runner) => (r.exit.kind === "fixed" ? clamp(r.exit.km, 0, L) : null);
-  // "How far can you run" caps the TOTAL distance — the connector commute to/from a manual
-  // pin counts against it — so the on-spine arc may be at most (cap − connector).
-  const arcCapOf = (r: Runner) => (r.maxDistanceKm != null ? Math.max(0, r.maxDistanceKm - r.connectorKm) : null);
+  // "How far can you run" caps the TOTAL distance — both connector commutes to/from a manual
+  // pin count against it — so the on-spine arc may be at most (cap − approach − egress).
+  const arcCapOf = (r: Runner) => (r.maxDistanceKm != null ? Math.max(0, r.maxDistanceKm - r.approachKm - r.egressKm) : null);
   const wins = new Map<string, Window>();
   for (const r of runners) {
     const lo = lowerOf(r) ?? 0;
@@ -180,7 +180,7 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
       if (r.latestSec == null) continue;
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
-      const arrive = arrivalAt(blocks, w.exitKm) + r.connectorKm * r.pace;
+      const arrive = arrivalAt(blocks, w.exitKm) + r.egressKm * r.pace;
       if (arrive <= r.latestSec + EPS) continue;
       // trim proportionally to the overshoot
       const over = arrive - r.latestSec;
@@ -206,9 +206,9 @@ function enforceEarliest(wins: Map<string, Window>, route: Route, runners: Runne
       if (r.earliestSec == null) continue;
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
-      const couldDepart = arrivalAt(blocks, w.enterKm) - r.connectorKm * r.pace; // when they'd have to leave now
+      const couldDepart = arrivalAt(blocks, w.enterKm) - r.approachKm * r.pace; // when they'd have to leave now
       if (couldDepart >= r.earliestSec - EPS) continue;
-      const newEnter = Math.min(w.exitKm, Math.max(w.enterKm, kmAtTime(blocks, r.earliestSec + r.connectorKm * r.pace)));
+      const newEnter = Math.min(w.exitKm, Math.max(w.enterKm, kmAtTime(blocks, r.earliestSec + r.approachKm * r.pace)));
       if (newEnter - w.enterKm > 0.05) {
         wins.set(r.id, { enterKm: newEnter, exitKm: w.exitKm });
         changed = true;
@@ -297,9 +297,9 @@ export function planRun(input: RunInput): Plan {
       id: r.id,
       enterKm: w.enterKm,
       exitKm: w.exitKm,
-      departSec: enterSec - r.connectorKm * r.pace,
-      arriveSec: exitSec + r.connectorKm * r.pace,
-      distanceKm: w.exitKm - w.enterKm + r.connectorKm,
+      departSec: enterSec - r.approachKm * r.pace,
+      arriveSec: exitSec + r.egressKm * r.pace,
+      distanceKm: w.exitKm - w.enterKm + r.approachKm + r.egressKm,
       togetherMinutes: share.get(r.id)!,
     };
   });

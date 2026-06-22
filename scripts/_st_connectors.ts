@@ -260,6 +260,31 @@ await tryOk(async () => {
   // pairwise summary fully populated: 3 runners → 3 pairs
   ok(res.summary.pairwiseSummary.length === 3, "12: pairwise summary has n*(n-1)/2 = 3 pairs");
 }, "12 mixed-pins");
+
+// --------------------------------------------------------------------------
+section("13. headline depart/arrive must MATCH the schedule (no connector double-count)");
+// Regression guard: the approach (home→enter) shifts the DEPARTURE; the egress (exit→home)
+// shifts the ARRIVAL — never the other way. A prior bug summed both legs into one connector
+// and applied the SUM to both ends, so an egress pulled the departure earlier than the first
+// scheduled leg. Use ASYMMETRIC legs (near approach, far egress) so a sum-based bug would
+// visibly desync the headline departureTime from schedule[0].startTime.
+await tryOk(async () => {
+  const start = atPlace(0.0, -0.01, "near-W-of-A"); // ~1.1 km approach
+  const fin = atPlace(0.05, 0.03, "far-E-of-B"); // ~3.3 km egress (3× the approach)
+  const s = session([person("p1"), person("p2", { startPin: start, finishPin: fin })], route2());
+  const res = await calculateRoutes(s);
+  for (const p of res.routes) {
+    const sched = p.schedule;
+    ok(p.departureTime === sched[0].startTime, `13: ${p.participantId} departureTime == first leg start`);
+    ok(p.arrivalTime === sched[sched.length - 1].endTime, `13: ${p.participantId} arrivalTime == last leg end`);
+  }
+  // the approach leg's own distance is the approach only (not approach+egress)
+  const p2 = r(res, "p2");
+  const approachLeg = p2.schedule[0];
+  const egressLeg = p2.schedule[p2.schedule.length - 1];
+  ok(approachLeg.companionIds.length === 0 && egressLeg.companionIds.length === 0, "13: both ends are solo connector legs");
+  ok(egressLeg.distanceKm > approachLeg.distanceKm + 1.0, "13: egress leg (~3.3km) is clearly longer than approach (~1.1km) — legs are NOT conflated");
+}, "13 depart-arrive-match-schedule");
 }
 
 main().then(finish);

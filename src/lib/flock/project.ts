@@ -56,10 +56,10 @@ export function projectPlan(input: {
     const finishPt = conn?.egress?.[conn.egress.length - 1] ?? exitPt;
 
     const schedule: ScheduleSegment[] = [];
-    if (conn?.approach && conn.approach.length >= 2 && r.connectorKm > 0.02) {
+    if (conn?.approach && conn.approach.length >= 2 && r.approachKm > 0.02) {
       schedule.push({
         type: "run", startTime: secToTime(p.departSec), endTime: secToTime(arrivalAt(plan.blocks, p.enterKm)),
-        startLocation: startPt, endLocation: enterPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.connectorKm),
+        startLocation: startPt, endLocation: enterPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.approachKm),
       });
     }
     for (const b of plan.blocks) {
@@ -71,10 +71,10 @@ export function projectPlan(input: {
           : { type: "run", startTime: secToTime(b.startSec), endTime: secToTime(b.endSec), startLocation: pointAtKm(route, b.loKm), endLocation: pointAtKm(route, b.hiKm), paceSecPerKm: b.paceSec, companionIds: companions, distanceKm: round2(b.hiKm - b.loKm) },
       );
     }
-    if (conn?.egress && conn.egress.length >= 2 && r.connectorKm > 0.02) {
+    if (conn?.egress && conn.egress.length >= 2 && r.egressKm > 0.02) {
       schedule.push({
         type: "run", startTime: secToTime(arrivalAt(plan.blocks, p.exitKm)), endTime: secToTime(p.arriveSec),
-        startLocation: exitPt, endLocation: finishPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.connectorKm),
+        startLocation: exitPt, endLocation: finishPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.egressKm),
       });
     }
 
