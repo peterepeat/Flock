@@ -97,5 +97,57 @@ console.log("── FLOCK PLANNER — social-first behaviours ──\n");
   console.log("");
 }
 
+// === Scenario 4: finish-at-reunion — a runner who FINISHES at a stop shares its dwell ===
+{
+  console.log("[4] finish-at-reunion: stopping at the café for coffee counts as together-time");
+  // E finishes AT the café (km5); F runs the whole route. Both should share the café dwell.
+  const r = route(10, [{ km: 5, durationSec: 1800, name: "Café" }]);
+  const input: RunInput = {
+    route: r,
+    t0Sec: T0,
+    runners: [runner("E", 360, { exit: fixed(5) }), runner("F", 360)],
+  };
+  const plan = planRun(input);
+  const cafe = plan.blocks.find((b) => b.paceSec === null);
+  ok(!!cafe && cafe.members.includes("E") && cafe.members.includes("F"), "the finisher E shares the café dwell (not excluded by finishing there)");
+  const E = plan.runners.find((p) => p.id === "E")!;
+  // E: 5 km @ 6:00 (30 min) shared moving + 30 min café = 60 min, all with F.
+  ok(Math.abs(E.togetherMinutes - 60) < 1e-6, `E banks the café reunion: 30 min run + 30 min coffee = 60 min (got ${f2(E.togetherMinutes)})`);
+  console.log("");
+}
+
+// === Scenario 5: a deadline that cuts the dwell SPLITS it (finisher leaves early, not trimmed off) ===
+{
+  console.log("[5] deadline mid-dwell splits the café; the finisher keeps the overlap, isn't evicted");
+  // G finishes at the café (km5, reached at 1800 s under 360), deadline 2100 s cuts the 30-min dwell.
+  const r = route(10, [{ km: 5, durationSec: 1800, name: "Café" }]);
+  const input: RunInput = {
+    route: r,
+    t0Sec: 0,
+    runners: [runner("H", 360), runner("G", 360, { exit: fixed(5), latestSec: 2100 })],
+  };
+  const plan = planRun(input);
+  const G = plan.runners.find((p) => p.id === "G")!;
+  // G runs [0,5] (reaches café at 1800 s) and stays the 5 min to its 2100 s deadline — NOT trimmed before the café.
+  ok(Math.abs(G.exitKm - 5) < 1e-6, `G still finishes AT the café (exit ${f2(G.exitKm)} km), not trimmed short by the deadline`);
+  ok(G.arriveSec <= 2100 + 1e-6, `G honours its 2100 s deadline (leaves the café at ${G.arriveSec} s)`);
+  // 30 min shared run + 5 min café overlap = 35 min.
+  ok(Math.abs(G.togetherMinutes - 35) < 1e-6, `G keeps the run + the 5 min of café before its deadline = 35 min (got ${f2(G.togetherMinutes)})`);
+  const split = plan.blocks.filter((b) => b.paceSec === null);
+  ok(split.length === 2, `the café dwell splits at the deadline into ${split.length} sub-blocks`);
+  console.log("");
+}
+
+// === Scenario 6: an OPENING dwell — departure matches the rest, not the post-dwell leg ===
+{
+  console.log("[6] opening café (km0): departure is the rest start, not after it");
+  const r = route(10, [{ km: 0, durationSec: 900, name: "Start café" }]);
+  const input: RunInput = { route: r, t0Sec: T0, runners: [runner("A", 360), runner("B", 360)] };
+  const plan = planRun(input);
+  const A = plan.runners.find((p) => p.id === "A")!;
+  ok(Math.abs(A.departSec - T0) < 1e-6, `A departs at the opening-rest start (${A.departSec} s), not 900 s later`);
+  console.log("");
+}
+
 console.log(failures === 0 ? "✅ ALL PASS" : `❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

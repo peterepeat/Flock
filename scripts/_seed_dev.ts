@@ -42,6 +42,14 @@ async function main() {
     person("Cleo", { startPin: atWp("start"), finishPin: atPlace(51.5450, -0.0900, "Office C") }),
   ], [start, dest], { intendedDistanceKm: 5 }));
 
+  // FINISH-AT-REUNION: home → café(15-min stop) → park. "Quinn" finishes AT the café (coffee
+  // with everyone, then peels off); "Remy" runs the whole route. Quinn must show café credit.
+  const cafe = wp("cafe", 51.5300, -0.0950, 15);
+  await seed("reunio", session([
+    person("Quinn", { finishPin: atWp("cafe") }),
+    person("Remy"),
+  ], [wp("home2", 51.5200, -0.1100), cafe, wp("park", 51.5400, -0.0800)], { intendedDistanceKm: 5 }));
+
   // CONNECTOR ASYMMETRY: one runner with a near manual start + far manual finish — the
   // landing's headline case (departure must match the schedule, not be pulled early).
   const w1 = wp("w1", 51.5200, -0.1200);

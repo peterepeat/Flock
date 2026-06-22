@@ -342,6 +342,28 @@ async function run() {
     }
   }
 
+  section("13. finish-at-reunion: a runner pinned to FINISH at a café waypoint shares its dwell");
+  {
+    // w2 carries a 15-min stop and sits at a NON-grid-aligned km (the scan grid would snap a
+    // fixed bound ~100 m short and silently drop the reunion — the exact-bounds guard prevents
+    // that). "cara" finishes AT the café; "dan" runs the whole route. cara must get the coffee.
+    const wps = [W(0), W(1), W(2, 15), W(3), W(4)];
+    const s = session([
+      person("dan"),
+      person("cara", { finishPin: atWp("w2") }),
+    ], wps);
+    let res!: CalcResultLike;
+    await tryOk(async () => { res = await calculateRoutes(s); }, "13 calc");
+    const cara = routeOf(res, "cara");
+    if (cara) {
+      const rest = cara.schedule.find((seg) => seg.type === "rest");
+      ok(!!rest, "13 cara (finishing at the café) has a rest segment — she's in the dwell, not excluded");
+      ok(!!rest && rest.companionIds.includes("dan"), "13 cara shares the café dwell WITH dan (the reunion is held)");
+      // the dwell is real together-time: cara<->dan exceeds the bare moving overlap by ~15 min.
+      ok(pairMin(res, "cara", "dan") > 15, `13 the café reunion lifts cara<->dan past the moving-only floor (${pairMin(res, "cara", "dan").toFixed(1)} min)`);
+    }
+  }
+
   finish();
 }
 

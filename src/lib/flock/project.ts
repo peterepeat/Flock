@@ -56,9 +56,14 @@ export function projectPlan(input: {
     const finishPt = conn?.egress?.[conn.egress.length - 1] ?? exitPt;
 
     const schedule: ScheduleSegment[] = [];
+    // The approach ends when the runner reaches their first block (= departSec + the approach
+    // run); the egress starts when they leave their last block (= arriveSec − the egress run).
+    // Derived from the plan's span-based timing so the connector legs abut the schedule exactly.
+    const firstBlockSec = p.departSec + r.approachKm * r.pace;
+    const lastBlockSec = p.arriveSec - r.egressKm * r.pace;
     if (conn?.approach && conn.approach.length >= 2 && r.approachKm > 0.02) {
       schedule.push({
-        type: "run", startTime: secToTime(p.departSec), endTime: secToTime(arrivalAt(plan.blocks, p.enterKm)),
+        type: "run", startTime: secToTime(p.departSec), endTime: secToTime(firstBlockSec),
         startLocation: startPt, endLocation: enterPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.approachKm),
       });
     }
@@ -73,7 +78,7 @@ export function projectPlan(input: {
     }
     if (conn?.egress && conn.egress.length >= 2 && r.egressKm > 0.02) {
       schedule.push({
-        type: "run", startTime: secToTime(arrivalAt(plan.blocks, p.exitKm)), endTime: secToTime(p.arriveSec),
+        type: "run", startTime: secToTime(lastBlockSec), endTime: secToTime(p.arriveSec),
         startLocation: exitPt, endLocation: finishPt, paceSecPerKm: r.pace, companionIds: [], distanceKm: round2(r.egressKm),
       });
     }

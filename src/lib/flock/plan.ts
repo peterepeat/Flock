@@ -45,16 +45,30 @@ function computeBlocks(wins: Map<string, Window>, route: Route, runners: Runner[
   let clock = t0;
   for (let k = 0; k < bounds.length; k++) {
     const at = bounds[k];
-    // dwell(s) snapping to this km — charged to everyone continuing PAST the stop
+    // A stop is a REUNION: everyone whose CLOSED window [enter,exit] includes it shares the
+    // dwell — those passing THROUGH and those FINISHING here (running to the café and stopping
+    // for coffee is co-presence, the whole point, not a deviation). The flock rests the full
+    // dwell; a continuer leaves with it, a finisher stays for the coffee but no later than their
+    // own deadline (less the run home). Split the rest at distinct leave-times so every emitted
+    // sub-block keeps uniform membership (and togetherMinutes/projection read it unchanged).
     const dwellSec = route.stops
       .filter((s) => Math.abs(s.km - at) < 1e-3)
       .reduce((sum, s) => sum + s.durationSec, 0);
     if (dwellSec > 0) {
-      const here = runners.filter((r) => win(r.id).enterKm <= at + EPS && win(r.id).exitKm > at + EPS).map((r) => r.id);
-      if (here.length > 0) {
-        blocks.push({ members: here, loKm: at, hiKm: at, startSec: clock, endSec: clock + dwellSec, paceSec: null });
-        clock += dwellSec;
+      const atStop = runners.filter((r) => win(r.id).enterKm <= at + EPS && win(r.id).exitKm >= at - EPS);
+      const leaveOf = (r: Runner): number => {
+        if (win(r.id).exitKm > at + EPS) return clock + dwellSec; // continues — leaves with the flock
+        const cap = r.latestSec != null ? r.latestSec - r.egressKm * r.pace : Infinity; // finisher's hard out
+        return Math.min(clock + dwellSec, Math.max(clock, cap));
+      };
+      const leaves = atStop.map((r) => ({ id: r.id, leave: leaveOf(r) }));
+      const cuts = [...new Set(leaves.map((l) => l.leave))].filter((t) => t > clock + EPS && t < clock + dwellSec - EPS).sort((a, b) => a - b);
+      const segs = [clock, ...cuts, clock + dwellSec];
+      for (let s = 0; s < segs.length - 1; s++) {
+        const mem = leaves.filter((l) => l.leave >= segs[s + 1] - EPS).map((l) => l.id);
+        if (mem.length > 0) blocks.push({ members: mem, loKm: at, hiKm: at, startSec: segs[s], endSec: segs[s + 1], paceSec: null });
       }
+      clock += dwellSec;
     }
     if (k >= bounds.length - 1) break;
     const lo = at;
@@ -162,9 +176,17 @@ function resolveWindows(input: RunInput): Map<string, Window> {
           }
         }
       }
+      // The coarse scan grid only places FREE bounds; a FIXED bound (a pin to a waypoint or a
+      // manual point) must keep its EXACT km so a finish pinned to a café waypoint lands ON that
+      // café's stop (not grid-snapped 100 m short, which would silently drop the reunion).
+      const next = {
+        enterKm: lo != null ? lo : best.enterKm,
+        exitKm: hi != null ? hi : best.exitKm,
+      };
+      next.exitKm = Math.max(next.enterKm, next.exitKm);
       const cur = wins.get(r.id)!;
-      if (Math.abs(best.enterKm - cur.enterKm) > EPS || Math.abs(best.exitKm - cur.exitKm) > EPS) moved = true;
-      wins.set(r.id, best);
+      if (Math.abs(next.enterKm - cur.enterKm) > EPS || Math.abs(next.exitKm - cur.exitKm) > EPS) moved = true;
+      wins.set(r.id, next);
     }
     if (!moved) break;
   }
@@ -180,7 +202,12 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
       if (r.latestSec == null) continue;
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
-      const arrive = arrivalAt(blocks, w.exitKm) + r.egressKm * r.pace;
+      const span = runnerSpan(blocks, r.id);
+      if (!span) continue;
+      // When they actually FINISH (leave their last block) + the run home. For a finisher at a
+      // dwell, leaveOf already capped this to the deadline, so no trim is needed — the reunion
+      // is kept, not cut.
+      const arrive = span.last + r.egressKm * r.pace;
       if (arrive <= r.latestSec + EPS) continue;
       // trim proportionally to the overshoot
       const over = arrive - r.latestSec;
@@ -206,7 +233,9 @@ function enforceEarliest(wins: Map<string, Window>, route: Route, runners: Runne
       if (r.earliestSec == null) continue;
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
-      const couldDepart = arrivalAt(blocks, w.enterKm) - r.approachKm * r.pace; // when they'd have to leave now
+      const span = runnerSpan(blocks, r.id);
+      if (!span) continue;
+      const couldDepart = span.first - r.approachKm * r.pace; // when they'd have to leave now
       if (couldDepart >= r.earliestSec - EPS) continue;
       const newEnter = Math.min(w.exitKm, Math.max(w.enterKm, kmAtTime(blocks, r.earliestSec + r.approachKm * r.pace)));
       if (newEnter - w.enterKm > 0.05) {
@@ -249,6 +278,23 @@ export function arrivalAt(blocks: Block[], km: number): number {
   return best;
 }
 
+// A runner's actual participation span = [start of their first block, end of their last].
+// This is THE source of per-runner timing: it reads the schedule the engine actually built,
+// so it's correct across opening/closing dwells, a finish-at-a-stop reunion, and a dwell split
+// by a deadline — cases where arrivalAt(km) (the LATEST flock-clock at a km) would mislead,
+// e.g. a finisher's exit km is also the start of the post-dwell leg they DON'T run. Null when
+// the runner has no block (a degenerate zero-span window).
+export function runnerSpan(blocks: Block[], id: string): { first: number; last: number } | null {
+  let first = Infinity;
+  let last = -Infinity;
+  for (const b of blocks) {
+    if (!b.members.includes(id)) continue;
+    first = Math.min(first, b.startSec);
+    last = Math.max(last, b.endSec);
+  }
+  return first === Infinity ? null : { first, last };
+}
+
 // --- warnings: explain every deviation; flag the lonely --------------------
 function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number): Warning[] {
   const out: Warning[] = [];
@@ -288,17 +334,20 @@ export function planRun(input: RunInput): Plan {
 
   const plans: RunnerPlan[] = runners.map((r) => {
     const w = wins.get(r.id)!;
-    // Co-arrival: leave home so as to reach the enter point exactly when the flock passes
-    // it (minus the connector run from a manual pin). Arrival = flock-clock at the exit,
-    // plus the connector run home.
-    const enterSec = arrivalAt(blocks, w.enterKm);
-    const exitSec = arrivalAt(blocks, w.exitKm);
+    // Timing reads the runner's ACTUAL span in the built schedule: they leave home so as to
+    // reach their first block exactly when it starts (minus the approach run from a manual pin),
+    // and arrive home after their last block ends (plus the egress run). Reading the span — not
+    // arrivalAt(km) — is what makes an opening dwell, a finish-at-a-café reunion, and a
+    // deadline-trimmed dwell all time correctly. Fallback for a degenerate zero-span window.
+    const span = runnerSpan(blocks, r.id);
+    const first = span?.first ?? arrivalAt(blocks, w.enterKm);
+    const last = span?.last ?? arrivalAt(blocks, w.exitKm);
     return {
       id: r.id,
       enterKm: w.enterKm,
       exitKm: w.exitKm,
-      departSec: enterSec - r.approachKm * r.pace,
-      arriveSec: exitSec + r.egressKm * r.pace,
+      departSec: first - r.approachKm * r.pace,
+      arriveSec: last + r.egressKm * r.pace,
       distanceKm: w.exitKm - w.enterKm + r.approachKm + r.egressKm,
       togetherMinutes: share.get(r.id)!,
     };
