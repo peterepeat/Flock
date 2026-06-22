@@ -190,7 +190,7 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
 }
 
 // flock-clock seconds when the flock reaches `km` (start of the leg/dwell containing it)
-function arrivalAt(blocks: Block[], km: number): number {
+export function arrivalAt(blocks: Block[], km: number): number {
   let best = 0;
   for (const b of blocks) {
     if (b.paceSec == null) {
