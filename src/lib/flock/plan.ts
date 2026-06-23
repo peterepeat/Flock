@@ -380,86 +380,81 @@ function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number):
 }
 
 // --- logic-driven auto start ------------------------------------------------
-// Choose the flock's departure (km-0 clock) when the user leaves the time on "Auto".
-// The objective (summed co-present minutes) is translation-invariant in t0 EXCEPT where a
-// runner's earliest/latest constraint clips their window — so the only t0 values that can
-// matter are the constraint breakpoints. We evaluate the REAL planner at each and keep the
-// best: more togetherness first, then more total participation (so a lone constrained runner
-// still runs the whole route rather than a truncated tail), tie-broken toward a "nice" 07:00.
-// With no constraints there's a single candidate (07:00) — so Auto stays 7am unless a
-// constraint genuinely lets a different start do better.
+// Choose the flock's departure (km-0 clock) when the user leaves the time on "Auto". The objective
+// (summed co-present minutes) is translation-invariant in t0 EXCEPT between the runners' earliest/
+// latest breakpoints, where a constraint clips someone's window — so t0 only matters inside the window
+// those breakpoints span. We pick the t0 that, on the REAL plan, is best lexicographically:
+//   1. HONOURS EARLIEST — nobody sets off before their earliest (delay the flock rather than drag a
+//      runner out early). This one key subsumes what used to be a separate "t0 floor": a candidate
+//      that respects every earliest beats one that doesn't, so the search settles at/above the
+//      earliest-feasible start on its own. (An earliest that's unreachable at a FIXED user start is a
+//      different path — planRun parks + names it; here on Auto we just wait.)
+//   2. more togetherness · 3. more participation distance · 4. nearer a "nice" 07:00.
+// The objective is piecewise-linear in t0 with kinks at the breakpoints AND at dwell/deadline
+// crossings we don't enumerate in closed form, so a coarse grid over the window plus a local refine
+// brackets the optimum without special-casing any one kind of kink. No constraints ⇒ 07:00.
 const DEFAULT_AUTO_T0 = 7 * 3600; // 07:00
 export function resolveAutoStart(route: Route, runners: Runner[]): number {
   const earliest = runners.map((r) => r.earliestSec).filter((s): s is number => s != null);
   const latest = runners.map((r) => r.latestSec).filter((s): s is number => s != null);
   if (earliest.length === 0 && latest.length === 0) return DEFAULT_AUTO_T0;
 
-  // Full-route duration (slowest pace over the whole arc + all dwell) — the auto default is
-  // everyone running the whole route, so a deadline l means "start by l − this".
+  // Full-route duration (slowest pace over the whole arc + all dwell): a deadline l begins to clip at
+  // t0 = l − fullRunSec (start any later and the full route can't finish by l).
   const slowest = Math.max(360, ...runners.map((r) => r.pace));
   const dwellSec = route.stops.reduce((s, st) => s + st.durationSec, 0);
   const fullRunSec = route.totalKm * slowest + dwellSec;
-
-  // EARLIEST as a flock-level t0 FLOOR (Cause G). enforceEarliest slides a runner's ON-ROUTE join
-  // forward, but it cannot move a FIXED approach-connector leg: with a long commute (e.g. a start
-  // pinned 22 km off an 18 km route) depart = arrivalAt(enterKm) − approach·pace lands before earliest
-  // even with enterKm at the route's end. The only remedy is to DELAY THE WHOLE FLOCK (the user's
-  // call: an unreachable earliest raises t0, approach included). enforceEarliest is KEPT; the floor is
-  // additive over it. "Does any earliest runner set off before their earliest (or get earliest-parked)?"
-  // is MONOTONE in t0 — raising t0 only pushes departures later — so BISECT the REAL planRun for the
-  // smallest t0 with none. (A Newton/secant step is unsafe: raising t0 mostly slides the on-route join,
-  // so d(depart)/d(t0) can be ≪1 and an additive step badly under-shoots, wrongly parking the runner.)
   const byId = new Map(runners.map((r) => [r.id, r] as const));
-  const earliestShortfall = (t0: number): boolean => {
+
+  // Score a t0 from the REAL plan. `cost` is hard-constraint dissatisfaction: a runner who is PARKED
+  // (excluded — any reason) is the worst outcome (we'd rather start when everyone can run), then the
+  // seconds any feasible runner would still set off before its earliest. Minimising cost subsumes the
+  // earliest "floor" (an early or earliest-parked runner raises cost, so the search delays the flock)
+  // AND deadline handling (a too-late start parks a deadline runner, raising cost) — one rule, not a
+  // pile of special cases. Then maximise togetherness, then participation distance, then nearness 07:00.
+  const score = (t0: number) => {
     const plan = planRun({ route, runners, t0Sec: t0 });
-    return plan.runners.some((p) => {
+    let cost = 0;
+    for (const p of plan.runners) {
+      if (p.conflict != null) { cost += 86400; continue; } // an excluded runner dominates the cost
       const r = byId.get(p.id)!;
-      if (r.earliestSec == null) return false;
-      if (p.conflict != null) return p.conflict.kind === "earliest-unreachable"; // earliest-parked → raise (latest/cap → not ours)
-      return p.departSec < r.earliestSec; // feasible but would set off before earliest
-    });
-  };
-  let floor = -Infinity;
-  // A floor is needed only when the 07:00 default fails an earliest; if 07:00 already clears every
-  // earliest, the sweep is free and "Auto stays 7am" holds. Regression-safe: a runner parked for a
-  // LATEST reason at 07:00 is NOT a shortfall, so it can't collapse the floor onto 07:00.
-  if (earliest.length > 0 && earliestShortfall(DEFAULT_AUTO_T0)) {
-    let lo = DEFAULT_AUTO_T0, hi = DEFAULT_AUTO_T0, step = 1800;
-    while (earliestShortfall(hi) && hi < 24 * 3600) { lo = hi; hi = Math.min(hi + step, 24 * 3600); step *= 2; }
-    for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (earliestShortfall(mid)) lo = mid; else hi = mid; }
-    floor = hi; // smallest t0 (sub-second) at which no earliest runner departs early or is earliest-parked
-  }
-
-  const cands = new Set<number>([DEFAULT_AUTO_T0]);
-  for (const e of earliest) cands.add(Math.max(0, e));
-  for (const l of latest) cands.add(Math.max(0, l - fullRunSec));
-  if (floor > -Infinity) cands.add(floor);
-
-  let bestT0 = floor > -Infinity ? floor : DEFAULT_AUTO_T0;
-  let bestTog = -1;
-  let bestDist = -1;
-  let bestNear = Infinity;
-  // HARD floor: earliest is honoured by delaying the flock, so the sweep searches only t0 ≥ floor —
-  // a sub-floor candidate would silently violate a HARD earliest, so clamp every candidate up to it.
-  for (const t0 of [...cands].map((t) => (floor > -Infinity ? Math.max(t, floor) : t)).sort((a, b) => a - b)) {
-    const plan = planRun({ route, runners, t0Sec: t0 });
-    const tog = plan.togetherMinutes;
-    const dist = plan.runners.reduce((s, p) => s + Math.max(0, p.exitKm - p.enterKm), 0);
-    const near = Math.abs(t0 - DEFAULT_AUTO_T0);
-    // Lexicographic: maximise togetherness, then participation distance, then nearness to 07:00.
-    const better =
-      tog > bestTog + EPS ||
-      (Math.abs(tog - bestTog) <= EPS &&
-        (dist > bestDist + EPS ||
-          (Math.abs(dist - bestDist) <= EPS && near < bestNear - EPS)));
-    if (better) {
-      bestT0 = t0;
-      bestTog = tog;
-      bestDist = dist;
-      bestNear = near;
+      if (r.earliestSec != null && p.departSec < r.earliestSec) cost += r.earliestSec - p.departSec;
     }
-  }
-  return bestT0;
+    const dist = plan.runners.reduce((s, p) => s + Math.max(0, p.exitKm - p.enterKm), 0);
+    return { t0, cost, tog: plan.togetherMinutes, dist, near: Math.abs(t0 - DEFAULT_AUTO_T0) };
+  };
+  type S = ReturnType<typeof score>;
+  const better = (a: S, b: S): boolean =>
+    a.cost < b.cost - EPS ||
+    (Math.abs(a.cost - b.cost) <= EPS &&
+      (a.tog > b.tog + EPS ||
+        (Math.abs(a.tog - b.tog) <= EPS &&
+          (a.dist > b.dist + EPS || (Math.abs(a.dist - b.dist) <= EPS && a.near < b.near - EPS)))));
+
+  // Search the window the breakpoints span (the objective is flat outside it): a coarse grid, then a
+  // local refine around the winner to bracket a between-breakpoint kink. The window must reach high
+  // enough to HONOUR every earliest: at t0 = earliest + approach·pace a runner departs no earlier than
+  // earliest even with a fixed off-route approach (arrivalAt(enterKm) ≥ t0 ⇒ depart ≥ t0 − approach·pace
+  // = earliest), so that is a safe upper bracket for the earliest "floor"; the search then settles back
+  // down to the best feasible t0 within [lo, hi].
+  const bps = [
+    DEFAULT_AUTO_T0,
+    ...earliest, // lower edge: an earliest starts clipping here
+    ...latest, // upper edge: above a deadline everyone past it parks — bounds the useful window
+    ...latest.map((l) => l - fullRunSec), // a deadline begins to clip a full-route start here
+    ...runners.flatMap((r) => (r.earliestSec != null ? [r.earliestSec + r.approachKm * r.pace] : [])), // earliest floor
+  ].filter((t) => t >= 0);
+  const lo = Math.min(...bps), hi = Math.max(...bps);
+  let best = score(DEFAULT_AUTO_T0);
+  const consider = (t: number) => { const s = score(Math.max(0, t)); if (better(s, best)) best = s; };
+  // Evaluate the exact breakpoints (an optimum — e.g. an earliest floor — often sits ON one), then a
+  // coarse grid over the window for the dwell/deadline kinks between them, then a local refine.
+  for (const t of bps) consider(t);
+  const coarse = Math.max(120, Math.round((hi - lo) / 32));
+  for (let t = lo; t <= hi + EPS; t += coarse) consider(t);
+  const fine = Math.max(15, Math.round(coarse / 10));
+  for (let t = best.t0 - coarse; t <= best.t0 + coarse + EPS; t += fine) consider(t);
+  return best.t0;
 }
 
 // --- feasibility verdict ----------------------------------------------------

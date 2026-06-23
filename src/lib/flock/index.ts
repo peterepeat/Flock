@@ -13,7 +13,7 @@ import { getRoute } from "../ors";
 import type { FlockSession, LatLng, LocationPin } from "../types";
 import { timeToSec } from "../units";
 import type { Bound, Route, Runner } from "./model";
-import { planRun, resolveAutoStart } from "./plan";
+import { arrivalAt, planRun, resolveAutoStart } from "./plan";
 import { projectPlan, type Connectors, type FlockCalcResult } from "./project";
 import { buildRoute, nearestKm, pointAtKm } from "./route";
 
@@ -108,7 +108,18 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   } else if (anchor.kind === "waypoint" && anchorWp) {
     const km = nearestKm(route, anchorWp.location);
     const slowest = Math.max(DEFAULT_PACE, ...runners.map((r) => r.pace));
-    t0Sec = timeToSec(anchor.time) - km * slowest; // back-compute so the flock reaches the waypoint on time
+    // Two-pass back-compute (Cause D): a closed-form km·pace ignores the UPSTREAM dwell and the
+    // slowest-present pace, so the flock would reach the anchor waypoint late by that. Seed with the
+    // closed form, then run a provisional plan and shift t0 by the ACTUAL arrival drift at the anchor
+    // km. arrivalAt(blocks, km) − t0 is ~constant in t0 (dwell + pace don't move with t0), so a short
+    // fixpoint converges in one or two passes.
+    t0Sec = timeToSec(anchor.time) - km * slowest;
+    for (let i = 0; i < 3; i++) {
+      const prov = planRun({ route, runners, t0Sec });
+      const drift = timeToSec(anchor.time) - arrivalAt(prov.blocks, km);
+      if (Math.abs(drift) < 1) break;
+      t0Sec += drift;
+    }
   } else {
     // Auto (or a waypoint anchor whose waypoint vanished): derive a sensible flock start from
     // the runners' constraints — and stay at 07:00 when there's nothing to derive from.

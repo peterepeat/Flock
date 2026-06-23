@@ -608,18 +608,24 @@ async function genAutoStartSweep() {
     session([person("a", { earliestStartTime: "08:00" }), person("b"), person("c", { latestFinishTime: "10:00" })], wps, { startAnchor: { kind: "auto" }, intendedDistanceKm: 24 }),
     session([person("a", { finishPin: atWp("w2"), latestFinishTime: "08:00" }), person("b", { pace: 600 })], wps, { startAnchor: { kind: "auto" }, intendedDistanceKm: 24 }),
   ];
+  // FAIR comparison: auto-start minimises EXCLUDED runners first, then togetherness. A departure that
+  // scores higher only by PARKING a runner the auto plan keeps (e.g. a far-earliest runner the dwell
+  // can't cleanly admit at that t0) is not a valid "beat" — so the brute-force best only counts t0
+  // that park no MORE runners than auto. Among those, auto must be within 1 of the best objective.
+  const parkedCount = (rr: Res) => rr.warnings.filter((w) => /couldn't place/.test(w.message)).length;
   for (let si = 0; si < seeds.length; si++) {
     curSig = `L8/autostart/seed${si}`;
     const autoR = await calculateRoutes(seeds[si]);
-    const autoObj = objOf(autoR);
+    const autoObj = objOf(autoR), autoParked = parkedCount(autoR);
     let best = autoObj, bestT = "auto";
     for (let g = 5 * 3600; g <= 10 * 3600; g += 300) {
       const t = `${String(Math.floor(g / 3600)).padStart(2, "0")}:${String(Math.floor((g % 3600) / 60)).padStart(2, "0")}`;
       const r = await calculateRoutes(session(seeds[si].participants, seeds[si].waypoints, { startAnchor: { kind: "departure", time: t }, intendedDistanceKm: seeds[si].intendedDistanceKm }));
+      if (parkedCount(r) > autoParked) continue; // not a fair beat — it excludes a runner auto keeps
       const o = objOf(r);
       if (o > best + 0.01) { best = o; bestT = t; }
     }
-    okS(autoObj >= best - 1, `M3 auto obj ${round2(autoObj)} beaten by departure@${bestT} obj ${round2(best)} (−${round2(best - autoObj)})`);
+    okH(autoObj >= best - 1, `M3 auto obj ${round2(autoObj)} beaten by departure@${bestT} obj ${round2(best)} (−${round2(best - autoObj)})`);
   }
 }
 
@@ -672,13 +678,14 @@ async function genXfail() {
     const dep = r.routes[0]?.departureTime;
     okH(dep ? toSec(dep) <= 12 * 3600 : true, `negative-t0 rendered departure as ${dep} (expected early am)`);
   }
-  // I4b — waypoint-anchor ETA drift with an UPSTREAM dwell: DEFERRED (Cause D), still XFAIL.
+  // I4b — waypoint-anchor ETA with an UPSTREAM dwell: the two-pass back-compute (Cause D fix) makes
+  // the flock reach the anchor waypoint at the anchor time despite the upstream dwell.
   {
     curSig = "L10/eta-drift";
     const r = await calculateRoutes(session([person("a"), person("b")], [wpAt(1, 20), wpAt(2)], { startAnchor: { kind: "waypoint", waypointId: "w2", time: "08:00" } }));
     const eta = r.waypointEtas?.["w2"];
     const drift = eta ? Math.abs(toSec(eta) - toSec("08:00")) : 0;
-    okX(`I4b wp-anchor ETA drift with upstream dwell = ${eta} (drift ${drift}s) [Cause D deferred]`, drift > 60);
+    okH(drift <= 60, `I4b wp-anchor ETA ${eta} drifts ${drift}s from anchor 08:00 (upstream dwell)`);
   }
 }
 
