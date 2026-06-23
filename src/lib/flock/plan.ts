@@ -388,8 +388,19 @@ function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number):
       out.push({ id: p.id, message: conflictMessage(p.conflict) });
       continue;
     }
+    // A FEASIBLE runner can DISPLAY a set-off a minute or two before their earliest: the flock
+    // passes their join point a touch before earliest and the ~90s grace lets them MEET it rather
+    // than be parked, then minute-flooring drops the shown time a little further. Name it (never
+    // silent) — explain the early departure rather than leave the runner to spot the gap. Mirror
+    // secToTime's round-then-floor so the trigger matches the HH:MM the runner actually sees, and
+    // only when there's a flock (≥2 feasible) for "meet the flock" to mean something.
+    if (feasibleCount >= 2 && r.earliestSec != null) {
+      const dispMin = (s: number) => Math.floor(Math.round(s) / 60);
+      const earlyMin = dispMin(r.earliestSec) - dispMin(p.departSec);
+      if (earlyMin >= 1) out.push({ id: p.id, message: `You set off about ${earlyMin} min before your earliest start to meet the flock.` });
+    }
     const covered = p.exitKm - p.enterKm;
-    if (covered >= routeKm - 0.3) continue; // full-route runner: no warning
+    if (covered >= routeKm - 0.3) continue; // full-route runner: no further warning
     if (feasibleCount <= 1) continue; // no flock to be lonely from
     if (p.togetherMinutes < 1) {
       out.push({ id: p.id, message: "You barely overlap with anyone — pin your start to a waypoint the flock passes to join them." });

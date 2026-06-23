@@ -790,6 +790,24 @@ async function genEdge() {
         okH(/too far from the route/.test(fw.message), `R-earliest/far-approach message must name the approach cause (got "${fw.message}")`);
     }
   }
+  // R-earliest/grace-display-note: a FEASIBLE runner whose displayed set-off floors a minute before
+  // their earliest (the ~90s grace + minute-flooring) must NOT be left silent — name the early
+  // departure. On a fixed t0 06:52 with a stop at w2, j's earliest 07:00 displays as 06:59.
+  {
+    const g = await check("R-earliest/grace-display-note",
+      session([person("flock"), person("j", { earliestStartTime: "07:00" })],
+        [wpAt(1), wpAt(2, 20), wpAt(3), wpAt(4)], { startAnchor: { kind: "departure", time: "06:52" }, intendedDistanceKm: 18 }));
+    if (g) {
+      const j = g.routes.find((rt) => rt.participantId === "j")!;
+      const jws = g.warnings.filter((w) => w.participantId === "j");
+      const feasible = j.distanceKm > 1 && !jws.some((w) => /couldn't place/.test(w.message));
+      // Only assert the note when the display actually precedes earliest (guards harness drift).
+      if (feasible && toSec(j.departureTime) < toSec("07:00")) {
+        okH(jws.some((w) => /set off about \d+ min before your earliest start/.test(w.message)),
+          `R-earliest/grace-display-note j departs ${j.departureTime} (< earliest 07:00) but no early-set-off note (got "${jws.map((w) => w.message).join(" | ")}")`);
+      }
+    }
+  }
 }
 
 // --- run all -----------------------------------------------------------------
