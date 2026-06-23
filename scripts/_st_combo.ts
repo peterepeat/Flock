@@ -228,6 +228,14 @@ function assertInvariants(s: FlockSession, r: Res) {
     // J. warnings (n==1 handled below)
   }
 
+  // G4: a PARKED (excluded) runner pollutes nobody — the feasibility verdict is decided before the
+  // togetherness objective is built, so a parked runner appears in NO pair and as NO one's companion.
+  const parkedIds = new Set(r.warnings.filter((w) => /couldn't place/.test(w.message)).map((w) => w.participantId));
+  for (const id of parkedIds) {
+    okH(!r.summary.pairwiseSummary.some((pr) => pr.participantA === id || pr.participantB === id), `G4 ${id} parked but in a togetherness pair`);
+    okH(!r.routes.some((rt) => rt.participantId !== id && rt.schedule.some((seg) => seg.companionIds.includes(id))), `G4 ${id} parked but listed as a companion`);
+  }
+
   // D. together-time
   const maxPairs = (n * (n - 1)) / 2;
   okH(r.summary.pairwiseSummary.length <= maxPairs, `D1 pairs ${r.summary.pairwiseSummary.length} > ${maxPairs}`);
@@ -710,6 +718,17 @@ async function genEdge() {
   // the zero-arc co-arrival path). Fixed departure so auto-start can't rescue it. Oracle: G2 (line ~219)
   // catches a non-parked late arrival; after the fix the runner is parked (G2 exempt, "couldn't place").
   await check("R-late/coarrival", session([person("slow"), person("dl", { startPin: atWp("w5"), finishPin: atWp("w5"), latestFinishTime: "07:15" })], [wpAt(1), wpAt(2), wpAt(3), wpAt(4), wpAt(5)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+  // R-late/zero-arc-at-deadline: a runner pinned to ONE km where the flock arrives EXACTLY at the
+  // runner's deadline (zero arc, arrive == deadline) is a non-participant — it must PARK + be named,
+  // never be dressed as a "barely overlap" feasible runner (the latest==arrival knife-edge that the
+  // strict `arrive > latest+grace` check alone misses).
+  {
+    const res = await check("R-late/zero-arc-at-deadline", session([person("a", { earliestStartTime: "08:00" }), person("b"), person("c", { startPin: atWp("w1"), finishPin: atWp("w1"), latestFinishTime: "07:00" })], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+    if (res) {
+      const cw = res.warnings.find((w) => w.participantId === "c");
+      okH(!!cw && /couldn't place/.test(cw.message), `R-late/zero-arc-at-deadline c must PARK+name (got "${cw?.message ?? ""}")`);
+    }
+  }
   // R-earliest/long-approach-floor: a runner whose start is pinned far off-route (a long, unmovable
   // approach commute) WITH an earliest, on AUTO — the flock is DELAYED (the t0 floor) so they depart
   // no earlier than their earliest, instead of being dragged out early by the commute (Cause G).

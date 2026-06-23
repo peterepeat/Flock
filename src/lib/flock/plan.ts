@@ -12,6 +12,12 @@ import type { Block, Conflict, Plan, Route, RunInput, Runner, RunnerPlan, Warnin
 
 const EPS = 1e-6;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+// Grace on the HARD clock checks: a runner within this much of its deadline/earliest reads as "on
+// time" and is not parked. The values match the G1/G2 acceptance oracles in _st_combo (display is
+// floored to the minute, so sub-minute slop is invisible). On Auto, resolveAutoStart drives the
+// departure to exactly the earliest, so this grace only ever absorbs an unslidable fixed-t0 offset.
+const LATEST_GRACE_SEC = 60;
+const EARLIEST_GRACE_SEC = 90;
 
 interface Window {
   enterKm: number;
@@ -491,18 +497,58 @@ export function planRun(input: RunInput): Plan {
   const { route, runners, t0Sec } = input;
   const L = route.totalKm;
 
-  // Feasibility is a value, not a forgotten case. Infeasible runners are set aside (never
-  // placed into the geometry/timing pipeline, where they'd pollute the flock or read off a
-  // fabricated clock); they are PARKED below with a named conflict.
+  // Feasibility is a value, not a forgotten case. A runner with contradictory hard constraints is set
+  // aside up front by classify(); a runner whose RESOLVED clock still busts a deadline/earliest (a
+  // zero-span window escapes the enforce* trims) is set aside by the post-hoc check below. BOTH are
+  // decided BEFORE the togetherness objective is built, so a parked runner never pollutes the others'
+  // company — it contributes no block, no share, no companionId. Never a fabricated/borrowed clock.
   const verdict = new Map(runners.map((r) => [r.id, classify(r, t0Sec, L)] as const));
   const feasible = runners.filter((r) => verdict.get(r.id) == null);
 
   const wins = resolveWindows({ route, runners: feasible, t0Sec });
   enforceEarliest(wins, route, feasible, t0Sec);
   enforceDeadlines(wins, route, feasible, t0Sec);
-  const blocks = computeBlocks(wins, route, feasible, t0Sec);
 
-  // per-runner share of together-time
+  // A runner's timing read off a built schedule: their own SPAN if they hold a block; else a genuine
+  // CO-ARRIVAL where the flock passes their (zero-arc) point (connector-only / cap-exhausted) — timed
+  // off the flock clock there, never a fabricated 0; else null (no block, flock never there). Reading
+  // the span (not arrivalAt(km)) is what times an opening dwell, a finish-at-café reunion, and a
+  // deadline-trimmed dwell correctly.
+  const timingOf = (r: Runner, blocks: Block[]) => {
+    const w = wins.get(r.id)!;
+    const span = runnerSpan(blocks, r.id);
+    if (span != null) return { w, departSec: span.first - r.approachKm * r.pace, arriveSec: span.last + r.egressKm * r.pace };
+    if (blocks.some((b) => b.loKm - EPS <= w.enterKm && w.enterKm <= b.hiKm + EPS))
+      return { w, departSec: arrivalAt(blocks, w.enterKm) - r.approachKm * r.pace, arriveSec: arrivalAt(blocks, w.exitKm) + r.egressKm * r.pace };
+    return null;
+  };
+  // A HARD clock contradiction on the resolved timing → a named park. The latest test also catches a
+  // zero-DISTANCE co-arriver landing AT its deadline (arc 0, arrive = deadline): a non-participant
+  // dressed as one (the knife-edge the strict `> latest+grace` misses). EARLIEST: a fixed t0 that sets
+  // the runner off before they can — on Auto, resolveAutoStart delays the flock so this never arises.
+  const clockConflict = (r: Runner, t: { departSec: number; arriveSec: number; w: Window }): Conflict | null => {
+    const distanceKm = t.w.exitKm - t.w.enterKm + r.approachKm + r.egressKm;
+    if (r.latestSec != null && (t.arriveSec > r.latestSec + LATEST_GRACE_SEC || (distanceKm < EPS && t.arriveSec >= r.latestSec - EPS)))
+      return { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec };
+    if (r.earliestSec != null && t.departSec < r.earliestSec - EARLIEST_GRACE_SEC)
+      return { kind: "earliest-unreachable", earliestSec: r.earliestSec, t0Sec };
+    return null;
+  };
+
+  // Decide the post-hoc parks on a PROVISIONAL plan, then build the real blocks over the SURVIVORS
+  // only — so the objective (below) is computed without the parked runners (the decision is sticky:
+  // the per-runner loop reads postHoc, it does not re-derive a verdict against the rebuilt blocks).
+  const provisional = computeBlocks(wins, route, feasible, t0Sec);
+  const postHoc = new Map<string, Conflict>();
+  for (const r of feasible) {
+    const t = timingOf(r, provisional);
+    const c = t != null ? clockConflict(r, t) : null;
+    if (c != null) postHoc.set(r.id, c);
+  }
+  const survivors = postHoc.size ? feasible.filter((r) => !postHoc.has(r.id)) : feasible;
+  const blocks = postHoc.size ? computeBlocks(wins, route, survivors, t0Sec) : provisional;
+
+  // per-runner share of together-time (over the survivor blocks)
   const share = new Map(runners.map((r) => [r.id, 0]));
   for (const b of blocks) {
     if (b.members.length < 2) continue;
@@ -510,55 +556,21 @@ export function planRun(input: RunInput): Plan {
     for (const id of b.members) share.set(id, share.get(id)! + min);
   }
 
-  // Does any built block reach this arc km (i.e. is the flock actually there)? Distinguishes a
-  // zero-arc runner who CO-ARRIVES where the flock passes (connector-only / cap-exhausted-by-
-  // connector — anchor at the flock's clock there) from one with no flock at their point at all
-  // (the F1 case — park, never read a fabricated 0).
-  const reaches = (km: number) => blocks.some((b) => b.loKm - EPS <= km && km <= b.hiKm + EPS);
-
   const plans: RunnerPlan[] = runners.map((r) => {
-    let conflict = verdict.get(r.id) ?? null;
+    const conflict = verdict.get(r.id) ?? postHoc.get(r.id) ?? null;
     if (conflict == null) {
-      const w = wins.get(r.id)!;
-      // Timing reads the runner's ACTUAL span in the built schedule: leave home to reach the first
-      // block as it starts (minus approach), arrive home after the last block (plus egress) — what
-      // makes an opening dwell, a finish-at-café reunion, and a deadline-trimmed dwell time correct.
-      // A zero-arc runner with no block of their own but whose point the flock passes is a genuine
-      // CO-ARRIVAL (connector-only / cap-exhausted) — timed off the flock clock there, never a 0.
-      const span = runnerSpan(blocks, r.id);
-      const timing = span != null
-        ? { departSec: span.first - r.approachKm * r.pace, arriveSec: span.last + r.egressKm * r.pace }
-        : reaches(w.enterKm)
-          ? { departSec: arrivalAt(blocks, w.enterKm) - r.approachKm * r.pace, arriveSec: arrivalAt(blocks, w.exitKm) + r.egressKm * r.pace }
-          : null;
-      if (timing != null) {
-        const distanceKm = w.exitKm - w.enterKm + r.approachKm + r.egressKm;
-        // Validate the resolved ARRIVAL against the runner's deadline before declaring them a
-        // participant. A zero-span window escapes enforceDeadlines' trim (it skips collapsed
-        // windows), so the co-arrival path above would otherwise emit a clock HOURS past latestSec
-        // with conflict=null (the F2 wound). Honour the deadline by NAMING it and parking instead.
-        // EARLIEST: on AUTO, resolveAutoStart raises the flock's t0 floor so departSec ≥ earliest (the
-        // flock waits). On a FIXED t0 (the user pinned a departure/waypoint time) the flock can't wait,
-        // so a runner whose unmovable approach makes them set off before their earliest is named, not
-        // silently dragged out early. enforceEarliest already slid the on-route join, so this only
-        // bites a fixed-offset commute that can't be slid — the −90 grace matches the G1 oracle.
-        // (The distance cap is NOT a hard ceiling on the connector commute: a manual-pin approach is
-        // mandatory overhead that may push the total slightly over the cap — see _st_connectors #9.)
-        if (r.latestSec != null && timing.arriveSec > r.latestSec + 60)
-          conflict = { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec };
-        else if (r.earliestSec != null && timing.departSec < r.earliestSec - 90)
-          conflict = { kind: "earliest-unreachable", earliestSec: r.earliestSec, t0Sec };
-        else
-          return {
-            id: r.id, enterKm: w.enterKm, exitKm: w.exitKm,
-            departSec: timing.departSec, arriveSec: timing.arriveSec,
-            distanceKm, togetherMinutes: share.get(r.id)!, conflict: null,
-          };
-      }
+      const t = timingOf(r, blocks);
+      if (t != null)
+        return {
+          id: r.id, enterKm: t.w.enterKm, exitKm: t.w.exitKm,
+          departSec: t.departSec, arriveSec: t.arriveSec,
+          distanceKm: t.w.exitKm - t.w.enterKm + r.approachKm + r.egressKm,
+          togetherMinutes: share.get(r.id)!, conflict: null,
+        };
     }
-    // PARK — a clearly-minimal result anchored to the runner's OWN tightest hard floor (never a
-    // fabricated 0, a borrowed clock, or a wrapped negative). Either a named conflict (from classify
-    // or the HARD re-validation above), or a squeezed-out window with no flock near their point.
+    // PARK — minimal, anchored to the runner's OWN tightest hard floor in space (fixed enter pin >
+    // fixed exit pin > route origin; display only) and time (max(t0, earliest)) — never a fabricated 0,
+    // borrowed clock, or wrapped negative. A named conflict, or a squeezed-out window with no flock near.
     const parkKm = r.enter.kind === "fixed" ? clamp(r.enter.km, 0, L) : r.exit.kind === "fixed" ? clamp(r.exit.km, 0, L) : 0;
     const floor = Math.max(t0Sec, r.earliestSec ?? -Infinity);
     return { id: r.id, enterKm: parkKm, exitKm: parkKm, departSec: floor, arriveSec: floor, distanceKm: 0, togetherMinutes: 0, conflict: conflict ?? { kind: "window-empty" } };
