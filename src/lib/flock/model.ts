@@ -69,6 +69,15 @@ export interface Block {
   paceSec: Pace | null; // null = dwell (rest)
 }
 
+// A runner's constraints are mutually unsatisfiable (a contradiction), so they cannot really
+// participate. The plan must NOT silently fabricate a window for them — it parks them at a
+// feasible anchor (their own tightest hard floor) and names the conflict in a warning.
+export type Conflict =
+  | { kind: "cap-vs-pin"; capKm: number; enterPinKm: number | null; exitPinKm: number | null }
+  | { kind: "earliest-after-latest"; earliestSec: number; latestSec: number } // connector-aware es>lf
+  | { kind: "latest-unreachable"; latestSec: number; t0Sec: number } // the flock starts too late for this deadline
+  | { kind: "window-empty" }; // the constraints leave no room to run with the flock
+
 export interface RunnerPlan {
   id: string;
   enterKm: number;
@@ -77,6 +86,7 @@ export interface RunnerPlan {
   arriveSec: number; // when they finish
   distanceKm: number; // covered arc + connectors
   togetherMinutes: number; // THEIR share: minutes they spent with ≥1 other
+  conflict: Conflict | null; // null iff a genuine participant; set iff parked-infeasible
 }
 
 export interface Warning {

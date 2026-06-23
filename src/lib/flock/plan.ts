@@ -8,7 +8,7 @@
 // is the heart, kept pure so it is deterministically testable.
 // ---------------------------------------------------------------------------
 
-import type { Block, Plan, Route, RunInput, Runner, RunnerPlan, Warning } from "./model";
+import type { Block, Conflict, Plan, Route, RunInput, Runner, RunnerPlan, Warning } from "./model";
 
 const EPS = 1e-6;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -184,6 +184,15 @@ function resolveWindows(input: RunInput): Map<string, Window> {
         exitKm: hi != null ? hi : best.exitKm,
       };
       next.exitKm = Math.max(next.enterKm, next.exitKm);
+      // Respect the distance cap even when a bound is FIXED: pull the FREE end in so the arc
+      // never exceeds the cap (a finish pin past the cap → start later, not run past the cap).
+      // Both-ends-pinned-over-cap is genuinely impossible and is flagged in classify().
+      if (cap < Infinity && next.exitKm - next.enterKm > cap + EPS) {
+        if (lo == null) next.enterKm = next.exitKm - cap;
+        else if (hi == null) next.exitKm = next.enterKm + cap;
+      }
+      next.enterKm = clamp(next.enterKm, 0, L);
+      next.exitKm = clamp(Math.max(next.enterKm, next.exitKm), 0, L);
       const cur = wins.get(r.id)!;
       if (Math.abs(next.enterKm - cur.enterKm) > EPS || Math.abs(next.exitKm - cur.exitKm) > EPS) moved = true;
       wins.set(r.id, next);
@@ -317,20 +326,40 @@ function dwellStartAt(blocks: Block[], km: number): number | null {
   return start;
 }
 
-// --- warnings: explain every deviation; flag the lonely --------------------
+// A plain-English reason a runner's constraints can't be honoured — named, never silent (D3).
+function conflictMessage(c: Conflict): string {
+  switch (c.kind) {
+    case "cap-vs-pin":
+      return `Your finish point is about ${(c.exitPinKm ?? 0).toFixed(1)} km along but your distance limit is ${c.capKm.toFixed(1)} km — they can't both hold, so we couldn't place you on this run.`;
+    case "earliest-after-latest":
+      return "Your earliest start is after your latest finish — there's no window to run, so we couldn't place you on this run.";
+    case "latest-unreachable":
+      return "The run starts too late for you to finish by your deadline, so we couldn't place you on this run.";
+    case "window-empty":
+      return "Your limits leave no room to run on this route, so we couldn't place you on this run.";
+  }
+}
+
+// --- warnings: name every infeasibility; flag the lonely; silent on the happy path ----------
+// A PARKED (infeasible) runner is named with its conflict. A short-covered FEASIBLE runner is
+// "lonely"/"with the flock" ONLY when there is a flock (≥2 feasible participants) — a solo
+// runner has no flock to be told about. A full-route runner gets no warning.
 function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number): Warning[] {
   const out: Warning[] = [];
   const byId = new Map(runners.map((r) => [r.id, r]));
+  const feasibleCount = plans.filter((p) => p.conflict == null).length;
   for (const p of plans) {
     const r = byId.get(p.id)!;
+    if (p.conflict != null) {
+      out.push({ id: p.id, message: conflictMessage(p.conflict) });
+      continue;
+    }
     const covered = p.exitKm - p.enterKm;
-    const short = covered < routeKm - 0.3;
-    // The lonely warning ("re-pin to join") only applies to a runner whose OWN window is
-    // short — never to a full-route runner whose together-time merely dipped because ANOTHER
-    // runner collapsed to a degenerate point. A full-coverage runner gets no warning.
-    if (short && p.togetherMinutes < 1 && plans.length > 1) {
+    if (covered >= routeKm - 0.3) continue; // full-route runner: no warning
+    if (feasibleCount <= 1) continue; // no flock to be lonely from
+    if (p.togetherMinutes < 1) {
       out.push({ id: p.id, message: "You barely overlap with anyone — pin your start to a waypoint the flock passes to join them." });
-    } else if (short) {
+    } else {
       const why = r.latestSec != null ? "to be done in time" : r.earliestSec != null ? "from when you can start" : r.maxDistanceKm != null ? "to stay within your distance" : "where you join/leave";
       out.push({ id: p.id, message: `You're with the flock for ${covered.toFixed(1)} of ${routeKm.toFixed(1)} km — ${why}.` });
     }
@@ -388,13 +417,45 @@ export function resolveAutoStart(route: Route, runners: Runner[]): number {
   return bestT0;
 }
 
+// --- feasibility verdict ----------------------------------------------------
+// Is this runner's set of HARD constraints mutually satisfiable AT THIS t0? Pure from the
+// runner + t0 (no window needed): the three genuine contradictions. A runner that classifies
+// to a Conflict is PARKED, not silently fabricated a window. Returns null = a real participant.
+function classify(r: Runner, t0: number, L: number): Conflict | null {
+  const approachSec = r.approachKm * r.pace;
+  const egressSec = r.egressKm * r.pace;
+  // Earliest-after-latest, connector-aware: can't leave before earliest AND be home by latest.
+  if (r.earliestSec != null && r.latestSec != null && r.earliestSec + approachSec > r.latestSec - egressSec + EPS)
+    return { kind: "earliest-after-latest", earliestSec: r.earliestSec, latestSec: r.latestSec };
+  // The flock departs so late this runner can't make their deadline even doing nothing but the
+  // connector commute (covers an impossible deadline AND a flock pushed late by another runner).
+  if (r.latestSec != null && t0 + approachSec + egressSec > r.latestSec + EPS)
+    return { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec: t0 };
+  // Both ends pinned but their separation exceeds the distance cap — neither can be honoured.
+  if (r.enter.kind === "fixed" && r.exit.kind === "fixed" && r.maxDistanceKm != null) {
+    const lo = clamp(r.enter.km, 0, L), hi = clamp(r.exit.km, 0, L);
+    const arcCap = Math.max(0, r.maxDistanceKm - r.approachKm - r.egressKm);
+    if (Math.abs(hi - lo) > arcCap + EPS)
+      return { kind: "cap-vs-pin", capKm: r.maxDistanceKm, enterPinKm: lo, exitPinKm: hi };
+  }
+  return null;
+}
+
 // --- the entry point --------------------------------------------------------
 export function planRun(input: RunInput): Plan {
   const { route, runners, t0Sec } = input;
-  const wins = resolveWindows(input);
-  enforceEarliest(wins, route, runners, t0Sec);
-  enforceDeadlines(wins, route, runners, t0Sec);
-  const blocks = computeBlocks(wins, route, runners, t0Sec);
+  const L = route.totalKm;
+
+  // Feasibility is a value, not a forgotten case. Infeasible runners are set aside (never
+  // placed into the geometry/timing pipeline, where they'd pollute the flock or read off a
+  // fabricated clock); they are PARKED below with a named conflict.
+  const verdict = new Map(runners.map((r) => [r.id, classify(r, t0Sec, L)] as const));
+  const feasible = runners.filter((r) => verdict.get(r.id) == null);
+
+  const wins = resolveWindows({ route, runners: feasible, t0Sec });
+  enforceEarliest(wins, route, feasible, t0Sec);
+  enforceDeadlines(wins, route, feasible, t0Sec);
+  const blocks = computeBlocks(wins, route, feasible, t0Sec);
 
   // per-runner share of together-time
   const share = new Map(runners.map((r) => [r.id, 0]));
@@ -404,25 +465,47 @@ export function planRun(input: RunInput): Plan {
     for (const id of b.members) share.set(id, share.get(id)! + min);
   }
 
+  // Does any built block reach this arc km (i.e. is the flock actually there)? Distinguishes a
+  // zero-arc runner who CO-ARRIVES where the flock passes (connector-only / cap-exhausted-by-
+  // connector — anchor at the flock's clock there) from one with no flock at their point at all
+  // (the F1 case — park, never read a fabricated 0).
+  const reaches = (km: number) => blocks.some((b) => b.loKm - EPS <= km && km <= b.hiKm + EPS);
+
   const plans: RunnerPlan[] = runners.map((r) => {
-    const w = wins.get(r.id)!;
-    // Timing reads the runner's ACTUAL span in the built schedule: they leave home so as to
-    // reach their first block exactly when it starts (minus the approach run from a manual pin),
-    // and arrive home after their last block ends (plus the egress run). Reading the span — not
-    // arrivalAt(km) — is what makes an opening dwell, a finish-at-a-café reunion, and a
-    // deadline-trimmed dwell all time correctly. Fallback for a degenerate zero-span window.
-    const span = runnerSpan(blocks, r.id);
-    const first = span?.first ?? arrivalAt(blocks, w.enterKm);
-    const last = span?.last ?? arrivalAt(blocks, w.exitKm);
-    return {
-      id: r.id,
-      enterKm: w.enterKm,
-      exitKm: w.exitKm,
-      departSec: first - r.approachKm * r.pace,
-      arriveSec: last + r.egressKm * r.pace,
-      distanceKm: w.exitKm - w.enterKm + r.approachKm + r.egressKm,
-      togetherMinutes: share.get(r.id)!,
-    };
+    const conflict = verdict.get(r.id) ?? null;
+    if (conflict == null) {
+      const w = wins.get(r.id)!;
+      // Timing reads the runner's ACTUAL span in the built schedule: leave home to reach the
+      // first block as it starts (minus approach), arrive home after the last block (plus egress)
+      // — what makes an opening dwell, a finish-at-café reunion, and a deadline-trimmed dwell time
+      // correctly.
+      const span = runnerSpan(blocks, r.id);
+      if (span != null) {
+        return {
+          id: r.id, enterKm: w.enterKm, exitKm: w.exitKm,
+          departSec: span.first - r.approachKm * r.pace,
+          arriveSec: span.last + r.egressKm * r.pace,
+          distanceKm: w.exitKm - w.enterKm + r.approachKm + r.egressKm,
+          togetherMinutes: share.get(r.id)!, conflict: null,
+        };
+      }
+      // No block of their own, but the flock passes their point → genuine co-arrival.
+      if (reaches(w.enterKm)) {
+        return {
+          id: r.id, enterKm: w.enterKm, exitKm: w.exitKm,
+          departSec: arrivalAt(blocks, w.enterKm) - r.approachKm * r.pace,
+          arriveSec: arrivalAt(blocks, w.exitKm) + r.egressKm * r.pace,
+          distanceKm: w.exitKm - w.enterKm + r.approachKm + r.egressKm,
+          togetherMinutes: share.get(r.id)!, conflict: null,
+        };
+      }
+    }
+    // PARK — a clearly-minimal result anchored to the runner's OWN tightest hard floor (never a
+    // fabricated 0, a borrowed clock, or a wrapped negative). Either a named conflict, or a
+    // squeezed-out window with no flock anywhere near their point.
+    const parkKm = r.enter.kind === "fixed" ? clamp(r.enter.km, 0, L) : r.exit.kind === "fixed" ? clamp(r.exit.km, 0, L) : 0;
+    const floor = Math.max(t0Sec, r.earliestSec ?? -Infinity);
+    return { id: r.id, enterKm: parkKm, exitKm: parkKm, departSec: floor, arriveSec: floor, distanceKm: 0, togetherMinutes: 0, conflict: conflict ?? { kind: "window-empty" } };
   });
 
   return {

@@ -18,6 +18,9 @@ import { projectPlan, type Connectors, type FlockCalcResult } from "./project";
 import { buildRoute, nearestKm, pointAtKm } from "./route";
 
 const DEFAULT_PACE = 360; // 6:00/km
+// Clamp an absurd intended distance so a route can't span more than a day (the UI slider tops
+// out at 80 km; this only bites pathological API input). Keeps the wall clock single-day.
+const MAX_RUN_KM = 200;
 
 const geomToLatLng = (g: GeoJSON.LineString): LatLng[] =>
   (g.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
@@ -42,7 +45,7 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   const route: Route = await buildRoute({
     waypoints: waypoints.map((w) => ({ id: w.id, location: w.location, name: w.name, stopMinutes: w.stopMinutes })),
     origin,
-    targetKm: session.intendedDistanceKm,
+    targetKm: session.intendedDistanceKm != null ? Math.min(session.intendedDistanceKm, MAX_RUN_KM) : null,
   });
 
   // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route.
@@ -59,7 +62,9 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   const connectors = new Map<string, Connectors>();
   const runners: Runner[] = await Promise.all(
     participants.map(async (p): Promise<Runner> => {
-      const pace = p.pace ?? DEFAULT_PACE;
+      // Guard against non-finite / non-positive pace (UI-unreachable, but pathological API input
+      // would otherwise flow NaN/Infinity into the clock math and break HH:MM).
+      const pace = Number.isFinite(p.pace) && (p.pace as number) > 0 ? (p.pace as number) : DEFAULT_PACE;
       const s = resolve(p.startPin);
       const f = resolve(p.finishPin);
       let approachKm = 0;

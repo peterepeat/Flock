@@ -150,6 +150,10 @@ function assertInvariants(s: FlockSession, r: Res) {
   for (const rt of r.routes) {
     const p = pById.get(rt.participantId)!;
     const sig = rt.participantId;
+    // A PARKED (infeasible) runner is named by a "couldn't place you" warning. Hard constraints
+    // (earliest/latest) are honoured for FEASIBLE runners; a parked runner is exempt because its
+    // constraints were contradictory — it is flagged, not silently violated.
+    const parked = r.warnings.some((w) => w.participantId === rt.participantId && /couldn't place/.test(w.message));
     // A. time validity + structure
     okH(isHHMM(rt.departureTime) && isHHMM(rt.arrivalTime), `A1 ${sig} clock invalid ${rt.departureTime}/${rt.arrivalTime}`);
     for (const seg of rt.schedule) okH(isHHMM(seg.startTime) && isHHMM(seg.endTime), `A1 ${sig} seg clock ${seg.startTime}/${seg.endTime}`);
@@ -165,7 +169,10 @@ function assertInvariants(s: FlockSession, r: Res) {
     okH(mono, `A2 ${sig} segment end<start`);
     okH(chained, `A2 ${sig} segments not chained`);
     okH(uw[uw.length - 1] >= uw[0] - 1, `A3 ${sig} depart>arrive`);
-    okH(rt.estimatedDurationMinutes >= 0 && Math.abs(rt.estimatedDurationMinutes - Math.round((toSec(rt.arrivalTime) - toSec(rt.departureTime)) / 60)) <= 1,
+    // span on UNWRAPPED seconds (a long route may cross midnight — the secToTime no-day-marker
+    // limitation, Cause E1, deferred; the duration field itself is correct).
+    const a4span = unwrap([rt.departureTime, rt.arrivalTime]);
+    okH(rt.estimatedDurationMinutes >= 0 && Math.abs(rt.estimatedDurationMinutes - Math.round((a4span[1] - a4span[0]) / 60)) <= 1,
       `A4 ${sig} duration ${rt.estimatedDurationMinutes} vs span`);
     okH(rt.schedule.length > 0 && rt.departureTime === rt.schedule[0].startTime, `A5 ${sig} departure!=schedule[0].start`);
     okH(rt.schedule.length > 0 && rt.arrivalTime === rt.schedule[rt.schedule.length - 1].endTime, `A6 ${sig} arrival!=schedule[last].end`);
@@ -208,8 +215,8 @@ function assertInvariants(s: FlockSession, r: Res) {
     }
 
     // G. earliest / latest
-    if (p.earliestStartTime != null) okS(toSec(rt.departureTime) >= toSec(p.earliestStartTime) - 90, `G1 ${sig} departs ${rt.departureTime} before earliest ${p.earliestStartTime}`);
-    if (p.latestFinishTime != null) okH(toSec(rt.arrivalTime) <= toSec(p.latestFinishTime) + 60, `G2 ${sig} arrives ${rt.arrivalTime} after latest ${p.latestFinishTime}`);
+    if (p.earliestStartTime != null && !parked) okS(toSec(rt.departureTime) >= toSec(p.earliestStartTime) - 90, `G1 ${sig} departs ${rt.departureTime} before earliest ${p.earliestStartTime}`);
+    if (p.latestFinishTime != null && !parked) okH(toSec(rt.arrivalTime) <= toSec(p.latestFinishTime) + 60, `G2 ${sig} arrives ${rt.arrivalTime} after latest ${p.latestFinishTime}`);
 
     // J. warnings (n==1 handled below)
   }
@@ -233,7 +240,9 @@ function assertInvariants(s: FlockSession, r: Res) {
   if (r.summary.pairwiseSummary.length > 0) okH(obj >= Math.max(...r.summary.pairwiseSummary.map((p) => p.togetherMinutes)) - 0.05, `D4 obj < max pair`);
   if (n === 1) {
     okH(r.summary.pairwiseSummary.length === 0 && r.summary.totalTogetherMinutes === 0, `D1 n=1 has pairs`);
-    okH(r.warnings.length === 0, `J1 n=1 has warnings`);
+    // J1 (relaxed): a solo runner is never told about a "flock"/lonely-overlap that doesn't
+    // exist; a self-contradiction ("couldn't place you") warning IS allowed.
+    okH(!r.warnings.some((w) => /barely overlap|with the flock for/i.test(w.message)), `J1 n=1 flock/lonely warning: ${r.warnings.map((w) => w.message).join(" | ")}`);
   }
   // D5 companions == block members (set), reconstructed from sharedSegments
   for (const seg of r.sharedSegments) {
@@ -638,40 +647,31 @@ async function genFailureInjection() {
 
 // --- L10 XFAIL / documented holes ---
 async function genXfail() {
-  section("L10 XFAIL (documented holes)");
+  section("L10 input guards (were XFAIL → now fixed) + deferred holes");
   const wps2 = [wpAt(1), wpAt(2)];
-  // E35 pace=0 / negative
-  for (const pc of [0, -5]) {
+  // E35/E36 — pace 0 / negative / Infinity / NaN are finite-clamped (Step 5) → clean schedule.
+  for (const pc of [0, -5, Infinity, NaN]) {
     curSig = `L10/pace=${pc}`;
     try {
       const r = await calculateRoutes(session([person("a", { pace: pc }), person("b")], wps2, { intendedDistanceKm: 12 }));
-      const bad = r.routes.some((rt) => !isHHMM(rt.arrivalTime) || unwrap([rt.departureTime, rt.arrivalTime])[1] < unwrap([rt.departureTime, rt.arrivalTime])[0] - 1);
-      okX(`pace=${pc} produces invalid/inverted schedule`, bad);
-    } catch { okX(`pace=${pc} threw`, true); }
+      const bad = r.routes.some((rt) => !isHHMM(rt.arrivalTime) || unwrap([rt.departureTime, rt.arrivalTime])[1] < unwrap([rt.departureTime, rt.arrivalTime])[0] - 1) || hasBadNumber(r);
+      okH(!bad, `pace=${pc} produced invalid/inverted/non-finite schedule`);
+    } catch (e) { okH(false, `pace=${pc} threw: ${e instanceof Error ? e.message : String(e)}`); }
   }
-  // E36 pace=Infinity / NaN
-  for (const pc of [Infinity, NaN]) {
-    curSig = `L10/pace=${pc}`;
-    try {
-      const r = await calculateRoutes(session([person("a", { pace: pc }), person("b")], wps2, { intendedDistanceKm: 12 }));
-      const bad = r.routes.some((rt) => !isHHMM(rt.arrivalTime)) || hasBadNumber(r);
-      okX(`pace=${pc} produces non-finite clocks`, bad);
-    } catch { okX(`pace=${pc} threw`, true); }
+  // negative-t0 — an early wp-anchor on a long route no longer wraps to evening (own-floor park).
+  {
+    curSig = "L10/negative-t0-wrap";
+    const r = await calculateRoutes(session([person("a", { pace: 600 }), person("b", { pace: 600 })], [wpAt(1), wpAt(2), wpAt(3), wpAt(4)], { startAnchor: { kind: "waypoint", waypointId: "w4", time: "06:00" }, intendedDistanceKm: 24 }));
+    const dep = r.routes[0]?.departureTime;
+    okH(dep ? toSec(dep) <= 12 * 3600 : true, `negative-t0 rendered departure as ${dep} (expected early am)`);
   }
-  // I4b waypoint-anchor ETA drift with upstream dwell
+  // I4b — waypoint-anchor ETA drift with an UPSTREAM dwell: DEFERRED (Cause D), still XFAIL.
   {
     curSig = "L10/eta-drift";
     const r = await calculateRoutes(session([person("a"), person("b")], [wpAt(1, 20), wpAt(2)], { startAnchor: { kind: "waypoint", waypointId: "w2", time: "08:00" } }));
     const eta = r.waypointEtas?.["w2"];
     const drift = eta ? Math.abs(toSec(eta) - toSec("08:00")) : 0;
-    okX(`I4b wp-anchor ETA drift with upstream dwell = ${eta} (drift ${drift}s)`, drift > 60);
-  }
-  // negative-t0 wrap: early wp-anchor on a long route
-  {
-    curSig = "L10/negative-t0-wrap";
-    const r = await calculateRoutes(session([person("a", { pace: 600 }), person("b", { pace: 600 })], [wpAt(1), wpAt(2), wpAt(3), wpAt(4)], { startAnchor: { kind: "waypoint", waypointId: "w4", time: "06:00" }, intendedDistanceKm: 24 }));
-    const dep = r.routes[0]?.departureTime;
-    okX(`negative-t0 renders departure as ${dep} (expected early am)`, dep ? toSec(dep) > 12 * 3600 : false);
+    okX(`I4b wp-anchor ETA drift with upstream dwell = ${eta} (drift ${drift}s) [Cause D deferred]`, drift > 60);
   }
 }
 

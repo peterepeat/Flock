@@ -48,6 +48,25 @@ export function projectPlan(input: {
   // --- per-runner routes + schedules ---
   const routes: ComputedRoute[] = plan.runners.map((p) => {
     const r = runners.find((x) => x.id === p.id)!;
+
+    // PARKED (infeasible): a clearly-minimal single 0-duration marker at the park point, timed
+    // off the runner's own floor. No connector legs — they never commute to a route they don't
+    // run (an egress leg would start before departure and break the schedule). They're named by
+    // a warning. Keeps departureTime === schedule[0].start and arrivalTime === schedule[last].end.
+    if (p.conflict != null) {
+      const pt = pointAtKm(route, p.enterKm);
+      return {
+        participantId: p.id,
+        waypoints: [pt, pt, pt, pt],
+        geometry: toLine([pt, pt]),
+        distanceKm: round2(p.distanceKm),
+        estimatedDurationMinutes: Math.max(0, Math.round((p.arriveSec - p.departSec) / 60)),
+        departureTime: secToTime(p.departSec),
+        arrivalTime: secToTime(p.arriveSec),
+        schedule: [{ type: "run", startTime: secToTime(p.departSec), endTime: secToTime(p.arriveSec), startLocation: pt, endLocation: pt, paceSecPerKm: r.pace, companionIds: [], distanceKm: 0 }],
+      };
+    }
+
     const conn = connectors?.get(p.id);
     const slice = sliceKm(route, p.enterKm, p.exitKm);
     const enterPt = pointAtKm(route, p.enterKm);
