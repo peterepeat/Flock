@@ -83,7 +83,7 @@ export type Conflict =
   | { kind: "cap-vs-pin"; capKm: number; enterPinKm: number | null; exitPinKm: number | null }
   | { kind: "cap-too-short"; capKm: number; commuteKm: number } // the connector commute alone busts the cap, or cap≈0 with a pin
   | { kind: "earliest-after-latest"; earliestSec: number; latestSec: number } // connector-aware es>lf
-  | { kind: "earliest-unreachable"; earliestSec: number; t0Sec: number } // a fixed flock start departs before this runner can
+  | { kind: "earliest-unreachable"; earliestSec: number; t0Sec: number; cause: "approach" | "passed" | "dwell" } // a fixed flock start outruns this runner's earliest. cause: approach=connector too long to meet it; passed=flock reached the join point and moved on; dwell=flock is resting at the join across the earliest, but a mid-stop join isn't scheduled yet (deferred joinOf split)
   | { kind: "latest-unreachable"; latestSec: number; t0Sec: number } // the flock starts too late for this deadline
   | { kind: "window-empty" }; // the constraints leave no room to run with the flock
 

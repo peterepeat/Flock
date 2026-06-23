@@ -222,7 +222,10 @@ function assertInvariants(s: FlockSession, r: Res) {
     // under-shoots and wrongly parks a feasible auto runner — so assert no such park on auto here.)
     if (p.earliestStartTime != null && (s.startAnchor == null || s.startAnchor.kind === "auto")) {
       const ew = r.warnings.find((x) => x.participantId === rt.participantId);
-      okH(!(ew && /sets off before your earliest start/.test(ew.message)), `G3 ${sig} earliest-unreachable PARK on AUTO (floor under-shot)`);
+      // Detect via "the flock can wait for you" — the Auto-delay remedy carried by EVERY
+      // earliest-unreachable message (all 3 causes) and by no other conflict (notably NOT
+      // earliest-after-latest, whose text also mentions "earliest start"). Stable under reword.
+      okH(!(ew && /the flock can wait for you/.test(ew.message)), `G3 ${sig} earliest-unreachable PARK on AUTO (floor under-shot)`);
     }
 
     // J. warnings (n==1 handled below)
@@ -756,6 +759,35 @@ async function genEdge() {
       const x = res.routes.find((rt) => rt.participantId === "x")!;
       const xw = res.warnings.find((w) => w.participantId === "x");
       okH(!(xw && /couldn't place/.test(xw.message)) && x.distanceKm > 1, `R-earliest/early-deadline x must RUN via an early start (got dist ${round2(x.distanceKm)}, warn "${xw?.message ?? ""}")`);
+    }
+  }
+  // R-earliest/honest-msg: the earliest-unreachable warning must NAME the real cause, not a blanket
+  // "too far to catch up" (the deferred-C message-honesty fix). Two cases on a FIXED t0 (which can't
+  // wait, so the runner genuinely parks):
+  //  (1) mid-dwell joiner — a FREE start whose earliest lands INSIDE a stop's dwell: the flock is
+  //      resting right there, so "too far to catch up" is FALSE; the message must say so (dwell cause).
+  //  (2) genuine far approach — an unmovable far pin: "too far from the route to reach the flock" IS
+  //      accurate, so that wording must be PRESERVED for this case (approach cause).
+  {
+    const mid = await check("R-earliest/mid-dwell-honest-msg",
+      session([person("flock"), person("j", { earliestStartTime: "07:15" })],
+        [wpAt(1), wpAt(2, 30), wpAt(3), wpAt(4)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+    if (mid) {
+      const jw = mid.warnings.find((w) => w.participantId === "j");
+      okH(!!jw && /couldn't place/.test(jw.message), `R-earliest/mid-dwell j must PARK+name (got "${jw?.message ?? ""}")`);
+      okH(!!jw && !/too far to catch up/.test(jw.message) && /resting at your join point/.test(jw.message),
+        `R-earliest/mid-dwell message must be honest (flock is resting there), not "too far" (got "${jw?.message ?? ""}")`);
+    }
+  }
+  {
+    const far = await check("R-earliest/far-approach-honest-msg",
+      session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("b")],
+        [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+    if (far) {
+      const fw = far.warnings.find((w) => w.participantId === "far");
+      // far parks here (fixed t0 can't wait); the approach wording must stay accurate for this case.
+      if (fw && /couldn't place/.test(fw.message))
+        okH(/too far from the route/.test(fw.message), `R-earliest/far-approach message must name the approach cause (got "${fw.message}")`);
     }
   }
 }

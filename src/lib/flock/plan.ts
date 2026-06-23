@@ -357,7 +357,16 @@ function conflictMessage(c: Conflict): string {
     case "earliest-after-latest":
       return "Your earliest start is after your latest finish — there's no window to run, so we couldn't place you on this run.";
     case "earliest-unreachable":
-      return "The flock sets off before your earliest start and your start point is too far to catch up in time, so we couldn't place you on this run — try an Auto start (the flock can wait for you) or move your start closer.";
+      // Three honest sub-cases (see earliestCause). Every branch keeps "the flock can wait for you"
+      // (the Auto-delay remedy unique to earliest-unreachable — _st_combo's G3 oracle keys on it).
+      switch (c.cause) {
+        case "approach":
+          return "Your start point is too far from the route to reach the flock by your earliest start — you'd have to set off before then, so we couldn't place you on this run. Try an Auto start (the flock can wait for you) or move your start closer.";
+        case "dwell":
+          return "The flock is resting at your join point at your earliest start, but we can't add you partway through its stop, so we couldn't place you on this run. Try an Auto start — the flock can wait for you.";
+        case "passed":
+          return "The flock passes your join point before your earliest start and has moved on by the time you can set off, so we couldn't place you on this run. Try an Auto start (the flock can wait for you) or a start point the flock reaches later.";
+      }
     case "latest-unreachable":
       return "The run starts too late for you to finish by your deadline, so we couldn't place you on this run.";
     case "window-empty":
@@ -537,12 +546,30 @@ export function planRun(input: RunInput): Plan {
   // zero-DISTANCE co-arriver landing AT its deadline (arc 0, arrive = deadline): a non-participant
   // dressed as one (the knife-edge the strict `> latest+grace` misses). EARLIEST: a fixed t0 that sets
   // the runner off before they can — on Auto, resolveAutoStart delays the flock so this never arises.
-  const clockConflict = (r: Runner, t: { departSec: number; arriveSec: number; w: Window }): Conflict | null => {
+  // WHY a runner's earliest can't be met — so the warning is accurate, not a blanket "your start
+  // point is too far to catch up" (which is FALSE for a free start sitting at a stop the flock is
+  // resting at). Three honest cases, read off the SAME survivor blocks the park is decided on:
+  //   approach — the flock IS at the join point at/after the earliest; the connector commute is what
+  //              forces the early set-off (the genuine far-approach case).
+  //   dwell    — the flock is RESTING at the join point across the earliest; the runner could join
+  //              mid-rest, but a mid-stop join isn't scheduled yet (the deferred joinOf split).
+  //   passed   — the flock reached the join point and moved on before the earliest.
+  const earliestCause = (r: Runner, t: { departSec: number; w: Window }, blocks: Block[]): "approach" | "passed" | "dwell" => {
+    const flockAtJoin = t.departSec + r.approachKm * r.pace; // flock-clock when it reaches the join km
+    if (flockAtJoin >= r.earliestSec! - EARLIEST_GRACE_SEC) return "approach";
+    const dwellStart = dwellStartAt(blocks, t.w.enterKm);
+    if (dwellStart != null) {
+      const dwellSec = route.stops.filter((s) => Math.abs(s.km - t.w.enterKm) < 1e-3).reduce((sum, s) => sum + s.durationSec, 0);
+      if (r.earliestSec! <= dwellStart + dwellSec + EARLIEST_GRACE_SEC) return "dwell";
+    }
+    return "passed";
+  };
+  const clockConflict = (r: Runner, t: { departSec: number; arriveSec: number; w: Window }, blocks: Block[]): Conflict | null => {
     const distanceKm = t.w.exitKm - t.w.enterKm + r.approachKm + r.egressKm;
     if (r.latestSec != null && (t.arriveSec > r.latestSec + LATEST_GRACE_SEC || (distanceKm < EPS && t.arriveSec >= r.latestSec - EPS)))
       return { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec };
     if (r.earliestSec != null && t.departSec < r.earliestSec - EARLIEST_GRACE_SEC)
-      return { kind: "earliest-unreachable", earliestSec: r.earliestSec, t0Sec };
+      return { kind: "earliest-unreachable", earliestSec: r.earliestSec, t0Sec, cause: earliestCause(r, t, blocks) };
     return null;
   };
 
@@ -560,7 +587,7 @@ export function planRun(input: RunInput): Plan {
     for (const r of feasible) {
       if (postHoc.has(r.id)) continue;
       const t = timingOf(r, blocks);
-      const c: Conflict | null = t == null ? { kind: "window-empty" } : clockConflict(r, t);
+      const c: Conflict | null = t == null ? { kind: "window-empty" } : clockConflict(r, t, blocks);
       if (c != null) { postHoc.set(r.id, c); added = true; }
     }
     if (!added) break;
