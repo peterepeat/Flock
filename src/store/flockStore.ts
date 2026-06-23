@@ -14,6 +14,10 @@ export type CalcStatus = "idle" | "working" | "error";
 // add" gesture. One editor is open at a time.
 export type WaypointEditorState = { mode: "closed" } | { mode: "add" } | { mode: "edit"; id: string };
 
+// Mobile information architecture: a bottom nav toggles full-screen panels over a persistent
+// map. "map" = no panel (just the canvas + legend). Desktop ignores this (fixed column).
+export type ActiveTab = "run" | "route" | "runners" | "map";
+
 // A single undoable local edit. `undo`/`redo` issue the compensating / original
 // mutation (a normal PatchAction via flockApi) and return the resulting session,
 // which undo()/redo() then apply. Per-device only.
@@ -66,11 +70,10 @@ interface FlockState {
   mapCenter: LatLng | null;
   mapBounds: { minLat: number; minLng: number; maxLat: number; maxLng: number } | null;
 
-  // Mobile bottom-sheet height. The single source of truth for whether the sheet
-  // is a small peek (lots of map) or fully open (lots of drawer). Opening an
-  // editor requests expansion; tapping the map / the handle can collapse it again
-  // WITHOUT discarding an in-progress edit. Ignored on desktop (fixed column).
-  sheetExpanded: boolean;
+  // Which mobile surface is showing. The bottom nav toggles full-screen panels over a
+  // persistent map; "map" shows no panel. Opening the participant form / waypoint editor
+  // implies their owning tab (runners / route). Ignored on desktop (fixed column).
+  activeTab: ActiveTab;
 
   // Route calculation feedback
   calcStatus: CalcStatus;
@@ -110,7 +113,7 @@ interface FlockState {
   setSectionOpen: (key: string, open: boolean) => void;
   setHoveredWaypoint: (waypointId: string | null) => void;
   setHoveredSegment: (seg: { participantId: string; index: number } | null) => void;
-  setSheetExpanded: (expanded: boolean) => void;
+  setActiveTab: (tab: ActiveTab) => void;
   setMapView: (view: {
     center: LatLng;
     bounds: { minLat: number; minLng: number; maxLat: number; maxLng: number };
@@ -145,7 +148,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   hoveredSegment: null,
   mapCenter: null,
   mapBounds: null,
-  sheetExpanded: false,
+  activeTab: "run",
 
   calcStatus: "idle",
   calcWarnings: [],
@@ -214,11 +217,10 @@ export const useFlockStore = create<FlockState>((set, get) => ({
     return true;
   },
 
-  // Opening any editor requests the sheet expand (mobile); closing collapses it
-  // back to a peek so the map is the resting state ("more map when not editing").
-  // The participant form and the waypoint editor are mutually exclusive, so
-  // opening the form also clears any open waypoint editor (else it would linger
-  // and reappear when the form closes).
+  // Opening the participant form / waypoint editor switches to its owning mobile tab
+  // (runners / route). Closing leaves the tab where it is (the list, not the map). The
+  // form and the waypoint editor are mutually exclusive, so opening the form also clears
+  // any open waypoint editor (else it would linger and reappear when the form closes).
   openAddForm: () =>
     set({
       formOpen: true,
@@ -227,7 +229,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       waypointEditor: { mode: "closed" },
       placingWaypoint: false,
       waypointPin: null,
-      sheetExpanded: true,
+      activeTab: "runners",
     }),
   openEditForm: (participantId) =>
     set({
@@ -238,7 +240,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       waypointEditor: { mode: "closed" },
       placingWaypoint: false,
       waypointPin: null,
-      sheetExpanded: true,
+      activeTab: "runners",
     }),
   closeForm: () =>
     set({
@@ -250,7 +252,6 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       placingFinish: false,
       draftFinish: null,
       pendingFinish: null,
-      sheetExpanded: false,
     }),
   setHovered: (participantId) => set({ hoveredParticipantId: participantId }),
   setSelected: (participantId) => set({ selectedParticipantId: participantId }),
@@ -263,7 +264,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setPlacingFinish: (placing) => set({ placingFinish: placing }),
   setPlacingWaypoint: (placing) => set({ placingWaypoint: placing }),
   setWaypointPin: (ll) => set({ waypointPin: ll }),
-  openAddWaypoint: () => set({ waypointEditor: { mode: "add" }, sheetExpanded: true }),
+  openAddWaypoint: () => set({ waypointEditor: { mode: "add" }, activeTab: "route" }),
   // Editing a waypoint lives in the list view, so close the participant form and
   // any placing mode first.
   openEditWaypoint: (waypointId) =>
@@ -275,14 +276,14 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       placingFinish: false,
       selectedParticipantId: null, // editing a waypoint clears any route focus
       waypointPin: null, // drop any stray pin so it can't pop a spurious add
-      sheetExpanded: true,
+      activeTab: "route",
     }),
   closeWaypointEditor: () =>
-    set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null, sheetExpanded: false }),
+    set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null }),
   setSectionOpen: (key, open) => set((s) => ({ openSections: { ...s.openSections, [key]: open } })),
   setHoveredWaypoint: (waypointId) => set({ hoveredWaypointId: waypointId }),
   setHoveredSegment: (seg) => set({ hoveredSegment: seg }),
-  setSheetExpanded: (expanded) => set({ sheetExpanded: expanded }),
+  setActiveTab: (tab) => set({ activeTab: tab }),
   setMapView: ({ center, bounds }) => set({ mapCenter: center, mapBounds: bounds }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),

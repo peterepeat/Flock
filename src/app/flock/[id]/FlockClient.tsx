@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import Header from "@/components/Header";
 import FlockMap from "@/components/Map/FlockMap";
 import FlockPanel from "@/components/Panel/FlockPanel";
+import MobileTabBar from "@/components/Panel/MobileTabBar";
 import { usePolling } from "@/hooks/usePolling";
 import { useRouteCalculation } from "@/hooks/useRouteCalculation";
 import { useFlockStore } from "@/store/flockStore";
@@ -14,10 +15,23 @@ export default function FlockClient({ flockId }: { flockId: string }) {
   const setFlockId = useFlockStore((s) => s.setFlockId);
   const status = useFlockStore((s) => s.status);
   const calcStatus = useFlockStore((s) => s.calcStatus);
+  const hasSession = useFlockStore((s) => s.session != null);
+  const setActiveTab = useFlockStore((s) => s.setActiveTab);
+  const initialTabSet = useRef(false);
 
   useEffect(() => {
     setFlockId(flockId);
   }, [flockId, setFlockId]);
+
+  // Pick the opening mobile tab once the flock loads: an empty flock starts on Run (the first
+  // authoring step); an already-populated one (a joiner via the shared link) starts on Map so
+  // they see the plan first. Desktop ignores activeTab. Runs once per flock load.
+  useEffect(() => {
+    if (initialTabSet.current || !hasSession) return;
+    initialTabSet.current = true;
+    const s = useFlockStore.getState().session!;
+    if (s.participants.length > 0 || s.waypoints.length > 0) setActiveTab("map");
+  }, [hasSession, setActiveTab]);
 
   usePolling(flockId);
   useRouteCalculation(flockId);
@@ -67,6 +81,7 @@ export default function FlockClient({ flockId }: { flockId: string }) {
           )}
         </div>
       </div>
+      <MobileTabBar />
     </div>
   );
 }

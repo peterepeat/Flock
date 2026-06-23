@@ -236,20 +236,11 @@ function ClickHandler() {
         st.setSelected(null);
         return;
       }
-      //  2. on mobile, collapse an expanded sheet to give the map back — this is
-      //     the "tap the map to dismiss the drawer" gesture. It's non-destructive:
-      //     any in-progress edit stays open underneath, just peeked, so the user
-      //     can drag the handle back up and carry on (matches bottom-sheet prior
-      //     art — dismiss ≠ cancel);
-      if (isMobileViewport() && st.sheetExpanded) {
-        log.debug("map click → collapse sheet");
-        st.setSheetExpanded(false);
-        return;
-      }
-      //  3. otherwise, in the list view with nothing open, drop a waypoint here —
-      //     this opens the prefilled add editor, and addWaypoint appends it to the
-      //     END of the route.
-      if (!st.formOpen && st.waypointEditor.mode === "closed" && st.session?.lockedAt == null) {
+      //  2. on DESKTOP, in the list view with nothing open, drop a waypoint here (the
+      //     "tap empty map to add a waypoint" gesture). On mobile this is deliberately a
+      //     button instead (the "+ Add a waypoint" flow), so a stray tap while panning the
+      //     review map can't create an accidental waypoint.
+      if (!isMobileViewport() && !st.formOpen && st.waypointEditor.mode === "closed" && st.session?.lockedAt == null) {
         log.debug("map click → append waypoint", { lat: ll.lat, lng: ll.lng });
         st.setWaypointPin(ll);
       }
@@ -795,7 +786,7 @@ function Legend() {
   const hasMeet = shared.some((s) => s.isConvergence !== false);
 
   return (
-    <div className="absolute bottom-4 right-4 z-[500] max-w-[200px] rounded-xl border border-white/15 bg-surface-mid p-3 text-xs shadow-panel">
+    <div className="absolute bottom-[calc(4.5rem_+_env(safe-area-inset-bottom))] right-4 z-[500] max-w-[200px] rounded-xl border border-white/15 bg-surface-mid p-3 text-xs shadow-panel md:bottom-4">
       <ul className="space-y-0.5">
         {session.participants.map((p) => {
           const active = selected === p.id;
