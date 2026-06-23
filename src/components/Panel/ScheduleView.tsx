@@ -1,5 +1,7 @@
 "use client";
 
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect } from "react";
+
 import { initial } from "@/lib/colors";
 import { formatDistance, formatDuration, formatPaceShort } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
@@ -11,6 +13,13 @@ import { useFlockStore } from "@/store/flockStore";
  */
 export default function ScheduleView({ participantId }: { participantId: string }) {
   const session = useFlockStore((s) => s.session);
+  const hoveredSegment = useFlockStore((s) => s.hoveredSegment);
+  const setHoveredSegment = useFlockStore((s) => s.setHoveredSegment);
+
+  // Drop any segment emphasis when this schedule collapses, so the map doesn't keep a
+  // stretch lit with no row under the pointer.
+  useEffect(() => () => setHoveredSegment(null), [setHoveredSegment]);
+
   if (!session) return null;
 
   const participant = session.participants.find((p) => p.id === participantId);
@@ -68,9 +77,41 @@ export default function ScheduleView({ participantId }: { participantId: string 
       <Line time={route.departureTime} text={hasCompany ? "Set off from home" : "Leave home"} emphasis />
 
       {route.schedule.map((seg, i) => {
+        // Hover / focus / tap a row to light up just that stretch of the runner's route on the
+        // map. Pure set-and-clear (no toggle): pointer hover AND keyboard focus both preview it,
+        // a tap sets it, and it clears when the pointer or focus leaves — so a click can never
+        // cancel the hover it's sitting on. aria-pressed exposes the lit state to assistive tech.
+        const active = hoveredSegment?.participantId === participantId && hoveredSegment.index === i;
+        const show = () => setHoveredSegment({ participantId, index: i });
+        const clear = () => setHoveredSegment(null);
+        const stretch =
+          seg.type === "rest"
+            ? "the coffee stop"
+            : seg.companionIds.length > 0
+              ? `flocking with ${seg.companionIds.map(nameOf).join(" + ")}`
+              : soloLabel(i).toLowerCase();
+        const rowProps = {
+          role: "button" as const,
+          tabIndex: 0,
+          "aria-pressed": active,
+          "aria-label": `Highlight ${stretch} on the map`,
+          onMouseEnter: show,
+          onFocus: show,
+          onMouseLeave: clear,
+          onBlur: clear,
+          onClick: show,
+          onKeyDown: (e: ReactKeyboardEvent) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              show();
+            }
+          },
+        };
+        const ring = active ? " ring-1 ring-inset ring-white/30" : "";
+
         if (seg.type === "rest") {
           return (
-            <div key={i} className="rounded-md bg-surface-lift/60 px-2 py-1.5">
+            <div key={i} {...rowProps} className={`cursor-pointer rounded-md bg-surface-lift/60 px-2 py-1.5${ring}`}>
               <div className="flex items-baseline justify-between gap-2">
                 <span className="mono text-xs text-fog">
                   {seg.startTime}–{seg.endTime}
@@ -88,7 +129,8 @@ export default function ScheduleView({ participantId }: { participantId: string 
         return (
           <div
             key={i}
-            className="rounded-md px-2 py-1.5"
+            {...rowProps}
+            className={`cursor-pointer rounded-md px-2 py-1.5${ring}`}
             style={
               withSomeone
                 ? { background: `${tint}22`, borderLeft: `2px solid ${tint}` }

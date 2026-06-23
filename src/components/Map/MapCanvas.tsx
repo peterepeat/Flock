@@ -4,6 +4,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
+  CircleMarker,
   MapContainer,
   Marker,
   Polyline,
@@ -47,24 +48,49 @@ function divMarker(color: string, label: string, kind: MarkerKind, draggable = f
 
 /** A numbered pin for a shared waypoint (☕ if it has a stop). The teardrop is kept
     small (it was crowding the map on mobile) but sits inside a larger transparent
-    box so it stays an easy tap / drag target. */
-function waypointIcon(order: number, hasStop: boolean, draggable = false): L.DivIcon {
+    box so it stays an easy tap / drag target. When `highlighted` (its panel row is
+    hovered, or it's being edited) it swells and picks up a together-coloured halo. */
+function waypointIcon(order: number, hasStop: boolean, draggable = false, highlighted = false): L.DivIcon {
   const cursor = draggable ? "cursor:grab;" : "";
-  const T = 20; // visible teardrop
-  const BOX = 32; // transparent hit area around it
+  const T = highlighted ? 28 : 20; // visible teardrop
+  const BOX = highlighted ? 44 : 32; // transparent hit area around it
+  const border = highlighted ? "var(--together)" : "var(--accent)";
+  const borderW = highlighted ? 3 : 2;
+  const glow = highlighted
+    ? "0 0 0 4px var(--together-glow),0 2px 10px rgba(0,0,0,0.6)"
+    : "0 2px 6px rgba(0,0,0,0.5)";
+  const fontSize = highlighted ? 13 : 10;
   return L.divIcon({
     className: "",
     html:
       `<div style="${cursor}display:flex;align-items:center;justify-content:center;width:${BOX}px;height:${BOX}px;">` +
       `<div style="display:flex;align-items:center;justify-content:center;` +
       `width:${T}px;height:${T}px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);` +
-      `background:var(--text);border:2px solid var(--accent);` +
-      `box-shadow:0 2px 6px rgba(0,0,0,0.5);">` +
-      `<span style="transform:rotate(45deg);font-size:10px;font-weight:600;color:#15151a;">` +
+      `background:var(--text);border:${borderW}px solid ${border};` +
+      `box-shadow:${glow};">` +
+      `<span style="transform:rotate(45deg);font-size:${fontSize}px;font-weight:600;color:#15151a;">` +
       `${hasStop ? "☕" : order}</span></div></div>`,
     iconSize: [BOX, BOX],
     iconAnchor: [BOX / 2, (BOX - T) / 2 + T * 0.92], // teardrop tip at the location
   });
+}
+
+/** Nearest vertex index on a [lng,lat] polyline to a point — used to slice the stretch of
+    a runner's route that a hovered schedule row covers (squared-degree distance is fine at
+    a city's scale). */
+function nearestIdx(coords: [number, number][], ll: LatLng): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const dx = coords[i][0] - ll.lng;
+    const dy = coords[i][1] - ll.lat;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
 }
 
 // Direction-of-travel chevrons are sampled along the flock spine at this ground
@@ -284,6 +310,14 @@ export default function MapCanvas() {
   const pendingStart = useFlockStore((s) => s.pendingStart);
   const pendingFinish = useFlockStore((s) => s.pendingFinish);
 
+  // Panel-driven emphasis: a hovered (or being-edited) waypoint pops its marker; a hovered
+  // schedule row lights up just that stretch of the runner's route.
+  const hoveredWaypointId = useFlockStore((s) => s.hoveredWaypointId);
+  const waypointEditor = useFlockStore((s) => s.waypointEditor);
+  const hoveredSegment = useFlockStore((s) => s.hoveredSegment);
+  const highlightWaypointId =
+    hoveredWaypointId ?? (waypointEditor.mode === "edit" ? waypointEditor.id : null);
+
   const flockId = useFlockStore((s) => s.flockId);
 
   // Stable [lat,lng] identity per marker. react-leaflet re-applies a Marker's
@@ -386,6 +420,25 @@ export default function MapCanvas() {
     () => (focusedRoute ? arrowsAlong(focusedRoute.geometry.coordinates, SPINE_ARROW_SPACING_M) : []),
     [focusedRoute],
   );
+
+  // The map geometry for a hovered schedule row: slice the runner's route between the
+  // segment's start/end points. A rest (the coffee stop) is a single point, drawn as a
+  // pulsing ring instead of a line.
+  const segmentHighlight = useMemo(() => {
+    if (!hoveredSegment) return null;
+    const r = routes.find((x) => x.participantId === hoveredSegment.participantId);
+    const seg = r?.schedule[hoveredSegment.index];
+    if (!r || !seg) return null;
+    const coords = r.geometry.coordinates as [number, number][];
+    const a = nearestIdx(coords, seg.startLocation);
+    const b = nearestIdx(coords, seg.endLocation);
+    const slice = coords.slice(Math.min(a, b), Math.max(a, b) + 1);
+    const color = participants.find((p) => p.id === r.participantId)?.color ?? "#ffffff";
+    if (slice.length >= 2) {
+      return { kind: "line" as const, positions: slice.map(([lng, lat]) => [lat, lng] as [number, number]), color };
+    }
+    return { kind: "point" as const, position: [seg.startLocation.lat, seg.startLocation.lng] as [number, number], color };
+  }, [hoveredSegment, routes, participants]);
 
   return (
     <div className="relative h-full w-full">
@@ -554,6 +607,33 @@ export default function MapCanvas() {
           );
         })}
 
+        {/* Schedule-row emphasis — a bright cased overlay (or a ring, at a stop) on just the
+            stretch the hovered schedule row covers. Drawn above the routes, below the pins. */}
+        {segmentHighlight?.kind === "line" && (
+          <>
+            <Polyline
+              key="seg-highlight-casing"
+              positions={segmentHighlight.positions}
+              pathOptions={{ color: "#ffffff", weight: 11, opacity: 0.85, lineCap: "round", lineJoin: "round" }}
+              interactive={false}
+            />
+            <Polyline
+              key="seg-highlight-core"
+              positions={segmentHighlight.positions}
+              pathOptions={{ color: segmentHighlight.color, weight: 6, opacity: 1, lineCap: "round", lineJoin: "round" }}
+              interactive={false}
+            />
+          </>
+        )}
+        {segmentHighlight?.kind === "point" && (
+          <CircleMarker
+            center={segmentHighlight.position}
+            radius={13}
+            pathOptions={{ color: "var(--together)", weight: 3, fillColor: "var(--together)", fillOpacity: 0.25 }}
+            interactive={false}
+          />
+        )}
+
         {/* Meeting points — a diamond only where the flock genuinely grows (the
             rendezvous, a joiner, or two neighbours converging on a feeder). Legs
             where the set only shrinks (a peel-off) are drawn as together segments
@@ -644,9 +724,9 @@ export default function MapCanvas() {
           <Marker
             key={`wp-${w.id}`}
             position={stablePos(`wp-${w.id}`, w.location)}
-            icon={waypointIcon(i + 1, w.stopMinutes > 0, !locked)}
+            icon={waypointIcon(i + 1, w.stopMinutes > 0, !locked, highlightWaypointId === w.id)}
             draggable={!locked}
-            zIndexOffset={400}
+            zIndexOffset={highlightWaypointId === w.id ? 600 : 400}
             eventHandlers={{
               dragend: (e) => {
                 const m = e.target as L.Marker;
@@ -715,7 +795,7 @@ function Legend() {
   const hasMeet = shared.some((s) => s.isConvergence !== false);
 
   return (
-    <div className="absolute bottom-4 right-4 z-[500] max-w-[200px] rounded-xl border border-white/10 bg-surface-mid/90 p-3 text-xs shadow-panel backdrop-blur">
+    <div className="absolute bottom-4 right-4 z-[500] max-w-[200px] rounded-xl border border-white/15 bg-surface-mid p-3 text-xs shadow-panel">
       <ul className="space-y-0.5">
         {session.participants.map((p) => {
           const active = selected === p.id;
@@ -744,7 +824,7 @@ function Legend() {
           {flockRoute && (
             <li className="flex items-center gap-2">
               <span className="h-[3px] w-3.5 rounded-full bg-white/75" />
-              <span className="text-fog">Flock route</span>
+              <span className="text-text-dim">Flock route</span>
             </li>
           )}
           {shared.length > 0 && (
@@ -753,7 +833,7 @@ function Legend() {
                 className="h-[3px] w-3.5 rounded-full"
                 style={{ background: "var(--together)" }}
               />
-              <span className="text-fog">Flocking together</span>
+              <span className="text-text-dim">Flocking together</span>
             </li>
           )}
           {hasMeet && (
@@ -762,12 +842,12 @@ function Legend() {
                 className="ml-1 h-2 w-2 rotate-45"
                 style={{ background: "var(--together)", boxShadow: "0 0 6px var(--together)" }}
               />
-              <span className="text-fog">Meet-up</span>
+              <span className="text-text-dim">Meet-up</span>
             </li>
           )}
         </ul>
       )}
-      <div className="mono mt-2 border-t border-white/10 pt-2 text-fog">
+      <div className="mono mt-2 border-t border-white/10 pt-2 text-text-dim">
         {shared.length} together · {totalMin} min flocking
       </div>
     </div>

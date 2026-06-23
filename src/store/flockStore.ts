@@ -49,6 +49,17 @@ interface FlockState {
   waypointPin: LatLng | null; // location chosen for the waypoint being added (map → form)
   waypointEditor: WaypointEditorState; // which waypoint editor (add/edit) is open, if any
 
+  // Collapsible config sections ("The run" / "The route" / "The runners"). Keyed by a
+  // stable id; an entry is present only once the user has toggled it, so each section can
+  // pick its own content-aware default (open when empty/forming) until then.
+  openSections: Record<string, boolean>;
+
+  // Map emphasis driven from the panel (hover/tap, not a persistent selection). A hovered
+  // waypoint row pops its map marker; a hovered schedule-segment row highlights just that
+  // stretch of the runner's route. Both clear on mouse-out / tap-away.
+  hoveredWaypointId: string | null;
+  hoveredSegment: { participantId: string; index: number } | null;
+
   // Live map viewport, tracked on pan/zoom (MapCanvas → ViewportTracker), so the
   // address search can bias results toward what the user is looking at. `center`
   // is the soft focus point (Photon); `bounds` feeds the Nominatim-fallback viewbox.
@@ -96,6 +107,9 @@ interface FlockState {
   openAddWaypoint: () => void;
   openEditWaypoint: (waypointId: string) => void;
   closeWaypointEditor: () => void;
+  setSectionOpen: (key: string, open: boolean) => void;
+  setHoveredWaypoint: (waypointId: string | null) => void;
+  setHoveredSegment: (seg: { participantId: string; index: number } | null) => void;
   setSheetExpanded: (expanded: boolean) => void;
   setMapView: (view: {
     center: LatLng;
@@ -126,6 +140,9 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   placingWaypoint: false,
   waypointPin: null,
   waypointEditor: { mode: "closed" },
+  openSections: {},
+  hoveredWaypointId: null,
+  hoveredSegment: null,
   mapCenter: null,
   mapBounds: null,
   sheetExpanded: false,
@@ -262,6 +279,9 @@ export const useFlockStore = create<FlockState>((set, get) => ({
     }),
   closeWaypointEditor: () =>
     set({ waypointEditor: { mode: "closed" }, placingWaypoint: false, waypointPin: null, sheetExpanded: false }),
+  setSectionOpen: (key, open) => set((s) => ({ openSections: { ...s.openSections, [key]: open } })),
+  setHoveredWaypoint: (waypointId) => set({ hoveredWaypointId: waypointId }),
+  setHoveredSegment: (seg) => set({ hoveredSegment: seg }),
   setSheetExpanded: (expanded) => set({ sheetExpanded: expanded }),
   setMapView: ({ center, bounds }) => set({ mapCenter: center, mapBounds: bounds }),
   setCalcStatus: (status) => set({ calcStatus: status }),

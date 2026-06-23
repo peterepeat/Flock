@@ -34,6 +34,9 @@ const log = createLogger("participant-form");
 const TIME_MIN = 4 * 60; // 04:00
 const TIME_MAX = 22 * 60; // 22:00
 const TIME_STEP = 15;
+// Pace is stored as sec/km (lower = faster), but the slider reads slowest→fastest
+// (left→right), so we mirror the value about this sum to flip the track direction.
+const PACE_SUM = PACE_MIN_SEC_PER_KM + PACE_MAX_SEC_PER_KM;
 const toMin = (t: string | null, fallback: number) => (t ? Math.round(timeToSec(t) / 60) : fallback);
 
 // A start/finish preference: no preference (the engine places it), at a configured
@@ -306,7 +309,7 @@ export default function ParticipantForm() {
       </Field>
 
       {/* Start pin */}
-      <Field label="Where do you join?" optional>
+      <Field label="Where will you start?" optional>
         <PinPicker
           mode={draft.start.mode}
           onMode={(m) => setStart({ mode: m })}
@@ -322,7 +325,7 @@ export default function ParticipantForm() {
       </Field>
 
       {/* Finish pin */}
-      <Field label="Where do you leave?" optional>
+      <Field label="Where will you finish?" optional>
         <PinPicker
           mode={draft.finish.mode}
           onMode={(m) => setFinish({ mode: m })}
@@ -361,7 +364,12 @@ export default function ParticipantForm() {
         />
         {draft.paceOn && (
           <div className="mt-3">
-            <Slider min={PACE_MIN_SEC_PER_KM} max={PACE_MAX_SEC_PER_KM} step={5} value={draft.paceSec} onChange={(v) => set("paceSec", v)} format={(v) => formatPace(v, unit)} />
+            {/* Track reads slowest (left) → fastest (right): mirror the stored sec/km value. */}
+            <Slider min={PACE_MIN_SEC_PER_KM} max={PACE_MAX_SEC_PER_KM} step={5} value={PACE_SUM - draft.paceSec} onChange={(v) => set("paceSec", PACE_SUM - v)} format={(v) => formatPace(PACE_SUM - v, unit)} />
+            <div className="mt-1 flex justify-between text-[11px] text-fog">
+              <span>Slower</span>
+              <span>Faster</span>
+            </div>
             <p className="mt-1 text-xs text-fog">The flock runs at its slowest, so everyone stays together.</p>
           </div>
         )}

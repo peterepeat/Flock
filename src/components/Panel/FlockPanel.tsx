@@ -5,10 +5,42 @@ import { useEffect, useRef } from "react";
 import ParticipantForm from "@/components/Panel/ParticipantForm";
 import ParticipantList from "@/components/Panel/ParticipantList";
 import RunSettings from "@/components/Panel/RunSettings";
+import Section from "@/components/Panel/Section";
 import TogetherStat from "@/components/Panel/TogetherStat";
 import WaypointsSection from "@/components/Panel/WaypointsSection";
+import type { FlockSession } from "@/lib/types";
+import { formatDistance } from "@/lib/units";
 import { isMobileViewport } from "@/lib/viewport";
 import { useFlockStore } from "@/store/flockStore";
+
+// "07:00" → "7am", "07:30" → "7:30am" — a friendly glance value for the collapsed summary.
+function clockLabel(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const period = h < 12 ? "am" : "pm";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${h12}:${String(m).padStart(2, "0")}${period}` : `${h12}${period}`;
+}
+
+// Faded one-line summaries shown when each section is collapsed.
+function runSummary(s: FlockSession): string {
+  const a = s.startAnchor;
+  const time = a.kind === "auto" ? "7am" : clockLabel(a.time);
+  // Only show distance when it's an explicit value — a bare "Auto" token next to a concrete
+  // time reads ambiguously, so omit it when the distance is left automatic.
+  return s.intendedDistanceKm != null
+    ? `${time} · ${formatDistance(s.intendedDistanceKm, s.unitPreference)}`
+    : time;
+}
+function routeSummary(s: FlockSession): string {
+  const n = s.waypoints.length;
+  if (n === 0) return "None yet";
+  const stops = s.waypoints.filter((w) => w.stopMinutes > 0).length;
+  return `${n} ${n === 1 ? "waypoint" : "waypoints"}${stops > 0 ? ` · ${stops} ${stops === 1 ? "stop" : "stops"}` : ""}`;
+}
+function runnersSummary(s: FlockSession): string {
+  const n = s.participants.length;
+  return n === 0 ? "No one yet" : `${n} ${n === 1 ? "person" : "people"}`;
+}
 
 export default function FlockPanel() {
   const session = useFlockStore((s) => s.session);
@@ -90,37 +122,54 @@ export default function FlockPanel() {
             <ParticipantForm key={editingId ?? "new"} />
           </>
         ) : (
-          <div className="space-y-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Your flock</h2>
-              <span className="mono text-xs text-fog">
-                {session?.participants.length ?? 0}{" "}
-                {(session?.participants.length ?? 0) === 1 ? "person" : "people"}
-              </span>
-            </div>
+          <div className="space-y-3">
+            <h2 className="text-lg font-semibold">Your flock</h2>
 
-            {/* The run skeleton FIRST — waypoints (where you meet / go) and the run
-                settings — then people join it. Waypoints-first by design. */}
-            {session && <WaypointsSection />}
-            {session && <RunSettings />}
+            {/* Each config block is a collapsible concertina with a faded summary of its
+                current settings — scannable at rest, expand to edit. */}
+            {session && (
+              <Section title="The run" summary={runSummary(session)} sectionKey="run">
+                <RunSettings />
+              </Section>
+            )}
 
-            {!locked && (
-              <button
-                type="button"
-                onClick={openAddForm}
-                className="w-full rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
+            {session && !(locked && session.waypoints.length === 0) && (
+              <Section
+                title="The route"
+                summary={routeSummary(session)}
+                sectionKey="route"
+                defaultOpen={session.waypoints.length === 0}
               >
-                + Join the flock
-              </button>
+                <WaypointsSection />
+              </Section>
             )}
 
-            {locked && (
-              <div className="rounded-lg bg-surface px-3 py-2.5 text-sm text-text-dim">
-                The plan is locked. Download your route below.
-              </div>
-            )}
+            {session && (
+              <Section
+                title="The runners"
+                summary={runnersSummary(session)}
+                sectionKey="runners"
+                defaultOpen={session.participants.length < 2}
+              >
+                <ParticipantList />
 
-            <ParticipantList />
+                {!locked && (
+                  <button
+                    type="button"
+                    onClick={openAddForm}
+                    className="mt-3 w-full rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
+                  >
+                    + Join the flock
+                  </button>
+                )}
+
+                {locked && (
+                  <div className="mt-3 rounded-lg bg-surface-mid px-3 py-2.5 text-sm text-text-dim">
+                    The plan is locked. Download your route below.
+                  </div>
+                )}
+              </Section>
+            )}
 
             {calcError && (
               <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-text">

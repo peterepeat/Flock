@@ -45,12 +45,10 @@ export default function RunSettings() {
     save({ startAnchor: target === "departure" ? { kind: "departure", time } : { kind: "waypoint", waypointId: target, time } });
 
   return (
-    <div className="space-y-4 rounded-xl bg-surface p-3">
-      <h3 className="text-sm font-semibold text-text">Run settings</h3>
-
-      <Field label="When does it start?" optional>
+    <div className="space-y-4">
+      <Field label="When does the run start?" optional>
         <Toggle
-          options={[{ value: "off", label: "7:00 default" }, { value: "on", label: "Set a time" }]}
+          options={[{ value: "off", label: "Auto" }, { value: "on", label: "Set a time" }]}
           value={timeSet ? "on" : "off"}
           onChange={(v) => (v === "on" ? setAnchor("departure", anchorTime) : save({ startAnchor: { kind: "auto" } }))}
         />

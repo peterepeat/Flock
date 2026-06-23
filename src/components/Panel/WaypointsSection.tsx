@@ -109,6 +109,7 @@ export default function WaypointsSection() {
   const openAddWaypoint = useFlockStore((s) => s.openAddWaypoint);
   const openEditWaypoint = useFlockStore((s) => s.openEditWaypoint);
   const close = useFlockStore((s) => s.closeWaypointEditor);
+  const setHoveredWaypoint = useFlockStore((s) => s.setHoveredWaypoint);
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
@@ -130,6 +131,10 @@ export default function WaypointsSection() {
   useEffect(() => {
     if (waypointPin && useFlockStore.getState().waypointEditor.mode === "closed") openAddWaypoint();
   }, [waypointPin, openAddWaypoint]);
+
+  // Clear any lingering map emphasis when this section unmounts (collapsed, or the
+  // join form took over) so a marker isn't left highlighted with no row to match.
+  useEffect(() => () => setHoveredWaypoint(null), [setHoveredWaypoint]);
 
   // When an editor opens, bring it into view (after the sheet's height transition
   // settles) so the user sees what they're editing rather than a wall of drawer.
@@ -250,15 +255,9 @@ export default function WaypointsSection() {
     ) : null;
 
   return (
-    <div className="space-y-3 rounded-xl bg-surface p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-text">Where you’ll run together</h3>
-        {waypoints.length > 0 && (
-          <span className="mono text-xs text-fog">{waypoints.length}</span>
-        )}
-      </div>
+    <div className="space-y-3">
       <p className="text-xs text-text-dim">
-        Add a shared waypoint — a café, a landmark, a meeting spot. Everyone’s route
+        Add a shared waypoint — a café, a landmark, a meeting spot. The group’s route
         runs through it, so you spend more time flocking together.
       </p>
 
@@ -287,6 +286,8 @@ export default function WaypointsSection() {
                 ) : (
                   <li
                     draggable={canReorder}
+                    onMouseEnter={() => setHoveredWaypoint(w.id)}
+                    onMouseLeave={() => setHoveredWaypoint(null)}
                     onDragStart={() => {
                       draggingRef.current = true;
                       setDragId(w.id);
@@ -378,7 +379,7 @@ export default function WaypointsSection() {
         <button
           type="button"
           onClick={() => openAddWaypoint()}
-          className="text-sm text-accent hover:brightness-110"
+          className="w-full rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
         >
           + Add a waypoint
         </button>
@@ -452,7 +453,7 @@ function WaypointEditor({
   const [address, setAddress] = useState(initial?.address ?? "");
   const [stopOn, setStopOn] = useState((initial?.stopMinutes ?? 0) > 0);
   const [stopMinutes, setStopMinutes] = useState(
-    initial && initial.stopMinutes > 0 ? initial.stopMinutes : 20,
+    initial && initial.stopMinutes > 0 ? initial.stopMinutes : 30,
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
