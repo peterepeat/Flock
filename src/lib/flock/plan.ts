@@ -546,18 +546,26 @@ export function planRun(input: RunInput): Plan {
     return null;
   };
 
-  // Decide the post-hoc parks on a PROVISIONAL plan, then build the real blocks over the SURVIVORS
-  // only — so the objective (below) is computed without the parked runners (the decision is sticky:
-  // the per-runner loop reads postHoc, it does not re-derive a verdict against the rebuilt blocks).
-  const provisional = computeBlocks(wins, route, feasible, t0Sec);
+  // Decide the post-hoc parks as a FIXPOINT over the SURVIVOR blocks: build the blocks, park any runner
+  // whose RESOLVED timing busts a hard clock (or who holds no block at all), rebuild over the remaining
+  // survivors, repeat. Removing a runner can only speed the flock up (fewer slowest-wins members), so
+  // others may then set off before their earliest — a single pass over a provisional plan could leave a
+  // survivor violating on the rebuilt blocks it is finally timed against. The fixpoint is MONOTONE
+  // (parks only ever grow) so it converges; the objective below reads the final survivor blocks, with no
+  // parked runner polluting it. The verdict is then sticky — the per-runner loop only reads postHoc.
   const postHoc = new Map<string, Conflict>();
-  for (const r of feasible) {
-    const t = timingOf(r, provisional);
-    const c = t != null ? clockConflict(r, t) : null;
-    if (c != null) postHoc.set(r.id, c);
+  let blocks = computeBlocks(wins, route, feasible, t0Sec);
+  for (let pass = 0; pass <= feasible.length; pass++) {
+    let added = false;
+    for (const r of feasible) {
+      if (postHoc.has(r.id)) continue;
+      const t = timingOf(r, blocks);
+      const c: Conflict | null = t == null ? { kind: "window-empty" } : clockConflict(r, t);
+      if (c != null) { postHoc.set(r.id, c); added = true; }
+    }
+    if (!added) break;
+    blocks = computeBlocks(wins, route, feasible.filter((rr) => !postHoc.has(rr.id)), t0Sec);
   }
-  const survivors = postHoc.size ? feasible.filter((r) => !postHoc.has(r.id)) : feasible;
-  const blocks = postHoc.size ? computeBlocks(wins, route, survivors, t0Sec) : provisional;
 
   // per-runner share of together-time (over the survivor blocks)
   const share = new Map(runners.map((r) => [r.id, 0]));
