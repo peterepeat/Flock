@@ -338,6 +338,56 @@ function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number):
   return out;
 }
 
+// --- logic-driven auto start ------------------------------------------------
+// Choose the flock's departure (km-0 clock) when the user leaves the time on "Auto".
+// The objective (summed co-present minutes) is translation-invariant in t0 EXCEPT where a
+// runner's earliest/latest constraint clips their window — so the only t0 values that can
+// matter are the constraint breakpoints. We evaluate the REAL planner at each and keep the
+// best: more togetherness first, then more total participation (so a lone constrained runner
+// still runs the whole route rather than a truncated tail), tie-broken toward a "nice" 07:00.
+// With no constraints there's a single candidate (07:00) — so Auto stays 7am unless a
+// constraint genuinely lets a different start do better.
+const DEFAULT_AUTO_T0 = 7 * 3600; // 07:00
+export function resolveAutoStart(route: Route, runners: Runner[]): number {
+  const earliest = runners.map((r) => r.earliestSec).filter((s): s is number => s != null);
+  const latest = runners.map((r) => r.latestSec).filter((s): s is number => s != null);
+  if (earliest.length === 0 && latest.length === 0) return DEFAULT_AUTO_T0;
+
+  // Full-route duration (slowest pace over the whole arc + all dwell) — the auto default is
+  // everyone running the whole route, so a deadline l means "start by l − this".
+  const slowest = Math.max(360, ...runners.map((r) => r.pace));
+  const dwellSec = route.stops.reduce((s, st) => s + st.durationSec, 0);
+  const fullRunSec = route.totalKm * slowest + dwellSec;
+
+  const cands = new Set<number>([DEFAULT_AUTO_T0]);
+  for (const e of earliest) cands.add(Math.max(0, e));
+  for (const l of latest) cands.add(Math.max(0, l - fullRunSec));
+
+  let bestT0 = DEFAULT_AUTO_T0;
+  let bestTog = -1;
+  let bestDist = -1;
+  let bestNear = Infinity;
+  for (const t0 of [...cands].sort((a, b) => a - b)) {
+    const plan = planRun({ route, runners, t0Sec: t0 });
+    const tog = plan.togetherMinutes;
+    const dist = plan.runners.reduce((s, p) => s + Math.max(0, p.exitKm - p.enterKm), 0);
+    const near = Math.abs(t0 - DEFAULT_AUTO_T0);
+    // Lexicographic: maximise togetherness, then participation distance, then nearness to 07:00.
+    const better =
+      tog > bestTog + EPS ||
+      (Math.abs(tog - bestTog) <= EPS &&
+        (dist > bestDist + EPS ||
+          (Math.abs(dist - bestDist) <= EPS && near < bestNear - EPS)));
+    if (better) {
+      bestT0 = t0;
+      bestTog = tog;
+      bestDist = dist;
+      bestNear = near;
+    }
+  }
+  return bestT0;
+}
+
 // --- the entry point --------------------------------------------------------
 export function planRun(input: RunInput): Plan {
   const { route, runners, t0Sec } = input;

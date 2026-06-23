@@ -13,12 +13,11 @@ import { getRoute } from "../ors";
 import type { FlockSession, LatLng, LocationPin } from "../types";
 import { timeToSec } from "../units";
 import type { Bound, Route, Runner } from "./model";
-import { planRun } from "./plan";
+import { planRun, resolveAutoStart } from "./plan";
 import { projectPlan, type Connectors, type FlockCalcResult } from "./project";
 import { buildRoute, nearestKm, pointAtKm } from "./route";
 
 const DEFAULT_PACE = 360; // 6:00/km
-const DEFAULT_T0 = 7 * 3600; // 07:00
 
 const geomToLatLng = (g: GeoJSON.LineString): LatLng[] =>
   (g.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
@@ -96,17 +95,19 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   );
 
   // Resolve the flock's departure from the time anchor.
-  let t0Sec = DEFAULT_T0;
   const anchor = session.startAnchor ?? { kind: "auto" as const };
+  const anchorWp = anchor.kind === "waypoint" ? wpById.get(anchor.waypointId) : undefined;
+  let t0Sec: number;
   if (anchor.kind === "departure") {
     t0Sec = timeToSec(anchor.time);
-  } else if (anchor.kind === "waypoint") {
-    const w = wpById.get(anchor.waypointId);
-    if (w) {
-      const km = nearestKm(route, w.location);
-      const slowest = Math.max(DEFAULT_PACE, ...runners.map((r) => r.pace));
-      t0Sec = timeToSec(anchor.time) - km * slowest; // back-compute so the flock reaches the waypoint on time
-    }
+  } else if (anchor.kind === "waypoint" && anchorWp) {
+    const km = nearestKm(route, anchorWp.location);
+    const slowest = Math.max(DEFAULT_PACE, ...runners.map((r) => r.pace));
+    t0Sec = timeToSec(anchor.time) - km * slowest; // back-compute so the flock reaches the waypoint on time
+  } else {
+    // Auto (or a waypoint anchor whose waypoint vanished): derive a sensible flock start from
+    // the runners' constraints — and stay at 07:00 when there's nothing to derive from.
+    t0Sec = resolveAutoStart(route, runners);
   }
 
   const plan = planRun({ route, runners, t0Sec });

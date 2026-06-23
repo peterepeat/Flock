@@ -44,6 +44,70 @@ await tryOk(async () => {
 }, "auto anchor");
 
 // =====================================================================
+// 1b. AUTO is LOGIC-DRIVEN: with no constraints it stays 07:00, but earliest/latest
+//     constraints move it so the WHOLE flock runs the full route together (the social
+//     optimum) rather than starting at 07:00 and clipping a constrained runner.
+// =====================================================================
+section("auto is logic-driven by runner constraints");
+
+// A shared earliest pushes the whole flock later, so nobody is clipped.
+await tryOk(async () => {
+  const s = session(
+    [person("a", { earliestStartTime: "09:00" }), person("b", { earliestStartTime: "09:00" })],
+    [wp("cafe", -37.80, 144.97, 0)],
+    { intendedDistanceKm: 6 },
+  );
+  const r = await calculateRoutes(s);
+  ok(!r.skipped, "auto-earliest: not skipped");
+  const flockStart = Math.min(...r.routes.map((rt) => toSec(rt.schedule[0].startTime)));
+  ok(flockStart === toSec("09:00"), `auto-earliest: flock starts 09:00 not 07:00 (got ${r.routes.map((x) => x.schedule[0].startTime).join(",")})`);
+  const a = r.routes.find((x) => x.participantId === "a")!;
+  const b = r.routes.find((x) => x.participantId === "b")!;
+  ok(Math.abs(a.distanceKm - b.distanceKm) < 0.6, `auto-earliest: both run the full route together (a ${a.distanceKm.toFixed(2)} ≈ b ${b.distanceKm.toFixed(2)})`);
+}, "auto earliest shift");
+
+// One constrained runner shifts the whole flock so the free runner joins them fully
+// (more togetherness than starting at 07:00 and having the constrained runner miss most of it).
+await tryOk(async () => {
+  const s = session(
+    [person("a"), person("b", { earliestStartTime: "08:00" })],
+    [wp("cafe", -37.80, 144.97, 0)],
+    { intendedDistanceKm: 6 },
+  );
+  const r = await calculateRoutes(s);
+  const flockStart = Math.min(...r.routes.map((rt) => toSec(rt.schedule[0].startTime)));
+  ok(flockStart === toSec("08:00"), `auto-one-constrained: whole flock shifts to 08:00 for togetherness (got ${r.routes.map((x) => x.schedule[0].startTime).join(",")})`);
+  const a = r.routes.find((x) => x.participantId === "a")!;
+  const b = r.routes.find((x) => x.participantId === "b")!;
+  ok(Math.abs(a.distanceKm - b.distanceKm) < 0.6, `auto-one-constrained: a runs the full route with b (a ${a.distanceKm.toFixed(2)} ≈ b ${b.distanceKm.toFixed(2)})`);
+}, "auto one-constrained shift");
+
+// A shared deadline that 07:00 would overrun pulls the start EARLIER, so the whole flock
+// still runs the full route and finishes in time.
+await tryOk(async () => {
+  const s = session(
+    [person("a", { latestFinishTime: "07:20" }), person("b", { latestFinishTime: "07:20" })],
+    [wp("cafe", -37.80, 144.97, 0)],
+    { intendedDistanceKm: 6 }, // ~36 min loop; 07:00 start would finish ~07:36, past the deadline
+  );
+  const r = await calculateRoutes(s);
+  const flockStart = Math.min(...r.routes.map((rt) => toSec(rt.schedule[0].startTime)));
+  ok(flockStart < toSec("07:00"), `auto-deadline: flock starts before 07:00 to finish in time (got ${r.routes.map((x) => x.schedule[0].startTime).join(",")})`);
+  for (const rt of r.routes) ok(toSec(rt.arrivalTime) <= toSec("07:20") + 60, `auto-deadline: ${rt.participantId} arrives by 07:20 (${rt.arrivalTime})`);
+  const a = r.routes.find((x) => x.participantId === "a")!;
+  const b = r.routes.find((x) => x.participantId === "b")!;
+  ok(a.distanceKm > 4.5 && Math.abs(a.distanceKm - b.distanceKm) < 0.6, `auto-deadline: both still run most of the route (a ${a.distanceKm.toFixed(2)}, b ${b.distanceKm.toFixed(2)})`);
+}, "auto deadline pull-earlier");
+
+// No constraints anywhere → Auto stays exactly 07:00 (the default is undisturbed).
+await tryOk(async () => {
+  const s = session([person("a"), person("b")], [wp("cafe", -37.80, 144.97, 0)], { intendedDistanceKm: 6 });
+  const r = await calculateRoutes(s);
+  const flockStart = Math.min(...r.routes.map((rt) => toSec(rt.schedule[0].startTime)));
+  ok(flockStart === toSec("07:00"), `auto-unconstrained: still 07:00 (got ${r.routes.map((x) => x.schedule[0].startTime).join(",")})`);
+}, "auto unconstrained stays 07:00");
+
+// =====================================================================
 // 2. DEPARTURE anchor → at-gather runner departs exactly at the time
 // =====================================================================
 section("departure anchor sets the gather departure");

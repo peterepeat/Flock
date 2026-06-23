@@ -23,7 +23,9 @@ export type LocationPin =
   | { kind: "waypoint"; waypointId: string }
   | { kind: "manual"; location: LatLng; address: string };
 
-// When the flock departs. "auto" → 7:00 at the first waypoint (else first departure). A
+// When the flock departs. "auto" derives a sensible start from the runners' constraints:
+// it stays 07:00 unless an earliest/latest constraint means a different start lets more of
+// the flock run the full route together (and finish in time) — see resolveAutoStart. A
 // departure time fixes the start; a waypoint time fixes when the flock reaches that
 // waypoint, back-computing the departure ("be at the café at 09:00").
 export type TimeAnchor =
@@ -109,7 +111,7 @@ export interface FlockSession {
   unitPreference: Unit; // set by first participant, shown to all
   // Run-level config (defaults, never mandatory). The flock's departure anchor and its
   // intended distance; per-runner constraints are optional overrides.
-  startAnchor: TimeAnchor; // default { kind: "auto" } → 7:00
+  startAnchor: TimeAnchor; // default { kind: "auto" } → logic-driven (07:00 unless constraints move it)
   intendedDistanceKm: number | null; // set, or null → waypoint-tour length / 10 km
   participants: Participant[];
   waypoints: FlockWaypoint[]; // shared waypoints everyone routes through
