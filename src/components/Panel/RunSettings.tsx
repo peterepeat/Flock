@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 
 import Field from "@/components/ui/Field";
 import Slider from "@/components/ui/Slider";
@@ -20,17 +20,31 @@ export default function RunSettings() {
   const session = useFlockStore((s) => s.session);
   const apply = useFlockStore((s) => s.applyServerSession);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Optimistic local overrides so the controls move INSTANTLY instead of waiting on the PATCH
+  // round-trip (the controls otherwise render straight from server state). Distance is wrapped
+  // so "set to Auto" (null) is distinguishable from "no override". Cleared once the server
+  // session lands (or the write fails), so server state stays the single source of truth.
+  const [draftAnchor, setDraftAnchor] = useState<TimeAnchor | null>(null);
+  const [draftDistance, setDraftDistance] = useState<{ v: number | null } | null>(null);
 
   if (!session || !flockId) return null;
-  const { startAnchor, intendedDistanceKm: distance, waypoints, unitPreference } = session;
+  const { waypoints, unitPreference } = session;
+  const startAnchor = draftAnchor ?? session.startAnchor;
+  const distance = draftDistance ? draftDistance.v : session.intendedDistanceKm;
 
   const save = (config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }, debounce = false) => {
+    // Reflect the change immediately, then reconcile with the server in the background.
+    if (config.startAnchor !== undefined) setDraftAnchor(config.startAnchor);
+    if (config.intendedDistanceKm !== undefined) setDraftDistance({ v: config.intendedDistanceKm });
     const run = async () => {
       try {
         const s = await setRunConfig(flockId, config);
         apply(s, true);
       } catch {
         /* a transient failure — the next edit or poll reconciles */
+      } finally {
+        if (config.startAnchor !== undefined) setDraftAnchor(null);
+        if (config.intendedDistanceKm !== undefined) setDraftDistance(null);
       }
     };
     if (timer.current) clearTimeout(timer.current);

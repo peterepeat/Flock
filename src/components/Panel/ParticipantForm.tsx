@@ -358,7 +358,7 @@ export default function ParticipantForm() {
       {/* How fast can you run? */}
       <Field label="How fast can you run?" optional>
         <Toggle
-          options={[{ value: "off", label: "No preference" }, { value: "on", label: "Set a pace" }]}
+          options={[{ value: "off", label: "No limit" }, { value: "on", label: "Set a pace" }]}
           value={draft.paceOn ? "on" : "off"}
           onChange={(v) => set("paceOn", v === "on")}
         />
@@ -378,7 +378,7 @@ export default function ParticipantForm() {
       {/* Time constraints */}
       <Field label="What are your time constraints?" optional>
         <Toggle
-          options={[{ value: "off", label: "No preference" }, { value: "on", label: "Set a range" }]}
+          options={[{ value: "off", label: "None" }, { value: "on", label: "Set a range" }]}
           value={draft.timeOn ? "on" : "off"}
           onChange={(v) => set("timeOn", v === "on")}
         />

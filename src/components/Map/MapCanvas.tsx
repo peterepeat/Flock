@@ -16,6 +16,9 @@ import {
 
 import { initial } from "@/lib/colors";
 import { ownsParticipant } from "@/lib/editTokens";
+import { renameWaypoints } from "@/lib/flockApi";
+import { isAutoWaypointName } from "@/lib/flockGpx";
+import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
 import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
@@ -339,12 +342,20 @@ export default function MapCanvas() {
   // already moved the marker; we persist the drop and the server echo re-pins it.
   // On failure we snap the marker back to `origin` (the store position) so the map
   // never shows a phantom location the server doesn't have.
-  async function moveWaypoint(id: string, marker: L.Marker, origin: LatLng) {
+  async function moveWaypoint(id: string, marker: L.Marker, origin: LatLng, currentName: string) {
     if (!flockId) return;
     const ll = marker.getLatLng();
     try {
       await uUpdateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
       log.info("waypoint moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
+      // An auto-named pin's place label belongs to the OLD spot — re-derive it for the new
+      // location. Skip user-typed names. Run AFTER the move write so the two patches can't race;
+      // renameWaypoints does NOT recompute the route and the server re-guards on isAutoWaypointName
+      // at write time, so a name a user (or another device) set meanwhile is never clobbered.
+      if (isAutoWaypointName(currentName) || currentName === "Dropped pin") {
+        const label = pinLabel(await reverseGeocode(ll.lat, ll.lng));
+        if (label) await renameWaypoints(flockId, { [id]: { name: label, address: label } });
+      }
     } catch (err) {
       marker.setLatLng(toLeaflet(origin));
       log.error("waypoint move failed — reverted", { error: String(err) });
@@ -726,7 +737,7 @@ export default function MapCanvas() {
                 // back and open the editor here (Leaflet eats the post-drag click).
                 const moved = distanceMeters(w.location, { lat: ll.lat, lng: ll.lng }) > 3;
                 if (moved) {
-                  void moveWaypoint(w.id, m, w.location);
+                  void moveWaypoint(w.id, m, w.location, w.name);
                 } else {
                   m.setLatLng(toLeaflet(w.location));
                   if (!locked) useFlockStore.getState().openEditWaypoint(w.id);

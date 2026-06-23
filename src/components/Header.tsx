@@ -90,7 +90,7 @@ export default function Header() {
             disabled={!canUndo}
             title="Undo (⌘Z)"
             aria-label="Undo"
-            className="flex h-8 w-8 items-center justify-center rounded-full text-base text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-2xl text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
           >
             ⟲
           </button>
@@ -100,7 +100,7 @@ export default function Header() {
             disabled={!canRedo}
             title="Redo (⇧⌘Z)"
             aria-label="Redo"
-            className="flex h-8 w-8 items-center justify-center rounded-full text-base text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-2xl text-text transition hover:bg-surface-lift disabled:opacity-30 disabled:hover:bg-transparent"
           >
             ⟳
           </button>

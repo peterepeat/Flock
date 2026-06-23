@@ -121,6 +121,12 @@ export async function photonSearch(
   if (opts.focus) {
     params.set("lat", String(opts.focus.lat));
     params.set("lon", String(opts.focus.lng));
+    // Photon defaults (zoom 12, location_bias_scale 0.4) let global prominence outrank
+    // proximity, so the focus point barely shifts results. Tighten the radius and lean the
+    // weighting toward proximity so the current map view genuinely biases the autocomplete —
+    // while still letting a clearly-distant match through (it's a bias, not a hard bound).
+    params.set("zoom", "14");
+    params.set("location_bias_scale", "0.8");
   }
   const done = log.time("photon-search", { q, focused: !!opts.focus });
   const features = await fetchPhoton("/api", params, opts.signal);

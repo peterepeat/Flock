@@ -79,8 +79,6 @@ function DesktopPanel() {
           </>
         ) : (
           <div className="space-y-3">
-            <h2 className="text-lg font-semibold">Your flock</h2>
-
             {session && (
               <Section title="The run" summary={runSummary(session)} sectionKey="run">
                 <RunSettings />
