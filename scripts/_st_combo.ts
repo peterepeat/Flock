@@ -215,8 +215,15 @@ function assertInvariants(s: FlockSession, r: Res) {
     }
 
     // G. earliest / latest
-    if (p.earliestStartTime != null && !parked) okS(toSec(rt.departureTime) >= toSec(p.earliestStartTime) - 90, `G1 ${sig} departs ${rt.departureTime} before earliest ${p.earliestStartTime}`);
+    if (p.earliestStartTime != null && !parked) okH(toSec(rt.departureTime) >= toSec(p.earliestStartTime) - 90, `G1 ${sig} departs ${rt.departureTime} before earliest ${p.earliestStartTime}`);
     if (p.latestFinishTime != null && !parked) okH(toSec(rt.arrivalTime) <= toSec(p.latestFinishTime) + 60, `G2 ${sig} arrives ${rt.arrivalTime} after latest ${p.latestFinishTime}`);
+    // G3: an earliest-unreachable PARK is a FIXED-anchor outcome only — on AUTO the t0-floor must DELAY
+    // the flock, not park a runner who could otherwise run. (G1's !parked gate would hide a floor that
+    // under-shoots and wrongly parks a feasible auto runner — so assert no such park on auto here.)
+    if (p.earliestStartTime != null && (s.startAnchor == null || s.startAnchor.kind === "auto")) {
+      const ew = r.warnings.find((x) => x.participantId === rt.participantId);
+      okH(!(ew && /sets off before your earliest start/.test(ew.message)), `G3 ${sig} earliest-unreachable PARK on AUTO (floor under-shot)`);
+    }
 
     // J. warnings (n==1 handled below)
   }
@@ -696,6 +703,35 @@ async function genEdge() {
   // the zero-arc co-arrival path). Fixed departure so auto-start can't rescue it. Oracle: G2 (line ~219)
   // catches a non-parked late arrival; after the fix the runner is parked (G2 exempt, "couldn't place").
   await check("R-late/coarrival", session([person("slow"), person("dl", { startPin: atWp("w5"), finishPin: atWp("w5"), latestFinishTime: "07:15" })], [wpAt(1), wpAt(2), wpAt(3), wpAt(4), wpAt(5)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+  // R-earliest/long-approach-floor: a runner whose start is pinned far off-route (a long, unmovable
+  // approach commute) WITH an earliest, on AUTO — the flock is DELAYED (the t0 floor) so they depart
+  // no earlier than their earliest, instead of being dragged out early by the commute (Cause G).
+  // The HARD G1 oracle (depart ≥ earliest for a feasible runner) asserts it.
+  await check("R-earliest/long-approach-floor", session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("b")], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "auto" }, intendedDistanceKm: 18 }));
+  // R-earliest/fixed-t0-parks: same far-pin + earliest but on a FIXED departure the flock can't wait
+  // past — the flock sets off before they can, so they're PARKED (named), never silently dragged out
+  // before earliest. G1 (HARD) holds because a parked runner is exempt; the curated lock is that no
+  // feasible runner departs early. (Auto would delay the flock instead — see the scenario above.)
+  await check("R-earliest/fixed-t0-parks", session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("b")], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+  // R-earliest/slow-companion: a far-pinned earliest runner WITH a much slower flock companion on auto.
+  // Here d(depart)/d(t0) ≪ 1 (the slow companion drives block timing), so a Newton floor step under-
+  // shoots and would WRONGLY earliest-park them; the bisection floor must delay enough that they RUN.
+  // Oracles: G1 (depart≥earliest) + G3 (no auto earliest-park).
+  await check("R-earliest/slow-companion", session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("slow", { pace: 600 })], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "auto" }, intendedDistanceKm: 18 }));
+  // R-earliest/two-runners: two earliest runners, different paces + approaches, on auto — the floor must
+  // satisfy the BINDING one; each departs ≥ its own earliest (G1) and neither is auto-parked (G3).
+  await check("R-earliest/two-runners", session([person("p1", { startPin: NEAR, earliestStartTime: "07:30" }), person("p2", { startPin: FAR, earliestStartTime: "08:00", pace: 480 }), person("b")], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "auto" }, intendedDistanceKm: 18 }));
+  // R-earliest/early-deadline: a runner with an earliest AND a latest needing a pre-07:00 start, on auto.
+  // The floor must NOT collapse onto 07:00 (which would latest-park them) — the sweep picks the early
+  // start so they actually RUN (regression guard for the gap=-Infinity collapse).
+  {
+    const res = await check("R-earliest/early-deadline", session([person("x", { earliestStartTime: "05:30", latestFinishTime: "06:45" }), person("b")], [wpAt(1), wpAt(2)], { startAnchor: { kind: "auto" }, intendedDistanceKm: 12 }));
+    if (res) {
+      const x = res.routes.find((rt) => rt.participantId === "x")!;
+      const xw = res.warnings.find((w) => w.participantId === "x");
+      okH(!(xw && /couldn't place/.test(xw.message)) && x.distanceKm > 1, `R-earliest/early-deadline x must RUN via an early start (got dist ${round2(x.distanceKm)}, warn "${xw?.message ?? ""}")`);
+    }
+  }
 }
 
 // --- run all -----------------------------------------------------------------

@@ -343,6 +343,8 @@ function conflictMessage(c: Conflict): string {
         : `Your distance limit of ${c.capKm.toFixed(1)} km leaves no room to run with the flock, so we couldn't place you on this run.`;
     case "earliest-after-latest":
       return "Your earliest start is after your latest finish — there's no window to run, so we couldn't place you on this run.";
+    case "earliest-unreachable":
+      return "The flock sets off before your earliest start and your start point is too far to catch up in time, so we couldn't place you on this run — try an Auto start (the flock can wait for you) or move your start closer.";
     case "latest-unreachable":
       return "The run starts too late for you to finish by your deadline, so we couldn't place you on this run.";
     case "window-empty":
@@ -398,15 +400,48 @@ export function resolveAutoStart(route: Route, runners: Runner[]): number {
   const dwellSec = route.stops.reduce((s, st) => s + st.durationSec, 0);
   const fullRunSec = route.totalKm * slowest + dwellSec;
 
+  // EARLIEST as a flock-level t0 FLOOR (Cause G). enforceEarliest slides a runner's ON-ROUTE join
+  // forward, but it cannot move a FIXED approach-connector leg: with a long commute (e.g. a start
+  // pinned 22 km off an 18 km route) depart = arrivalAt(enterKm) − approach·pace lands before earliest
+  // even with enterKm at the route's end. The only remedy is to DELAY THE WHOLE FLOCK (the user's
+  // call: an unreachable earliest raises t0, approach included). enforceEarliest is KEPT; the floor is
+  // additive over it. "Does any earliest runner set off before their earliest (or get earliest-parked)?"
+  // is MONOTONE in t0 — raising t0 only pushes departures later — so BISECT the REAL planRun for the
+  // smallest t0 with none. (A Newton/secant step is unsafe: raising t0 mostly slides the on-route join,
+  // so d(depart)/d(t0) can be ≪1 and an additive step badly under-shoots, wrongly parking the runner.)
+  const byId = new Map(runners.map((r) => [r.id, r] as const));
+  const earliestShortfall = (t0: number): boolean => {
+    const plan = planRun({ route, runners, t0Sec: t0 });
+    return plan.runners.some((p) => {
+      const r = byId.get(p.id)!;
+      if (r.earliestSec == null) return false;
+      if (p.conflict != null) return p.conflict.kind === "earliest-unreachable"; // earliest-parked → raise (latest/cap → not ours)
+      return p.departSec < r.earliestSec; // feasible but would set off before earliest
+    });
+  };
+  let floor = -Infinity;
+  // A floor is needed only when the 07:00 default fails an earliest; if 07:00 already clears every
+  // earliest, the sweep is free and "Auto stays 7am" holds. Regression-safe: a runner parked for a
+  // LATEST reason at 07:00 is NOT a shortfall, so it can't collapse the floor onto 07:00.
+  if (earliest.length > 0 && earliestShortfall(DEFAULT_AUTO_T0)) {
+    let lo = DEFAULT_AUTO_T0, hi = DEFAULT_AUTO_T0, step = 1800;
+    while (earliestShortfall(hi) && hi < 24 * 3600) { lo = hi; hi = Math.min(hi + step, 24 * 3600); step *= 2; }
+    for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (earliestShortfall(mid)) lo = mid; else hi = mid; }
+    floor = hi; // smallest t0 (sub-second) at which no earliest runner departs early or is earliest-parked
+  }
+
   const cands = new Set<number>([DEFAULT_AUTO_T0]);
   for (const e of earliest) cands.add(Math.max(0, e));
   for (const l of latest) cands.add(Math.max(0, l - fullRunSec));
+  if (floor > -Infinity) cands.add(floor);
 
-  let bestT0 = DEFAULT_AUTO_T0;
+  let bestT0 = floor > -Infinity ? floor : DEFAULT_AUTO_T0;
   let bestTog = -1;
   let bestDist = -1;
   let bestNear = Infinity;
-  for (const t0 of [...cands].sort((a, b) => a - b)) {
+  // HARD floor: earliest is honoured by delaying the flock, so the sweep searches only t0 ≥ floor —
+  // a sub-floor candidate would silently violate a HARD earliest, so clamp every candidate up to it.
+  for (const t0 of [...cands].map((t) => (floor > -Infinity ? Math.max(t, floor) : t)).sort((a, b) => a - b)) {
     const plan = planRun({ route, runners, t0Sec: t0 });
     const tog = plan.togetherMinutes;
     const dist = plan.runners.reduce((s, p) => s + Math.max(0, p.exitKm - p.enterKm), 0);
@@ -507,11 +542,17 @@ export function planRun(input: RunInput): Plan {
         // participant. A zero-span window escapes enforceDeadlines' trim (it skips collapsed
         // windows), so the co-arrival path above would otherwise emit a clock HOURS past latestSec
         // with conflict=null (the F2 wound). Honour the deadline by NAMING it and parking instead.
-        // (Earliest is NOT enforced here — it is honoured by raising the flock start, not parking.
-        // The distance cap is NOT a hard ceiling on the connector commute: a manual-pin approach is
+        // EARLIEST: on AUTO, resolveAutoStart raises the flock's t0 floor so departSec ≥ earliest (the
+        // flock waits). On a FIXED t0 (the user pinned a departure/waypoint time) the flock can't wait,
+        // so a runner whose unmovable approach makes them set off before their earliest is named, not
+        // silently dragged out early. enforceEarliest already slid the on-route join, so this only
+        // bites a fixed-offset commute that can't be slid — the −90 grace matches the G1 oracle.
+        // (The distance cap is NOT a hard ceiling on the connector commute: a manual-pin approach is
         // mandatory overhead that may push the total slightly over the cap — see _st_connectors #9.)
         if (r.latestSec != null && timing.arriveSec > r.latestSec + 60)
           conflict = { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec };
+        else if (r.earliestSec != null && timing.departSec < r.earliestSec - 90)
+          conflict = { kind: "earliest-unreachable", earliestSec: r.earliestSec, t0Sec };
         else
           return {
             id: r.id, enterKm: w.enterKm, exitKm: w.exitKm,
