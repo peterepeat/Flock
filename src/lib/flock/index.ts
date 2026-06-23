@@ -90,7 +90,7 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
         pace,
         enter: s.bound,
         exit: f.bound,
-        maxDistanceKm: p.maxDistanceKm,
+        maxDistanceKm: p.maxDistanceKm != null ? Math.max(0, p.maxDistanceKm) : null, // clamp pathological negatives
         earliestSec: p.earliestStartTime != null ? timeToSec(p.earliestStartTime) : null,
         latestSec: p.latestFinishTime != null ? timeToSec(p.latestFinishTime) : null,
         approachKm,

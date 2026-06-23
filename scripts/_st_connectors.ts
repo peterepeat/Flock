@@ -184,22 +184,18 @@ await tryOk(async () => {
 }, "8 manual-pin-only-geography");
 
 // --------------------------------------------------------------------------
-section("9. capped runner WITH a connector — cap bounds the on-spine span; total may add the connector");
+section("9. cap busted by the connector commute alone → runner is PARKED, not routed over-cap");
 await tryOk(async () => {
-  // p2 capped at 2 km on a ~5.6 km spine, plus a manual ~2.2 km connector. The cap governs
-  // the SHARED on-spine arc (exitKm-enterKm ≤ cap). The connector is a personal commute that
-  // the engine adds ON TOP — assert the on-spine span ≤ cap (the spec's "route distance ≤ cap"
-  // is about the shared coverage); we OBSERVE whether total exceeds cap as a known behaviour.
-  const start = atPlace(0.0, -0.02, "w"); // ~2.2 km from A
+  // p2 capped at 2 km but their manual start pin is ~2.2 km off the route — the mandatory commute
+  // ALONE exceeds the cap, so they cannot honour their distance limit. Product decision (2026-06-23):
+  // park them with a named cap conflict rather than silently routing them over their stated limit.
+  const start = atPlace(0.0, -0.02, "w"); // ~2.2 km from A, > the 2 km cap
   const s = session([person("p1"), person("p2", { startPin: start, maxDistanceKm: 2 })], route2());
   const res = await calculateRoutes(s);
-  const span = onSpineSpan(res, "p2");
-  ok(span <= 2 + 0.3, "9: on-spine SHARED span respects the 2 km cap");
-  const conn = soloLegs(res, "p2").reduce((m, l) => m + l.distanceKm, 0);
-  ok(conn > 1.5, "9: the connector leg (~2.2 km) is present");
-  // NOTE the engine adds connectorKm to distanceKm regardless of cap — record it explicitly.
-  ok(r(res, "p2").distanceKm >= span - 0.05, "9: distanceKm ≥ on-spine span (sanity)");
-}, "9 capped-with-connector");
+  ok(r(res, "p2").distanceKm === 0, "9: parked runner covers 0 km (cap honoured, not exceeded)");
+  const w = res.warnings.find((x) => x.participantId === "p2");
+  ok(!!w && /couldn't place/.test(w.message) && /limit/.test(w.message), "9: a named cap conflict warning is emitted");
+}, "9 cap-busted-by-connector-parks");
 
 // --------------------------------------------------------------------------
 section("10. manual finish triggers a deadline peel — egress still attaches, arrival ≤ latest");

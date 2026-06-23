@@ -74,6 +74,7 @@ export interface Block {
 // feasible anchor (their own tightest hard floor) and names the conflict in a warning.
 export type Conflict =
   | { kind: "cap-vs-pin"; capKm: number; enterPinKm: number | null; exitPinKm: number | null }
+  | { kind: "cap-too-short"; capKm: number; commuteKm: number } // the connector commute alone busts the cap, or cap≈0 with a pin
   | { kind: "earliest-after-latest"; earliestSec: number; latestSec: number } // connector-aware es>lf
   | { kind: "latest-unreachable"; latestSec: number; t0Sec: number } // the flock starts too late for this deadline
   | { kind: "window-empty" }; // the constraints leave no room to run with the flock

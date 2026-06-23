@@ -337,6 +337,10 @@ function conflictMessage(c: Conflict): string {
         : `Your ${hi != null ? "finish" : "start"} point is about ${(hi ?? lo ?? 0).toFixed(1)} km along`;
       return `${detail} but your distance limit is ${capKm.toFixed(1)} km — they can't both hold, so we couldn't place you on this run.`;
     }
+    case "cap-too-short":
+      return c.commuteKm > c.capKm + EPS
+        ? `Getting to and from your start/finish point is about ${c.commuteKm.toFixed(1)} km, but your distance limit is ${c.capKm.toFixed(1)} km — so we couldn't place you on this run.`
+        : `Your distance limit of ${c.capKm.toFixed(1)} km leaves no room to run with the flock, so we couldn't place you on this run.`;
     case "earliest-after-latest":
       return "Your earliest start is after your latest finish — there's no window to run, so we couldn't place you on this run.";
     case "latest-unreachable":
@@ -437,6 +441,11 @@ function classify(r: Runner, t0: number, L: number): Conflict | null {
   // connector commute (covers an impossible deadline AND a flock pushed late by another runner).
   if (r.latestSec != null && t0 + approachSec + egressSec > r.latestSec + EPS)
     return { kind: "latest-unreachable", latestSec: r.latestSec, t0Sec: t0 };
+  // The mandatory connector commute (approach + egress) ALONE exceeds the distance cap, or the cap
+  // is ~0 with a pinned end — the runner cannot get to/from the route and run within their limit.
+  // (cap≈0 with BOTH ends free is the intended zero-arc co-arriver, MIN-F3 — left feasible.)
+  if (r.maxDistanceKm != null && (r.approachKm + r.egressKm > r.maxDistanceKm + EPS || (r.maxDistanceKm < EPS && (r.enter.kind === "fixed" || r.exit.kind === "fixed"))))
+    return { kind: "cap-too-short", capKm: r.maxDistanceKm, commuteKm: r.approachKm + r.egressKm };
   // Both ends pinned but their separation exceeds the distance cap — neither can be honoured.
   if (r.enter.kind === "fixed" && r.exit.kind === "fixed" && r.maxDistanceKm != null) {
     const lo = clamp(r.enter.km, 0, L), hi = clamp(r.exit.km, 0, L);

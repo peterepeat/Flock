@@ -168,7 +168,9 @@ export function projectPlan(input: {
   });
 
   // --- waypoint ETAs ---
-  const maxExit = Math.max(0, ...plan.runners.map((p) => p.exitKm));
+  // Only the FEASIBLE flock's reach counts: a PARKED runner's far pin must not admit an ETA for a
+  // waypoint the flock never actually passes (a parked far-start pin would otherwise inflate maxExit).
+  const maxExit = Math.max(0, ...plan.runners.filter((p) => p.conflict == null).map((p) => p.exitKm));
   const waypointEtas: Record<string, string> = {};
   for (const w of waypoints) {
     const km = nearestKm(route, w.location);
