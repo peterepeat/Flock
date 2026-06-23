@@ -691,6 +691,11 @@ async function genEdge() {
   await check("E23/anchor-vanished-wp", session([person("a"), person("b")], [wpAt(1), wpAt(2)], { startAnchor: { kind: "waypoint", waypointId: "ghost", time: "09:00" }, intendedDistanceKm: 12 }));
   await check("E32/18-runners", session(Array.from({ length: 18 }, (_, i) => person(`p${i}`)), [wpAt(1), wpAt(2)], { intendedDistanceKm: 12 }));
   await check("E37/everything-on-one", session([person("a", { startPin: NEAR, finishPin: atWp("w2"), maxDistanceKm: 6, earliestStartTime: "06:30", latestFinishTime: "09:00" }), person("b")], [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "waypoint", waypointId: "w1", time: "07:30" }, intendedDistanceKm: 18 }));
+  // R-late/coarrival: a deadline runner pinned to a FAR waypoint the (fixed-start) flock only reaches
+  // AFTER their latest finish must be PARKED (named) — never silently co-arrive late (the F2 wound on
+  // the zero-arc co-arrival path). Fixed departure so auto-start can't rescue it. Oracle: G2 (line ~219)
+  // catches a non-parked late arrival; after the fix the runner is parked (G2 exempt, "couldn't place").
+  await check("R-late/coarrival", session([person("slow"), person("dl", { startPin: atWp("w5"), finishPin: atWp("w5"), latestFinishTime: "07:15" })], [wpAt(1), wpAt(2), wpAt(3), wpAt(4), wpAt(5)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
 }
 
 // --- run all -----------------------------------------------------------------
