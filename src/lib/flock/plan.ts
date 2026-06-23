@@ -18,6 +18,16 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 // departure to exactly the earliest, so this grace only ever absorbs an unslidable fixed-t0 offset.
 const LATEST_GRACE_SEC = 60;
 const EARLIEST_GRACE_SEC = 90;
+// "How far can you run" caps the TOTAL distance — both connector commutes to/from a manual pin count
+// against it — so the on-spine arc may be at most (cap − approach − egress). null = no cap.
+const arcCapOf = (r: Runner) => (r.maxDistanceKm != null ? Math.max(0, r.maxDistanceKm - r.approachKm - r.egressKm) : null);
+// resolveAutoStart's lexicographic cost: one PARKED runner must out-cost any summed earliest-shortfall
+// among feasible runners. Feasible shortfall is ≤ EARLIEST_GRACE_SEC each (the rest park), so a
+// full-day penalty dominates for any realistic flock — i.e. "keep everyone running" beats "start nicer".
+const PARK_PENALTY = 86400;
+// Convergence cap for the best-response / projector fixpoints (resolveWindows, enforce*). Each loop
+// breaks early on no-change; the bound only guards a slowest-wins cascade. Not a tuned value.
+const FIXPOINT_PASSES = 4;
 
 interface Window {
   enterKm: number;
@@ -113,9 +123,6 @@ function resolveWindows(input: RunInput): Map<string, Window> {
 
   const lowerOf = (r: Runner) => (r.enter.kind === "fixed" ? clamp(r.enter.km, 0, L) : null);
   const upperOf = (r: Runner) => (r.exit.kind === "fixed" ? clamp(r.exit.km, 0, L) : null);
-  // "How far can you run" caps the TOTAL distance — both connector commutes to/from a manual
-  // pin count against it — so the on-spine arc may be at most (cap − approach − egress).
-  const arcCapOf = (r: Runner) => (r.maxDistanceKm != null ? Math.max(0, r.maxDistanceKm - r.approachKm - r.egressKm) : null);
   const wins = new Map<string, Window>();
   for (const r of runners) {
     const lo = lowerOf(r) ?? 0;
@@ -137,7 +144,7 @@ function resolveWindows(input: RunInput): Map<string, Window> {
   const pos = Array.from({ length: N + 1 }, (_, k) => k * seg);
   const idx = (km: number) => clamp(Math.round(km / seg), 0, N);
 
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < FIXPOINT_PASSES; round++) {
     let moved = false;
     for (const r of free) {
       // presence of the OTHERS over the segment grid (+ at each stop)
@@ -210,7 +217,7 @@ function resolveWindows(input: RunInput): Map<string, Window> {
 
 // --- latest-finish: trim exits so nobody arrives past their deadline --------
 function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runner[], t0: number): void {
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < FIXPOINT_PASSES; pass++) {
     const blocks = computeBlocks(wins, route, runners, t0);
     let changed = false;
     for (const r of runners) {
@@ -251,7 +258,7 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
 // connector run), so they co-arrive without setting off too early. The mirror of
 // enforceDeadlines — a LOWER bound on the join rather than an upper bound on the leave.
 function enforceEarliest(wins: Map<string, Window>, route: Route, runners: Runner[], t0: number): void {
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < FIXPOINT_PASSES; pass++) {
     const blocks = computeBlocks(wins, route, runners, t0);
     let changed = false;
     for (const r of runners) {
@@ -422,7 +429,7 @@ export function resolveAutoStart(route: Route, runners: Runner[]): number {
     const plan = planRun({ route, runners, t0Sec: t0 });
     let cost = 0;
     for (const p of plan.runners) {
-      if (p.conflict != null) { cost += 86400; continue; } // an excluded runner dominates the cost
+      if (p.conflict != null) { cost += PARK_PENALTY; continue; } // an excluded runner dominates the cost
       const r = byId.get(p.id)!;
       if (r.earliestSec != null && p.departSec < r.earliestSec) cost += r.earliestSec - p.departSec;
     }
@@ -451,15 +458,20 @@ export function resolveAutoStart(route: Route, runners: Runner[]): number {
     ...runners.flatMap((r) => (r.earliestSec != null ? [r.earliestSec + r.approachKm * r.pace] : [])), // earliest floor
   ].filter((t) => t >= 0);
   const lo = Math.min(...bps), hi = Math.max(...bps);
-  let best = score(DEFAULT_AUTO_T0);
-  const consider = (t: number) => { const s = score(Math.max(0, t)); if (better(s, best)) best = s; };
-  // Evaluate the exact breakpoints (an optimum — e.g. an earliest floor — often sits ON one), then a
-  // coarse grid over the window for the dwell/deadline kinks between them, then a local refine.
-  for (const t of bps) consider(t);
+  // Evaluate the exact breakpoints (an optimum — e.g. an earliest floor — often sits ON one) AND a
+  // coarse grid over the window (for the dwell/deadline kinks between breakpoints), keeping every
+  // score; then refine finely around the winner AND any equally-good coarse cell (a between-breakpoint
+  // optimum can live next to a different, equal-cost cell than the one `best` happens to hold).
   const coarse = Math.max(120, Math.round((hi - lo) / 32));
-  for (let t = lo; t <= hi + EPS; t += coarse) consider(t);
   const fine = Math.max(15, Math.round(coarse / 10));
-  for (let t = best.t0 - coarse; t <= best.t0 + coarse + EPS; t += fine) consider(t);
+  const grid: S[] = [];
+  let best = score(DEFAULT_AUTO_T0);
+  grid.push(best);
+  const consider = (t: number) => { const s = score(Math.max(0, t)); grid.push(s); if (better(s, best)) best = s; };
+  for (const t of bps) consider(t);
+  for (let t = lo; t <= hi + EPS; t += coarse) consider(t);
+  const anchors = [best.t0, ...grid.filter((g) => Math.abs(g.cost - best.cost) <= EPS).map((g) => g.t0)];
+  for (const a of anchors) for (let t = a - coarse; t <= a + coarse + EPS; t += fine) consider(t);
   return best.t0;
 }
 
@@ -485,8 +497,7 @@ function classify(r: Runner, t0: number, L: number): Conflict | null {
   // Both ends pinned but their separation exceeds the distance cap — neither can be honoured.
   if (r.enter.kind === "fixed" && r.exit.kind === "fixed" && r.maxDistanceKm != null) {
     const lo = clamp(r.enter.km, 0, L), hi = clamp(r.exit.km, 0, L);
-    const arcCap = Math.max(0, r.maxDistanceKm - r.approachKm - r.egressKm);
-    if (Math.abs(hi - lo) > arcCap + EPS)
+    if (Math.abs(hi - lo) > (arcCapOf(r) ?? 0) + EPS)
       return { kind: "cap-vs-pin", capKm: r.maxDistanceKm, enterPinKm: lo, exitPinKm: hi };
   }
   return null;

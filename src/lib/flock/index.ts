@@ -18,8 +18,10 @@ import { projectPlan, type Connectors, type FlockCalcResult } from "./project";
 import { buildRoute, nearestKm, pointAtKm } from "./route";
 
 const DEFAULT_PACE = 360; // 6:00/km
-// Clamp an absurd intended distance so a route can't span more than a day (the UI slider tops
-// out at 80 km; this only bites pathological API input). Keeps the wall clock single-day.
+// Clamp an absurd intended distance (the UI slider tops out at 80 km; this only bites pathological API
+// input). NOTE: this bounds DISTANCE, not DURATION — a 200 km route at a slow pace can still exceed 24h
+// and secToTime (single-day HH:MM) would wrap. That residual is accepted/untested (UI-unreachable); the
+// principled fix, if ever wanted, is a day-aware render, not a tighter km clamp.
 const MAX_RUN_KM = 200;
 
 const geomToLatLng = (g: GeoJSON.LineString): LatLng[] =>
@@ -108,18 +110,17 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   } else if (anchor.kind === "waypoint" && anchorWp) {
     const km = nearestKm(route, anchorWp.location);
     const slowest = Math.max(DEFAULT_PACE, ...runners.map((r) => r.pace));
-    // Two-pass back-compute (Cause D): a closed-form km·pace ignores the UPSTREAM dwell and the
-    // slowest-present pace, so the flock would reach the anchor waypoint late by that. Seed with the
-    // closed form, then run a provisional plan and shift t0 by the ACTUAL arrival drift at the anchor
-    // km. arrivalAt(blocks, km) − t0 is ~constant in t0 (dwell + pace don't move with t0), so a short
-    // fixpoint converges in one or two passes.
-    t0Sec = timeToSec(anchor.time) - km * slowest;
-    for (let i = 0; i < 3; i++) {
-      const prov = planRun({ route, runners, t0Sec });
-      const drift = timeToSec(anchor.time) - arrivalAt(prov.blocks, km);
-      if (Math.abs(drift) < 1) break;
-      t0Sec += drift;
-    }
+    const dwellSec = route.stops.reduce((s, st) => s + st.durationSec, 0);
+    // Back-compute t0 so the flock REACHES the anchor waypoint at anchor.time (Cause D). A closed-form
+    // km·pace ignores the upstream dwell + slowest-present pace, and an offset step can oscillate when a
+    // constraint clip makes arrival − t0 jump — but arrivalAt(blocks, km) is MONOTONE non-decreasing in
+    // t0, so BISECT for the smallest t0 whose flock arrival reaches anchor.time (robust to those kinks).
+    const target = timeToSec(anchor.time);
+    const arriveAtKm = (cand: number) => arrivalAt(planRun({ route, runners, t0Sec: cand }).blocks, km);
+    let lo = target - km * slowest - dwellSec - 600, hi = target; // arrival(hi=target) ≥ target (≥ t0)
+    for (let g = 0; arriveAtKm(lo) >= target && g < 20; g++) lo -= 3600; // ensure arrival(lo) < target
+    for (let i = 0; i < 28; i++) { const mid = (lo + hi) / 2; if (arriveAtKm(mid) < target) lo = mid; else hi = mid; }
+    t0Sec = hi;
   } else {
     // Auto (or a waypoint anchor whose waypoint vanished): derive a sensible flock start from
     // the runners' constraints — and stay at 07:00 when there's nothing to derive from.

@@ -1,11 +1,18 @@
 // ---------------------------------------------------------------------------
 // Flock — the social-first model (the clean rebuild).
 //
-// ONE objective: maximise system-wide together-time = summed over all pairs of the
-// minutes they are co-present, MOVING or at a STOP. Nothing else is optimised — no
-// fairness term, no personal-distance target, no own-pace correction, no pace floor.
-// The flock runs every shared stretch at the SLOWEST present runner's pace ("slowest
-// wins" is the feature, not a tax — it's what lets everyone run together).
+// THE PLAN objective (given a fixed flock start t0): maximise system-wide together-time = summed over
+// all pairs of the minutes they are co-present, MOVING or at a STOP. Nothing else is optimised inside
+// the plan — no fairness term, no personal-distance target, no own-pace correction, no pace floor.
+// The flock runs every shared stretch at the SLOWEST present runner's pace ("slowest wins" is the
+// feature, not a tax — it's what lets everyone run together).
+//
+// CHOOSING t0 (Auto start only) is a SEPARATE, two-tier lexicographic objective layered above the
+// plan: pick the start that keeps the MOST runners participating (fewest parked / set-off-early),
+// THEN the most togetherness, then distance, then a nice 07:00. This is a deliberate INCLUSION
+// preference — "delay/keep beats exclude" — and it CAN, in rare cases, accept marginally less total
+// togetherness to avoid parking a runner (see resolveAutoStart). The plan objective itself is
+// untouched; t0-selection never reweights a plan, it only chooses among whole plans.
 //
 // The plan is a LAMINATION of runner world-lines over a shared route + one flock clock:
 // a set of COMPANY BLOCKS, each a maximal co-present group on a contiguous stretch
