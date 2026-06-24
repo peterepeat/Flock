@@ -47,6 +47,13 @@ export function destinationPoint(from: LatLng, bearing: number, distKm: number):
   return { lat: (φ2 * 180) / Math.PI, lng: (λ2 * 180) / Math.PI };
 }
 
+/** Planar centroid (mean lat/lng) of one or more points — exact enough at city scale.
+ *  Used to derive a meeting point between the runners' fixed anchors. Callers pass ≥1 point. */
+export function centroid(pts: LatLng[]): LatLng {
+  const n = pts.length;
+  return { lat: pts.reduce((s, p) => s + p.lat, 0) / n, lng: pts.reduce((s, p) => s + p.lng, 0) / n };
+}
+
 /** Haversine distance between two points, in metres. */
 export function distanceMeters(a: LatLng, b: LatLng): number {
   const R = 6371000;

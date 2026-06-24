@@ -13,6 +13,7 @@ import { useFlockStore } from "@/store/flockStore";
  */
 export default function ScheduleView({ participantId }: { participantId: string }) {
   const session = useFlockStore((s) => s.session);
+  const calcError = useFlockStore((s) => s.calcError);
   const hoveredSegment = useFlockStore((s) => s.hoveredSegment);
   const setHoveredSegment = useFlockStore((s) => s.setHoveredSegment);
 
@@ -32,6 +33,9 @@ export default function ScheduleView({ participantId }: { participantId: string 
   if (!participant) return null;
 
   if (!route) {
+    // A named session-level error (e.g. no geography to route) is shown above the list — don't
+    // also sit here on a perpetual "Working out…" spinner that never resolves.
+    if (calcError) return null;
     return (
       <div className="mt-2 rounded-lg bg-surface px-3 py-2 text-xs text-text-dim">
         Working out this route…

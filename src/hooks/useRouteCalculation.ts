@@ -93,8 +93,21 @@ export function useRouteCalculation(flockId: string) {
           sharedCount: number;
           persisted?: boolean; // false = computed but NOT saved (plan changed under us)
           skipped?: boolean;
+          unroutable?: { reason: "no-location" | "no-participants" } | null;
         };
         setCalcWarnings(data.warnings ?? []);
+        if (data.unroutable) {
+          // No geography at all — a NAMED, terminal result (not a silent skip that strands the
+          // user in a perpetual spinner). Surface it and stop; the next edit re-triggers a calc.
+          setCalcError(
+            data.unroutable.reason === "no-location"
+              ? "Add a meeting point, a waypoint, or a start/finish location — there's nowhere to run yet."
+              : "Add someone to the flock to map a route.",
+          );
+          setCalcStatus("idle");
+          done({ unroutable: data.unroutable.reason });
+          return;
+        }
         setCalcError(null);
         if (data.persisted === false && !data.skipped) {
           // The server computed routes but the plan kept changing while it ran, so

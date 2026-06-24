@@ -9,13 +9,16 @@
 // Stops (waypoints with a dwell) are snapped onto the route by segment projection.
 // ---------------------------------------------------------------------------
 
-import { closestPointOnSegment, distanceMeters } from "../geo";
+import { centroid, closestPointOnSegment, distanceMeters } from "../geo";
 import { getRoundTrip, getRoute, type OrsRoute } from "../ors";
 import type { LatLng } from "../types";
 import type { Route, Stop } from "./model";
 
 const DEFAULT_DISTANCE_KM = 10;
 const MIN_GROW_KM = 1.5;
+// A finish pin within this much (m) of the route's closest approach counts as the SAME place,
+// so lastNearKm can pick the latest such pass (the return of a loop / there-and-back).
+const REVISIT_TOL_M = 120;
 
 // --- arc helpers (shared with projection) -----------------------------------
 export function withCum(coords: LatLng[]): Pick<Route, "coords" | "cumKm" | "totalKm"> {
@@ -58,6 +61,24 @@ export function nearestKm(r: Pick<Route, "coords" | "cumKm">, ll: LatLng): numbe
   return bestKm;
 }
 
+// Like nearestKm, but returns the FARTHEST-along pass whose closest approach is within
+// REVISIT_TOL of the global minimum. For a FINISH pin on a route that revisits its start
+// (a loop / there-and-back), this resolves to the RETURN pass instead of km≈0 — so a finish
+// near the start doesn't collapse the runner's window. On a non-revisiting route it equals
+// nearestKm (a single pass). Starts/waypoints keep nearestKm (the first/earliest pass).
+export function lastNearKm(r: Pick<Route, "coords" | "cumKm">, ll: LatLng): number {
+  let bestD = Infinity;
+  for (let i = 0; i < r.coords.length - 1; i++)
+    bestD = Math.min(bestD, distanceMeters(ll, closestPointOnSegment(ll, r.coords[i], r.coords[i + 1])));
+  let km = 0;
+  for (let i = 0; i < r.coords.length - 1; i++) {
+    const foot = closestPointOnSegment(ll, r.coords[i], r.coords[i + 1]);
+    if (distanceMeters(ll, foot) <= bestD + REVISIT_TOL_M)
+      km = Math.max(km, r.cumKm[i] + distanceMeters(r.coords[i], foot) / 1000);
+  }
+  return km;
+}
+
 function fromOrs(ors: OrsRoute): Pick<Route, "coords" | "cumKm" | "totalKm"> {
   const coords: LatLng[] = (ors.geometry.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
   return withCum(coords);
@@ -86,41 +107,90 @@ export interface WaypointSpec {
   stopMinutes: number;
 }
 
-/**
- * Build the shared route. `targetKm` is the run's intended distance (set, or null → tour
- * length / default loop). `origin` anchors the ≤1-waypoint loop and the no-waypoint case.
- */
-export async function buildRoute(opts: {
-  waypoints: WaypointSpec[];
-  origin?: LatLng;
-  targetKm?: number | null;
-}): Promise<Route> {
-  const { waypoints, origin, targetKm } = opts;
-  let geom: Pick<Route, "coords" | "cumKm" | "totalKm">;
+const loopKm = (cap: number | null, targetKm: number | null) => Math.max(1, cap ?? targetKm ?? DEFAULT_DISTANCE_KM);
 
-  if (waypoints.length >= 2) {
-    const corridor = fromOrs(await getRoute(waypoints.map((w) => w.location)));
-    geom = corridor;
-    // Grow to the run's intended distance only if it's meaningfully longer than the tour.
-    if (targetKm != null && targetKm - corridor.totalKm > MIN_GROW_KM) {
-      try {
-        const last = corridor.coords[corridor.coords.length - 1];
-        const loop = fromOrs(await getRoundTrip(last, targetKm - corridor.totalKm));
-        geom = withCum(corridor.coords.concat(truncateToKm(loop, targetKm - corridor.totalKm).slice(1)));
-      } catch {
-        geom = corridor; // better a short tour than a failed calc
-      }
+// A corridor through ordered points, optionally grown by a loop off the end to reach targetKm.
+async function corridor(points: LatLng[], targetKm: number | null): Promise<Pick<Route, "coords" | "cumKm" | "totalKm">> {
+  const base = fromOrs(await getRoute(points));
+  if (targetKm != null && targetKm - base.totalKm > MIN_GROW_KM) {
+    try {
+      const last = base.coords[base.coords.length - 1];
+      const loop = fromOrs(await getRoundTrip(last, targetKm - base.totalKm));
+      return withCum(base.coords.concat(truncateToKm(loop, targetKm - base.totalKm).slice(1)));
+    } catch {
+      return base; // better a short tour than a failed calc
     }
-  } else {
-    const center = waypoints[0]?.location ?? origin;
-    if (!center) throw new Error("buildRoute: no waypoint and no origin to anchor a loop");
-    geom = fromOrs(await getRoundTrip(center, Math.max(1, targetKm ?? DEFAULT_DISTANCE_KM)));
   }
+  return base;
+}
 
+// Snap the dwell stops (waypoints with a positive stop) onto a finished geometry.
+function withStops(geom: Pick<Route, "coords" | "cumKm" | "totalKm">, waypoints: WaypointSpec[]): Route {
   const base: Route = { ...geom, stops: [] };
   base.stops = waypoints
     .filter((w) => w.stopMinutes > 0)
     .map((w): Stop => ({ km: nearestKm(base, w.location), durationSec: w.stopMinutes * 60, name: w.name }))
     .sort((a, b) => a.km - b.km);
   return base;
+}
+
+/**
+ * Legacy builder: ≥2 waypoints → corridor; ≤1 → loop at the waypoint/origin. Kept for the
+ * e2e test and back-compat. `buildSpine` is the model entry point (route as an OUTPUT).
+ */
+export async function buildRoute(opts: { waypoints: WaypointSpec[]; origin?: LatLng; targetKm?: number | null }): Promise<Route> {
+  const { waypoints, origin, targetKm } = opts;
+  let geom: Pick<Route, "coords" | "cumKm" | "totalKm">;
+  if (waypoints.length >= 2) {
+    geom = await corridor(waypoints.map((w) => w.location), targetKm ?? null);
+  } else {
+    const center = waypoints[0]?.location ?? origin;
+    if (!center) throw new Error("buildRoute: no waypoint and no origin to anchor a loop");
+    geom = fromOrs(await getRoundTrip(center, Math.max(1, targetKm ?? DEFAULT_DISTANCE_KM)));
+  }
+  return withStops(geom, waypoints);
+}
+
+export interface SpineRunner {
+  startLoc: LatLng | null; // a FIXED start location (manual pin / waypoint); null = free (auto)
+  finishLoc: LatLng | null; // a FIXED finish location; null = free
+  maxDistanceKm: number | null; // sizes a single runner's loop when their finish is free
+}
+
+/**
+ * Choose the shared spine as an OUTPUT of the runners, not an input. The geometry is a near-
+ * deterministic function of the anchor set — waypoints ∪ the runners' FIXED pins ∪ a derived
+ * meeting point — so every combination yields a sensible route, or `null` when there is no
+ * geography at all. One spine for the whole flock (runners join/leave + commute via connectors).
+ *
+ *   ≥2 waypoints                       → the organizer's corridor; runners join it.        [W]
+ *   exactly 1 runner                   → that runner's OWN route (corridor A→B, or a loop). [C]
+ *   ≥1 fixed start AND ≥1 fixed finish → corridor centroid(starts) → centroid(finishes).   [A]
+ *   some fixed anchor but free ends    → a loop at the meeting point (centroid of anchors). [B]
+ *   no fixed anchor at all             → null (nothing to route from).                     [D]
+ */
+export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: SpineRunner[]; targetKm: number | null }): Promise<Route | null> {
+  const { waypoints, runners, targetKm } = opts;
+  if (waypoints.length >= 2) return buildRoute({ waypoints, targetKm }); // [W] honor the organizer's route
+
+  const wp = waypoints[0]?.location ?? null;
+  const fixedStarts = runners.map((r) => r.startLoc).filter((l): l is LatLng => l != null);
+  const fixedFinishes = runners.map((r) => r.finishLoc).filter((l): l is LatLng => l != null);
+  const allFixed = [...fixedStarts, ...fixedFinishes, ...(wp ? [wp] : [])];
+
+  let geom: Pick<Route, "coords" | "cumKm" | "totalKm"> | null = null;
+
+  if (runners.length === 1) {
+    const { startLoc, finishLoc, maxDistanceKm } = runners[0]; // [C] the runner's own route
+    if (startLoc && finishLoc) geom = await corridor([startLoc, ...(wp ? [wp] : []), finishLoc], null); // literal A→B (no grow)
+    else if (startLoc) geom = fromOrs(await getRoundTrip(startLoc, loopKm(maxDistanceKm, targetKm)));
+    else if (finishLoc) geom = fromOrs(await getRoundTrip(finishLoc, loopKm(maxDistanceKm, targetKm)));
+    else if (wp) geom = fromOrs(await getRoundTrip(wp, loopKm(maxDistanceKm, targetKm)));
+  } else if (fixedStarts.length > 0 && fixedFinishes.length > 0 && distanceMeters(centroid(fixedStarts), centroid(fixedFinishes)) >= 1) {
+    geom = await corridor([centroid(fixedStarts), ...(wp ? [wp] : []), centroid(fixedFinishes)], targetKm); // [A]
+  } else if (allFixed.length > 0) {
+    geom = fromOrs(await getRoundTrip(centroid(allFixed), Math.max(1, targetKm ?? DEFAULT_DISTANCE_KM))); // [B]
+  }
+
+  return geom ? withStops(geom, waypoints) : null; // null = [D] no geography
 }

@@ -12,10 +12,10 @@
 import { getRoute } from "../ors";
 import type { FlockSession, LatLng, LocationPin } from "../types";
 import { timeToSec } from "../units";
-import type { Bound, Route, Runner } from "./model";
+import type { Bound, Runner } from "./model";
 import { arrivalAt, planRun, resolveAutoStart } from "./plan";
-import { projectPlan, type Connectors, type FlockCalcResult } from "./project";
-import { buildRoute, nearestKm, pointAtKm } from "./route";
+import { projectPlan, type Connectors, type FlockCalcResult, type Unroutable } from "./project";
+import { buildSpine, lastNearKm, nearestKm, pointAtKm } from "./route";
 
 const DEFAULT_PACE = 360; // 6:00/km
 // Clamp an absurd intended distance (the UI slider tops out at 80 km; this only bites pathological API
@@ -27,38 +27,41 @@ const MAX_RUN_KM = 200;
 const geomToLatLng = (g: GeoJSON.LineString): LatLng[] =>
   (g.coordinates as [number, number][]).map(([lng, lat]) => ({ lat, lng }));
 
-function empty(skipped: boolean): FlockCalcResult {
-  return { routes: [], sharedSegments: [], flockRoute: null, waypointEtas: null, summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], skipped };
+function empty(unroutable: Unroutable): FlockCalcResult {
+  return { routes: [], sharedSegments: [], flockRoute: null, waypointEtas: null, summary: { totalTogetherMinutes: 0, pairwiseSummary: [] }, warnings: [], unroutable, skipped: unroutable != null };
 }
 
 export async function calculateRoutes(session: FlockSession): Promise<FlockCalcResult> {
   const participants = session.participants;
   const waypoints = session.waypoints ?? [];
-  if (participants.length === 0) return empty(true);
+  if (participants.length === 0) return empty({ reason: "no-participants" });
 
-  // Origin for the ≤1-waypoint loop / no-waypoint fallback: the first waypoint, else the
-  // first manual pin. With neither, there's no geography to route — skip.
-  const firstManual = participants
-    .flatMap((p) => [p.startPin, p.finishPin])
-    .find((pin): pin is Extract<LocationPin, { kind: "manual" }> => pin.kind === "manual");
-  const origin: LatLng | undefined = waypoints[0]?.location ?? firstManual?.location;
-  if (waypoints.length === 0 && !origin) return empty(true);
-
-  const route: Route = await buildRoute({
-    waypoints: waypoints.map((w) => ({ id: w.id, location: w.location, name: w.name, stopMinutes: w.stopMinutes })),
-    origin,
-    targetKm: session.intendedDistanceKm != null ? Math.min(session.intendedDistanceKm, MAX_RUN_KM) : null,
-  });
-
-  // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route.
   const wpById = new Map(waypoints.map((w) => [w.id, w]));
-  const resolve = (pin: LocationPin): { bound: Bound; connector?: LatLng } => {
+  // The FIXED location a pin resolves to (auto = free = null) — what the spine is built FROM.
+  const pinLoc = (pin: LocationPin): LatLng | null =>
+    pin.kind === "manual" ? pin.location : pin.kind === "waypoint" ? wpById.get(pin.waypointId)?.location ?? null : null;
+  const targetKm = session.intendedDistanceKm != null ? Math.min(session.intendedDistanceKm, MAX_RUN_KM) : null;
+
+  // The shared spine is an OUTPUT of the runners: chosen from their anchors, not from the
+  // waypoints alone. null = no geography at all (no waypoints, no pins) → a NAMED no-route.
+  const route = await buildSpine({
+    waypoints: waypoints.map((w) => ({ id: w.id, location: w.location, name: w.name, stopMinutes: w.stopMinutes })),
+    runners: participants.map((p) => ({ startLoc: pinLoc(p.startPin), finishLoc: pinLoc(p.finishPin), maxDistanceKm: p.maxDistanceKm })),
+    targetKm,
+  });
+  if (!route) return empty({ reason: "no-location" });
+
+  // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route. A
+  // manual FINISH projects to its LATEST pass (lastNearKm) so a finish near the start of a
+  // revisiting route resolves to the return — not km≈0, which would collapse the window.
+  const resolve = (pin: LocationPin, role: "start" | "finish"): { bound: Bound; connector?: LatLng } => {
     if (pin.kind === "auto") return { bound: { kind: "free" } };
     if (pin.kind === "waypoint") {
       const w = wpById.get(pin.waypointId);
       return w ? { bound: { kind: "fixed", km: nearestKm(route, w.location) } } : { bound: { kind: "free" } };
     }
-    return { bound: { kind: "fixed", km: nearestKm(route, pin.location) }, connector: pin.location };
+    const km = role === "finish" ? lastNearKm(route, pin.location) : nearestKm(route, pin.location);
+    return { bound: { kind: "fixed", km }, connector: pin.location };
   };
 
   const connectors = new Map<string, Connectors>();
@@ -67,8 +70,8 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
       // Guard against non-finite / non-positive pace (UI-unreachable, but pathological API input
       // would otherwise flow NaN/Infinity into the clock math and break HH:MM).
       const pace = Number.isFinite(p.pace) && (p.pace as number) > 0 ? (p.pace as number) : DEFAULT_PACE;
-      const s = resolve(p.startPin);
-      const f = resolve(p.finishPin);
+      const s = resolve(p.startPin, "start");
+      const f = resolve(p.finishPin, "finish");
       let approachKm = 0;
       let egressKm = 0;
       const conn: Connectors = {};

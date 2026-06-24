@@ -97,6 +97,7 @@ export async function POST(request: Request) {
         sharedCount: result.sharedSegments.length,
         persisted: result.skipped ? true : persisted,
         skipped: result.skipped,
+        unroutable: result.unroutable,
       },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );

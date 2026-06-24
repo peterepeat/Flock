@@ -14,6 +14,10 @@ import type { Block, Plan, Route, Runner } from "./model";
 import { arrivalAt } from "./plan";
 import { pointAtKm, sliceKm, nearestKm } from "./route";
 
+// Why a session can't be routed at all — a NAMED, first-class result (not a silent skip that
+// would strand the UI in a perpetual spinner). null = a real route was produced.
+export type Unroutable = { reason: "no-location" | "no-participants" } | null;
+
 export interface FlockCalcResult {
   routes: ComputedRoute[];
   sharedSegments: SharedSegment[];
@@ -21,7 +25,8 @@ export interface FlockCalcResult {
   waypointEtas: Record<string, string> | null;
   summary: { totalTogetherMinutes: number; pairwiseSummary: PairSummary[] };
   warnings: CalcWarning[];
-  skipped: boolean;
+  unroutable: Unroutable;
+  skipped: boolean; // DERIVED alias kept for back-compat: skipped === (unroutable != null)
 }
 
 const toLine = (coords: LatLng[]): GeoJSON.LineString => ({
@@ -185,6 +190,7 @@ export function projectPlan(input: {
     waypointEtas: Object.keys(waypointEtas).length ? waypointEtas : null,
     summary: { totalTogetherMinutes: round2(wallMin), pairwiseSummary },
     warnings: plan.warnings.map((w) => ({ participantId: w.id, message: w.message })),
+    unroutable: null,
     skipped: false,
   };
 }
