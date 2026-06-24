@@ -10,6 +10,7 @@
 // cycle loses nothing.
 // ---------------------------------------------------------------------------
 
+import { closestPointOnSegment, distanceMeters } from "./geo";
 import { createLogger } from "./logger";
 import type { FlockSession, FlockWaypoint, LatLng } from "./types";
 
@@ -18,6 +19,15 @@ const log = createLogger("flock-gpx");
 export const FLOCK_NS = "https://flock.run/gpx/1";
 const SIMPLIFY_EPSILON_M = 60; // Douglas–Peucker tolerance for dense tracks
 const SIMPLIFY_MAX_PTS = 40; // hard cap on waypoints from a track
+// A named top-level <wpt> within this perpendicular distance of the imported
+// track/route counts as "on" it — a deliberate stop / join / exit point — so we
+// insert it into the waypoint sequence at its along-route position. Beyond this
+// it's treated as an unrelated POI and left untouched in gpxPassthrough.
+const ON_TRACK_TOL_M = 75;
+// A named <wpt> this close to an EXISTING route point is the SAME place: we fold
+// its name onto that point (if the point is still auto-named) instead of inserting
+// a near-zero-length duplicate.
+const COINCIDE_TOL_M = 20;
 
 export interface GpxResult {
   xml: string;
@@ -144,33 +154,144 @@ function perpDistanceM(p: LatLng, a: LatLng, b: LatLng): number {
   return Math.hypot(px - t * bx, py - t * by);
 }
 
-/** Douglas–Peucker simplification, then an even-downsample cap. Endpoints kept. */
-function simplifyTrack(pts: LatLng[]): LatLng[] {
-  const dp = (s: LatLng[]): LatLng[] => {
-    if (s.length < 3) return s;
+/**
+ * Douglas–Peucker simplification, then an even-downsample cap, returning the KEPT
+ * INDICES into `pts` (endpoints always kept). Indices — rather than points — so the
+ * caller can read each kept point's along-track distance from a shared cumulative
+ * profile and merge named waypoints in by position. Pure (no DOM).
+ */
+export function simplifyTrackIdx(pts: LatLng[]): number[] {
+  const n = pts.length;
+  if (n <= 2) return pts.map((_, i) => i);
+  const dp = (lo: number, hi: number): number[] => {
+    if (hi - lo < 2) return [lo, hi]; // adjacent — nothing between to drop
     let maxD = 0;
-    let idx = 0;
-    for (let i = 1; i < s.length - 1; i++) {
-      const d = perpDistanceM(s[i], s[0], s[s.length - 1]);
+    let idx = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = perpDistanceM(pts[i], pts[lo], pts[hi]);
       if (d > maxD) {
         maxD = d;
         idx = i;
       }
     }
-    if (maxD > SIMPLIFY_EPSILON_M) {
-      return [...dp(s.slice(0, idx + 1)).slice(0, -1), ...dp(s.slice(idx))];
+    if (maxD > SIMPLIFY_EPSILON_M && idx !== -1) {
+      return [...dp(lo, idx).slice(0, -1), ...dp(idx, hi)]; // splice on the shared vertex
     }
-    return [s[0], s[s.length - 1]];
+    return [lo, hi];
   };
-  let out = pts.length > 2 ? dp(pts) : pts.slice();
-  if (out.length > SIMPLIFY_MAX_PTS) {
-    const step = (out.length - 1) / (SIMPLIFY_MAX_PTS - 1);
-    const down: LatLng[] = [out[0]];
-    for (let i = 1; i < SIMPLIFY_MAX_PTS - 1; i++) down.push(out[Math.round(i * step)]);
-    down.push(out[out.length - 1]);
-    out = down;
+  let idxs = dp(0, n - 1);
+  if (idxs.length > SIMPLIFY_MAX_PTS) {
+    const step = (idxs.length - 1) / (SIMPLIFY_MAX_PTS - 1);
+    const down: number[] = [idxs[0]];
+    for (let i = 1; i < SIMPLIFY_MAX_PTS - 1; i++) down.push(idxs[Math.round(i * step)]);
+    down.push(idxs[idxs.length - 1]);
+    idxs = down;
   }
-  return out;
+  return idxs;
+}
+
+/** Cumulative along-line distance (km) at each vertex of a polyline. Pure. */
+export function cumKmOf(coords: LatLng[]): number[] {
+  const cum = [0];
+  for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + distanceMeters(coords[i - 1], coords[i]) / 1000);
+  return cum;
+}
+
+/**
+ * Project `p` onto a polyline (given its precomputed cumulative-km profile):
+ * the closest approach, returned as { alongKm, perpM }. alongKm orders a point
+ * along the route; perpM gates whether it's "on" the route. Pure.
+ */
+export function projectOnPolyline(
+  coords: LatLng[],
+  cum: number[],
+  p: LatLng,
+): { alongKm: number; perpM: number } {
+  let bestKm = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const foot = closestPointOnSegment(p, coords[i], coords[i + 1]);
+    const d = distanceMeters(p, foot);
+    if (d < bestD) {
+      bestD = d;
+      bestKm = cum[i] + distanceMeters(coords[i], foot) / 1000;
+    }
+  }
+  return { alongKm: bestKm, perpM: bestD };
+}
+
+export interface RouteItem {
+  wp: Omit<FlockWaypoint, "id">;
+  alongKm: number; // position along the route geometry, for ordering
+}
+
+/**
+ * Merge named POIs (top-level <wpt>s) into an ordered route, BY POSITION.
+ *
+ * Each named POI is projected onto the route geometry; if it lands within
+ * ON_TRACK_TOL_M it is woven into the sequence at its along-route distance — so the
+ * corridor the engine routes (waypoints are mandatory vertices in array order) still
+ * runs Start → … → POI → … → Finish without back-tracking. A POI sitting essentially
+ * on an existing (auto-named) point folds its real name onto that point instead of
+ * adding a duplicate. POIs off the route are left for the caller to keep verbatim.
+ *
+ * `named` and the returned `onTrack` are index-aligned so the caller can mark exactly
+ * the absorbed source elements consumed (and leave the rest in gpxPassthrough). Pure.
+ */
+export function mergeNamedIntoRoute(
+  base: RouteItem[],
+  geom: { coords: LatLng[]; cum: number[]; totalKm: number },
+  named: Omit<FlockWaypoint, "id">[],
+): { waypoints: Omit<FlockWaypoint, "id">[]; onTrack: boolean[] } {
+  const onTrack = named.map(() => false);
+  if (named.length === 0 || geom.coords.length < 2 || geom.totalKm <= 0) {
+    return { waypoints: base.map((b) => b.wp), onTrack };
+  }
+  const items: RouteItem[] = base.map((b) => ({ ...b }));
+  const EPS_KM = 1e-4; // ~0.1 m — keep POIs strictly interior so endpoints stay first/last
+  named.forEach((poi, i) => {
+    // Sitting on top of an existing AUTO-named point (a shape placeholder / bare rtept)?
+    // Fold the real name onto it rather than add a coincident duplicate. We only fold onto
+    // PLACEHOLDERS: a real-named point is left untouched and the POI falls through to the
+    // on-route insert below — so a POI near a named point (or near another POI placed this
+    // pass) is still represented, never silently dropped. Keep the placeholder's own foreign
+    // gpxExtra when the POI brings none.
+    let bi = -1;
+    let bd = Infinity;
+    for (let k = 0; k < items.length; k++) {
+      const d = distanceMeters(poi.location, items[k].wp.location);
+      if (d < bd) {
+        bd = d;
+        bi = k;
+      }
+    }
+    if (bd <= COINCIDE_TOL_M && bi >= 0 && isAutoWaypointName(items[bi].wp.name)) {
+      const keepExtra = poi.gpxExtra ?? items[bi].wp.gpxExtra;
+      items[bi] = {
+        ...items[bi],
+        wp: {
+          ...items[bi].wp,
+          name: poi.name,
+          address: poi.address || poi.name,
+          ...(keepExtra ? { gpxExtra: keepExtra } : {}),
+        },
+      };
+      onTrack[i] = true; // absorbed (named an existing placeholder) → don't keep in passthrough
+      return;
+    }
+    const { alongKm, perpM } = projectOnPolyline(geom.coords, geom.cum, poi.location);
+    if (perpM <= ON_TRACK_TOL_M) {
+      const km = Math.min(Math.max(alongKm, EPS_KM), geom.totalKm - EPS_KM);
+      items.push({ wp: poi, alongKm: km });
+      onTrack[i] = true; // inserted into the route at its along-route position
+    }
+    // else: genuinely off the route → caller keeps it verbatim in gpxPassthrough
+  });
+  const waypoints = items
+    .map((it, idx) => ({ it, idx }))
+    .sort((a, b) => a.it.alongKm - b.it.alongKm || a.idx - b.idx) // stable: base order wins on ties
+    .map((x) => x.it.wp);
+  return { waypoints, onTrack };
 }
 
 const serialize = (node: Node) => new XMLSerializer().serializeToString(node);
@@ -221,11 +342,21 @@ function pointFromEl(el: Element): Omit<FlockWaypoint, "id"> | null {
   return { location: { lat, lng }, address: name, name, stopMinutes, ...(extra ? { gpxExtra: extra } : {}) };
 }
 
+/** "A", "A and B", "A, B and C" — for naming placed/skipped waypoints in a warning. */
+function nameList(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 /**
  * Parse a GPX document into flock waypoints + a verbatim passthrough of
  * everything we didn't consume. Source priority: <rte> (route points, used
  * as-is) → <trk> (dense track, simplified + flagged for re-routing) → top-level
- * <wpt> (a pin list). Browser-only (DOMParser).
+ * <wpt> (a pin list). In the <rte>/<trk> cases, named top-level <wpt>s that lie ON
+ * the route (deliberate stops / join / exit points) are projected in at their
+ * along-route position rather than dropped — see mergeNamedIntoRoute.
+ * Browser-only (DOMParser).
  */
 export function parseFlockGpx(xml: string): ParsedGpx {
   const warnings: string[] = [];
@@ -246,31 +377,78 @@ export function parseFlockGpx(xml: string): ParsedGpx {
   let waypoints: Omit<FlockWaypoint, "id">[] = [];
   const consumed = new Set<Element>();
 
+  // Named top-level <wpt>s (real <name>, not a bare/auto placeholder) paired with
+  // their source element. In a <rte>/<trk> import these are deliberate POIs — stops,
+  // join/exit points — that we weave into the route at their along-route position
+  // rather than leave invisible in passthrough. Anonymous <wpt>s convey no place
+  // and would only clutter the line, so they're excluded (and round-trip verbatim).
+  const namedPairs = (rtes.length || trks.length)
+    ? wpts
+        .map((el) => ({ el, wp: pointFromEl(el) }))
+        .filter((x): x is { el: Element; wp: Omit<FlockWaypoint, "id"> } =>
+          x.wp != null && !isAutoWaypointName(x.wp.name),
+        )
+    : [];
+  const namedPois = namedPairs.map((p) => p.wp);
+
+  // Mark the absorbed POIs consumed (so they don't ALSO re-emit verbatim in
+  // passthrough), and report what was woven in vs. left off the route.
+  const reconcileNamed = (onTrack: boolean[], verb: string) => {
+    namedPairs.forEach((p, i) => {
+      if (onTrack[i]) consumed.add(p.el);
+    });
+    const placed = namedPois.filter((_, i) => onTrack[i]).map((w) => w.name);
+    const skipped = namedPois.filter((_, i) => !onTrack[i]).map((w) => w.name);
+    if (placed.length) {
+      warnings.push(
+        `${verb} ${placed.length} named ${placed.length === 1 ? "waypoint" : "waypoints"} on the route (${nameList(placed)}) — ${placed.length === 1 ? "a pass-through point" : "each a pass-through point"} you can switch to a stop.`,
+      );
+    }
+    if (skipped.length) {
+      warnings.push(
+        `${skipped.length} named ${skipped.length === 1 ? "waypoint was" : "waypoints were"} not on the route (${nameList(skipped)}); kept in the file but left off the route.`,
+      );
+    }
+  };
+
   if (rtes.length > 0) {
     const rte = rtes[0];
     consumed.add(rte);
-    waypoints = Array.from(rte.children)
+    const baseWps = Array.from(rte.children)
       .filter((c) => c.localName === "rtept")
       .map(pointFromEl)
       .filter((w): w is Omit<FlockWaypoint, "id"> => w != null);
+    const coords = baseWps.map((w) => w.location);
+    const cum = cumKmOf(coords);
+    const base: RouteItem[] = baseWps.map((wp, i) => ({ wp, alongKm: cum[i] }));
+    const merged = mergeNamedIntoRoute(base, { coords, cum, totalKm: cum[cum.length - 1] ?? 0 }, namedPois);
+    waypoints = merged.waypoints;
+    reconcileNamed(merged.onTrack, "Placed");
   } else if (trks.length > 0) {
     const trk = trks[0];
     consumed.add(trk);
     const raw: LatLng[] = Array.from(trk.getElementsByTagName("trkpt"))
       .map((p) => ({ lat: Number(p.getAttribute("lat")), lng: Number(p.getAttribute("lon")) }))
       .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-    const simplified = simplifyTrack(raw);
-    waypoints = simplified.map((ll, i) => ({
-      location: ll,
-      address: i === 0 ? "Start" : i === simplified.length - 1 ? "Finish" : `Point ${i + 1}`,
-      name: i === 0 ? "Start" : i === simplified.length - 1 ? "Finish" : `Point ${i + 1}`,
-      stopMinutes: 0,
+    const cum = cumKmOf(raw);
+    const keptIdx = simplifyTrackIdx(raw);
+    const base: RouteItem[] = keptIdx.map((idx, j) => ({
+      alongKm: cum[idx],
+      wp: {
+        location: raw[idx],
+        address: j === 0 ? "Start" : j === keptIdx.length - 1 ? "Finish" : `Point ${j + 1}`,
+        name: j === 0 ? "Start" : j === keptIdx.length - 1 ? "Finish" : `Point ${j + 1}`,
+        stopMinutes: 0,
+      },
     }));
+    const merged = mergeNamedIntoRoute(base, { coords: raw, cum, totalKm: cum[cum.length - 1] ?? 0 }, namedPois);
+    waypoints = merged.waypoints;
     if (raw.length > 0) {
       warnings.push(
-        `Imported a track of ${raw.length} points — simplified to ${waypoints.length} waypoints. The flock engine re-routes between them, so the exact path may shift.`,
+        `Imported a track of ${raw.length} points — simplified to ${base.length} waypoints. The flock engine re-routes between them, so the exact path may shift.`,
       );
     }
+    reconcileNamed(merged.onTrack, "Kept");
   } else if (wpts.length > 0) {
     wpts.forEach((w) => consumed.add(w));
     waypoints = wpts
