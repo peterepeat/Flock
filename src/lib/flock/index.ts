@@ -44,23 +44,34 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
 
   // The shared spine is an OUTPUT of the runners: chosen from their anchors, not from the
   // waypoints alone. null = no geography at all (no waypoints, no pins) → a NAMED no-route.
-  const route = await buildSpine({
+  const { route, anchored } = await buildSpine({
     waypoints: waypoints.map((w) => ({ id: w.id, location: w.location, name: w.name, stopMinutes: w.stopMinutes })),
     runners: participants.map((p) => ({ startLoc: pinLoc(p.startPin), finishLoc: pinLoc(p.finishPin), maxDistanceKm: p.maxDistanceKm })),
     targetKm,
   });
   if (!route) return empty({ reason: "no-location" });
 
-  // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route. A
-  // manual FINISH projects to its LATEST pass (lastNearKm) so a finish near the start of a
-  // revisiting route resolves to the return — not km≈0, which would collapse the window.
+  // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route.
   const resolve = (pin: LocationPin, role: "start" | "finish"): { bound: Bound; connector?: LatLng } => {
     if (pin.kind === "auto") return { bound: { kind: "free" } };
     if (pin.kind === "waypoint") {
       const w = wpById.get(pin.waypointId);
-      return w ? { bound: { kind: "fixed", km: nearestKm(route, w.location) } } : { bound: { kind: "free" } };
+      if (!w) return { bound: { kind: "free" } };
+      // A FINISH at a waypoint that is ALSO the loop's base (km 0 = km L) must resolve to km L — the
+      // end of the loop, back at the landmark — not km 0, which would collapse the window to nothing.
+      // lastNearKm gives the LATEST pass; for a mid-route landmark it's the same single pass (the
+      // dwell stop), so a café-reunion finish still lands exactly on its stop.
+      const km = role === "finish" ? lastNearKm(route, w.location) : nearestKm(route, w.location);
+      return { bound: { kind: "fixed", km } };
     }
-    const km = role === "finish" ? lastNearKm(route, pin.location) : nearestKm(route, pin.location);
+    // A manual pin is OFF the route. When the spine was built FROM the runners (`anchored`), it
+    // anchors to the spine's END — km 0 for a start, km L for a finish — so the runner meets the
+    // flock at the base and runs the FULL route (connecting home↔base). On an organizer route it
+    // PROJECTS to its nearest pass (a finish to its LATEST pass, so a return-to-start finish doesn't
+    // collapse the window).
+    const km = anchored
+      ? role === "finish" ? route.totalKm : 0
+      : role === "finish" ? lastNearKm(route, pin.location) : nearestKm(route, pin.location);
     return { bound: { kind: "fixed", km }, connector: pin.location };
   };
 

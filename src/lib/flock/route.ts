@@ -124,6 +124,14 @@ async function corridor(points: LatLng[], targetKm: number | null): Promise<Pick
   return base;
 }
 
+// A loop anchored AT `base` — so `base` sits at km 0 (= km L), and a runner pinned there runs the
+// FULL circuit. Out-and-back through the landmark when one is given and distinct (so it's visited),
+// else a plain round-trip from base.
+async function loopFrom(base: LatLng, wp: LatLng | null, targetKm: number | null): Promise<Pick<Route, "coords" | "cumKm" | "totalKm">> {
+  if (wp && distanceMeters(base, wp) >= 1) return corridor([base, wp, base], targetKm);
+  return fromOrs(await getRoundTrip(base, Math.max(1, targetKm ?? DEFAULT_DISTANCE_KM)));
+}
+
 // Snap the dwell stops (waypoints with a positive stop) onto a finished geometry.
 function withStops(geom: Pick<Route, "coords" | "cumKm" | "totalKm">, waypoints: WaypointSpec[]): Route {
   const base: Route = { ...geom, stops: [] };
@@ -169,28 +177,38 @@ export interface SpineRunner {
  *   some fixed anchor but free ends    → a loop at the meeting point (centroid of anchors). [B]
  *   no fixed anchor at all             → null (nothing to route from).                     [D]
  */
-export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: SpineRunner[]; targetKm: number | null }): Promise<Route | null> {
+export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: SpineRunner[]; targetKm: number | null }): Promise<{ route: Route | null; anchored: boolean }> {
   const { waypoints, runners, targetKm } = opts;
-  if (waypoints.length >= 2) return buildRoute({ waypoints, targetKm }); // [W] honor the organizer's route
+  // [W] ≥2 waypoints = the organizer's route; a runner JOINS it at their nearest point (their chosen
+  // join), so manual pins are PROJECTED, not anchored to the ends. `anchored: false`.
+  if (waypoints.length >= 2) return { route: await buildRoute({ waypoints, targetKm }), anchored: false };
 
   const wp = waypoints[0]?.location ?? null;
   const fixedStarts = runners.map((r) => r.startLoc).filter((l): l is LatLng => l != null);
   const fixedFinishes = runners.map((r) => r.finishLoc).filter((l): l is LatLng => l != null);
-  const allFixed = [...fixedStarts, ...fixedFinishes, ...(wp ? [wp] : [])];
 
   let geom: Pick<Route, "coords" | "cumKm" | "totalKm"> | null = null;
 
   if (runners.length === 1) {
     const { startLoc, finishLoc, maxDistanceKm } = runners[0]; // [C] the runner's own route
     if (startLoc && finishLoc) geom = await corridor([startLoc, ...(wp ? [wp] : []), finishLoc], null); // literal A→B (no grow)
-    else if (startLoc) geom = fromOrs(await getRoundTrip(startLoc, loopKm(maxDistanceKm, targetKm)));
-    else if (finishLoc) geom = fromOrs(await getRoundTrip(finishLoc, loopKm(maxDistanceKm, targetKm)));
+    else if (startLoc) geom = await loopFrom(startLoc, wp, maxDistanceKm ?? targetKm);
+    else if (finishLoc) geom = await loopFrom(finishLoc, wp, maxDistanceKm ?? targetKm);
     else if (wp) geom = fromOrs(await getRoundTrip(wp, loopKm(maxDistanceKm, targetKm)));
   } else if (fixedStarts.length > 0 && fixedFinishes.length > 0 && distanceMeters(centroid(fixedStarts), centroid(fixedFinishes)) >= 1) {
-    geom = await corridor([centroid(fixedStarts), ...(wp ? [wp] : []), centroid(fixedFinishes)], targetKm); // [A]
-  } else if (allFixed.length > 0) {
-    geom = fromOrs(await getRoundTrip(centroid(allFixed), Math.max(1, targetKm ?? DEFAULT_DISTANCE_KM))); // [B]
+    geom = await corridor([centroid(fixedStarts), ...(wp ? [wp] : []), centroid(fixedFinishes)], targetKm); // [A] corridor between the ends
+  } else {
+    // [B] free on ≥1 end → a LOOP anchored at the FIXED end (start centroid, else finish centroid),
+    // out-and-back through the landmark if there is one. Anchoring at the fixed end puts that runner
+    // at the loop's BASE (km 0 = km L), so with no other hard constraint they run the FULL circuit —
+    // coverage is the default, NOT a truncated arc where their pin happened to project mid-loop. The
+    // landmark is VISITED en route, never used as the anchor (the bug that truncated a pinned runner).
+    const base = fixedStarts.length ? centroid(fixedStarts) : fixedFinishes.length ? centroid(fixedFinishes) : wp;
+    if (base) geom = await loopFrom(base, wp, targetKm);
   }
 
-  return geom ? withStops(geom, waypoints) : null; // null = [D] no geography
+  // A/B/C build the spine FROM the runners, so a manual fixed pin anchors to the spine's ENDPOINT
+  // (km 0 start / km L finish) — everyone meets at the base and runs the FULL route — rather than
+  // projecting to wherever the pin happens to be nearest (which truncated a pinned runner mid-loop).
+  return { route: geom ? withStops(geom, waypoints) : null, anchored: true }; // route null = [D] no geography
 }
