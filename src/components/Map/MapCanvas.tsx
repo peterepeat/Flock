@@ -2,7 +2,7 @@
 
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { type MutableRefObject, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   CircleMarker,
   MapContainer,
@@ -215,14 +215,21 @@ const GHOST_ICON = L.divIcon({
 // — so a stray click on the line never drops a waypoint.
 const DRAG_COMMIT_PX = 6;
 
+type GrabRef = MutableRefObject<((e: L.LeafletMouseEvent) => void) | null>;
+
 /**
- * Drag-to-reshape. A transparent thick "grab" line laid over the flock spine lets
- * you grab the route ANYWHERE and pull; on release a new waypoint is dropped at that
- * point, spliced into the right ORDER position (insertionIndex), so the corridor
- * bends through it on the next recompute. A ghost dot tracks the cursor mid-drag.
- * Inactive while locked or while placing a pin (those own the map's click).
+ * Drag-to-reshape. Grab the flock route ANYWHERE and pull; on release a new waypoint
+ * is dropped at that point, spliced into the right ORDER position (insertionIndex),
+ * so the corridor bends through it on the next recompute. A ghost dot tracks the
+ * cursor once the drag commits (a sub-threshold press stays a click).
+ *
+ * A transparent "grab" line over the spine captures the gesture where only the spine
+ * shows; the SAME handler (exposed via `grabRef`) is also attached to the per-runner
+ * route + together-halo polylines, so reshaping works even when one of THOSE is on
+ * top (e.g. a focused runner's line) — without stealing their hover/click/tooltip.
+ * Inactive while locked or while placing a pin.
  */
-function RouteEditor() {
+function RouteEditor({ grabRef, suppressClickRef }: { grabRef: GrabRef; suppressClickRef: MutableRefObject<number> }) {
   const map = useMap();
   const flockId = useFlockStore((s) => s.flockId);
   const session = useFlockStore((s) => s.session);
@@ -234,17 +241,20 @@ function RouteEditor() {
     () => (flockRoute ? flockRoute.coordinates.map(([lng, lat]) => ({ lat, lng })) : []),
     [flockRoute],
   );
+  const active = !!flockRoute && spine.length >= 2 && !locked && !placing;
 
   // Live data the imperative drag handlers read — held in a ref so the handlers we
   // add to the map are STABLE (matched on remove) yet never read stale state.
-  const ctx = useRef<{ flockId: string | null; spine: LatLng[]; waypoints: { location: LatLng }[] }>({
+  const ctx = useRef<{ flockId: string | null; spine: LatLng[]; waypoints: { location: LatLng }[]; active: boolean }>({
     flockId: null,
     spine: [],
     waypoints: [],
+    active: false,
   });
-  ctx.current = { flockId, spine, waypoints: session?.waypoints ?? [] };
+  ctx.current = { flockId, spine, waypoints: session?.waypoints ?? [], active };
 
   const dragging = useRef(false);
+  const committed = useRef(false); // crossed the px threshold → a real drag, not a click
   const ghost = useRef<L.Marker | null>(null);
   const downPt = useRef<L.Point | null>(null);
   const insertAt = useRef(0);
@@ -264,17 +274,30 @@ function RouteEditor() {
       ghost.current = null;
     }
     dragging.current = false;
+    committed.current = false;
     downPt.current = null;
   };
 
-  moveRef.current = (e) => ghost.current?.setLatLng(e.latlng);
+  moveRef.current = (e) => {
+    if (!dragging.current) return;
+    if (!committed.current) {
+      // Hold off until the pointer travels past the threshold, so a click (to select
+      // a runner) never spawns a ghost or drops a waypoint. The ghost appears here.
+      if (!downPt.current || e.containerPoint.distanceTo(downPt.current) < DRAG_COMMIT_PX) return;
+      committed.current = true;
+      ghost.current = L.marker(e.latlng, { icon: GHOST_ICON, interactive: false, keyboard: false, zIndexOffset: 2000 }).addTo(map);
+    }
+    ghost.current?.setLatLng(e.latlng);
+  };
   upRef.current = async (e) => {
     if (!dragging.current) return;
-    const moved = downPt.current ? e.containerPoint.distanceTo(downPt.current) : 0;
+    const wasDrag = committed.current;
     const { flockId: fid } = ctx.current;
     const at = insertAt.current;
     teardown();
-    if (moved < DRAG_COMMIT_PX || !fid) return; // a click, not a reshape
+    if (!wasDrag) return; // a click — leave it to the layer's own click handler
+    suppressClickRef.current = Date.now() + 400; // don't let the post-drag click select a runner
+    if (!fid) return;
     const ll: LatLng = { lat: e.latlng.lat, lng: e.latlng.lng };
     try {
       await uAddWaypoint(fid, { location: ll, address: "", name: "Dropped pin", stopMinutes: 0 }, at);
@@ -295,34 +318,39 @@ function RouteEditor() {
     }
   };
 
+  // The grab handler — attached to the spine grab line below AND (via grabRef) to the
+  // route/halo polylines that may sit on top of it. We don't stop the event: panning is
+  // prevented by disabling map.dragging, and letting it through preserves a layer's own
+  // click (select a runner) when the press turns out to be a click, not a drag.
   const onDown = (e: L.LeafletMouseEvent) => {
-    if (dragging.current) return;
-    L.DomEvent.stop(e.originalEvent); // don't pan the map or fire the click handler
+    if (dragging.current || !ctx.current.active) return;
     const { spine: sp, waypoints } = ctx.current;
     if (sp.length < 2) return;
     dragging.current = true;
+    committed.current = false;
     downPt.current = e.containerPoint;
     insertAt.current = insertionIndex(sp, waypoints, { lat: e.latlng.lat, lng: e.latlng.lng });
     map.dragging.disable();
-    ghost.current = L.marker(e.latlng, { icon: GHOST_ICON, interactive: false, keyboard: false, zIndexOffset: 2000 }).addTo(map);
     map.on("mousemove", stableMove);
     map.on("mouseup", stableUp);
   };
+  grabRef.current = onDown;
 
   // Clean up listeners / re-enable panning if we unmount mid-gesture.
   useEffect(
     () => () => {
       map.off("mousemove", stableMove);
       map.off("mouseup", stableUp);
+      grabRef.current = null;
       if (dragging.current) {
         map.dragging.enable();
         if (ghost.current) map.removeLayer(ghost.current);
       }
     },
-    [map, stableMove, stableUp],
+    [map, stableMove, stableUp, grabRef],
   );
 
-  if (!flockRoute || spine.length < 2 || locked || placing) return null;
+  if (!active) return null;
   return (
     <Polyline
       positions={spine.map((p) => [p.lat, p.lng] as [number, number])}
@@ -466,6 +494,14 @@ export default function MapCanvas() {
   const waypoints = session?.waypoints ?? [];
   const locked = session?.lockedAt != null;
   const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
+
+  // Drag-to-reshape plumbing (see RouteEditor): the route/together polylines that can
+  // sit ON TOP of the spine forward their mousedown to the editor's grab handler, so a
+  // drag reshapes even there. suppressClickRef swallows the click that the browser fires
+  // right after a committed drag, so reshaping a runner's line doesn't also select them.
+  const routeGrabRef = useRef<((e: L.LeafletMouseEvent) => void) | null>(null);
+  const suppressClickRef = useRef(0);
+  const onGrabRoute = useCallback((e: L.LeafletMouseEvent) => routeGrabRef.current?.(e), []);
 
   // Drag-to-move: a waypoint (shared, anyone) or a start pin you own. Leaflet has
   // already moved the marker; we persist the drop and the server echo re-pins it.
@@ -626,8 +662,10 @@ export default function MapCanvas() {
 
         {/* Grab-anywhere reshape handle over the spine (transparent; just above the
             non-interactive casing, below the together-halos/routes so their tooltips
-            survive). Drag a point off the line to splice a waypoint in. */}
-        <RouteEditor />
+            survive). Drag a point off the line to splice a waypoint in. The route +
+            halo polylines forward their own mousedown to it (onGrabRoute) so dragging
+            works even where one of them sits on top of the spine. */}
+        <RouteEditor grabRef={routeGrabRef} suppressClickRef={suppressClickRef} />
 
         {/* Direction chevrons (non-interactive, below pins). Spine chevrons at rest;
             the focused runner's route chevrons when one is focused. */}
@@ -664,6 +702,7 @@ export default function MapCanvas() {
                 lineJoin: "round",
                 className: "together-glow",
               }}
+              eventHandlers={{ mousedown: onGrabRoute }}
             >
               <Tooltip sticky>{label}</Tooltip>
             </Polyline>
@@ -726,12 +765,15 @@ export default function MapCanvas() {
                 lineJoin: "round",
               }}
               eventHandlers={{
+                mousedown: onGrabRoute, // a drag here reshapes the route (RouteEditor)
                 mouseover: () => useFlockStore.getState().setHovered(r.participantId),
                 mouseout: () => useFlockStore.getState().setHovered(null),
-                click: () =>
+                click: () => {
+                  if (Date.now() < suppressClickRef.current) return; // just-finished a reshape drag
                   useFlockStore
                     .getState()
-                    .setSelected(selected === r.participantId ? null : r.participantId),
+                    .setSelected(selected === r.participantId ? null : r.participantId);
+                },
               }}
             >
               <Tooltip sticky>
