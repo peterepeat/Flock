@@ -57,7 +57,7 @@ export function wp(id: string, lat: number, lng: number, stopMinutes = 0): Flock
 }
 export function session(participants: Participant[], waypoints: FlockWaypoint[] = [], opts: Partial<FlockSession> = {}): FlockSession {
   return {
-    id: "t", createdAt: "", updatedAt: "", lockedAt: null, unitPreference: "km",
+    id: "t", createdAt: "", updatedAt: "", locks: { run: false, route: false, runners: false }, runnerLocks: {}, unitPreference: "km",
     startAnchor: { kind: "auto" }, intendedDistanceKm: null,
     participants, waypoints, computedRoutes: null, sharedSegments: null, flockRoute: null, waypointEtas: null, gpxPassthrough: null,
     ...opts,

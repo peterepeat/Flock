@@ -20,10 +20,13 @@ export default function Header() {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const locked = session?.lockedAt != null;
-  // No undo/redo on a locked plan (edits are rejected) or mid-flight.
-  const canUndo = !locked && !historyBusy && undoStack.length > 0;
-  const canRedo = !locked && !historyBusy && redoStack.length > 0;
+  // "Lock the plan" = all three section locks set. (Per-runner locks are independent
+  // and left alone by the global toggle, so a self-locked runner survives unlock.)
+  const locks = session?.locks;
+  const fullyLocked = !!locks && locks.run && locks.route && locks.runners;
+  // No undo/redo when everything's locked (edits rejected) or mid-flight.
+  const canUndo = !fullyLocked && !historyBusy && undoStack.length > 0;
+  const canRedo = !fullyLocked && !historyBusy && redoStack.length > 0;
 
   // Keyboard: ⌘/Ctrl+Z = undo, ⇧⌘/Ctrl+Z or Ctrl+Y = redo. Skip while typing in a
   // field so native text undo still works.
@@ -65,9 +68,9 @@ export default function Header() {
   async function toggleLock() {
     setBusy(true);
     try {
-      const updated = locked ? await unlockFlock(flockId) : await lockFlock(flockId);
+      const updated = fullyLocked ? await unlockFlock(flockId) : await lockFlock(flockId);
       applyServerSession(updated, true);
-      log.info(locked ? "unlocked" : "locked", { flockId });
+      log.info(fullyLocked ? "unlocked" : "locked", { flockId });
     } catch (err) {
       log.error("lock toggle failed", { error: String(err) });
     } finally {
@@ -117,12 +120,12 @@ export default function Header() {
           onClick={toggleLock}
           disabled={busy}
           className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition disabled:opacity-60 ${
-            locked
+            fullyLocked
               ? "border border-white/10 text-text hover:bg-surface-lift"
               : "bg-together text-[#0c1413] hover:brightness-110"
           }`}
         >
-          {locked ? "Unlock to make changes" : "Lock the plan"}
+          {fullyLocked ? "Unlock to make changes" : "Lock the plan"}
         </button>
       </div>
     </header>

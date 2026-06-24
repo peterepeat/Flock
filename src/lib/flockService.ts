@@ -11,10 +11,11 @@ import { createLogger } from "./logger";
 import { nextColor } from "./colors";
 import { waypointNameIsAuto } from "./flockGpx";
 import { newFlockId, newParticipantId, newWaypointId } from "./ids";
-import { getStore, hashToken } from "./store";
+import { getStore } from "./store";
 import type {
   FlockSession,
   FlockWaypoint,
+  LockSection,
   Participant,
   PatchAction,
   Unit,
@@ -38,6 +39,33 @@ function now(): string {
   return new Date().toISOString();
 }
 
+// Map a plan-mutating action to its section and report the lock message that blocks
+// it (or null to allow). Toggling locks, pushing computed routes, and cosmetic
+// renames are never blocked — only genuine plan edits are gated by their section.
+function lockBlocks(session: FlockSession, action: PatchAction): string | null {
+  const label: Record<LockSection, string> = { run: "The run", route: "The route", runners: "The runners" };
+  const denied = (s: LockSection) => `${label[s]} is locked.`;
+  switch (action.action) {
+    case "setUnit":
+    case "setRunConfig":
+      return session.locks.run ? denied("run") : null;
+    case "addWaypoint":
+    case "updateWaypoint":
+    case "removeWaypoint":
+    case "reorderWaypoints":
+    case "importRoute":
+      return session.locks.route ? denied("route") : null;
+    case "addParticipant":
+      return session.locks.runners ? denied("runners") : null;
+    case "updateParticipant":
+    case "removeParticipant":
+      if (session.locks.runners) return denied("runners");
+      return session.runnerLocks[action.participantId] ? "This runner is locked." : null;
+    default:
+      return null; // setRoutes, renameWaypoints, lock/unlock, setSectionLock, setRunnerLock
+  }
+}
+
 /** Any change to people/waypoints invalidates the computed plan. */
 function clearComputed(session: FlockSession): void {
   session.computedRoutes = null;
@@ -53,7 +81,8 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     id: newFlockId(),
     createdAt: ts,
     updatedAt: ts,
-    lockedAt: null,
+    locks: { run: false, route: false, runners: false },
+    runnerLocks: {},
     unitPreference,
     startAnchor: { kind: "auto" },
     intendedDistanceKm: null,
@@ -86,6 +115,12 @@ function normalizeSession(session: FlockSession): void {
   if (!session.waypoints) session.waypoints = [];
   if (!session.startAnchor) session.startAnchor = { kind: "auto" };
   if (session.intendedDistanceKm === undefined) session.intendedDistanceKm = null;
+  // Migrate the old single global lock (lockedAt) to the three section locks.
+  if (!session.locks) {
+    const wasLocked = (session as unknown as { lockedAt?: string | null }).lockedAt != null;
+    session.locks = { run: wasLocked, route: wasLocked, runners: wasLocked };
+  }
+  if (!session.runnerLocks) session.runnerLocks = {};
   for (const p of session.participants) {
     const legacy = p as unknown as Record<string, unknown>;
     if (!p.startPin) {
@@ -125,22 +160,10 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
   }
   if (!session.waypoints) session.waypoints = [];
 
-  const locked = session.lockedAt != null;
-  const mutatesPlan =
-    action.action === "addParticipant" ||
-    action.action === "updateParticipant" ||
-    action.action === "removeParticipant" ||
-    action.action === "setUnit" ||
-    action.action === "setRunConfig" ||
-    action.action === "addWaypoint" ||
-    action.action === "updateWaypoint" ||
-    action.action === "removeWaypoint" ||
-    action.action === "reorderWaypoints" ||
-    action.action === "importRoute";
-
-  if (locked && mutatesPlan) {
-    log.info("rejected mutation on locked flock", { id, action: action.action });
-    return { ok: false, status: 409, error: "The plan is locked." };
+  const blocked = lockBlocks(session, action);
+  if (blocked) {
+    log.info("rejected — locked section", { id, action: action.action });
+    return { ok: false, status: 409, error: blocked };
   }
 
   log.debug("applying action", { id, action: action.action });
@@ -182,7 +205,6 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       };
 
       session.participants.push(participant);
-      await store.setTokenHash(id, pid, hashToken(action.editToken));
       // Routes are now stale.
       clearComputed(session);
       log.info("participant added", {
@@ -200,9 +222,6 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     case "updateParticipant": {
       const idx = session.participants.findIndex((x) => x.id === action.participantId);
       if (idx === -1) return { ok: false, status: 404, error: "Participant not found" };
-
-      const verified = await verifyToken(id, action.participantId, action.editToken);
-      if (!verified.ok) return verified;
 
       const current = session.participants[idx];
       const u = action.updates;
@@ -226,11 +245,8 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       const exists = session.participants.some((x) => x.id === action.participantId);
       if (!exists) return { ok: false, status: 404, error: "Participant not found" };
 
-      const verified = await verifyToken(id, action.participantId, action.editToken);
-      if (!verified.ok) return verified;
-
       session.participants = session.participants.filter((x) => x.id !== action.participantId);
-      await store.deleteTokenHash(id, action.participantId);
+      delete session.runnerLocks[action.participantId];
       clearComputed(session);
       log.info("participant removed", { id, participantId: action.participantId });
       break;
@@ -428,14 +444,31 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     }
 
     case "lock": {
-      session.lockedAt = now();
-      log.info("flock locked", { id });
+      // "Lock the plan" — all three section locks; per-runner locks untouched.
+      session.locks = { run: true, route: true, runners: true };
+      log.info("plan locked", { id });
       break;
     }
 
     case "unlock": {
-      session.lockedAt = null;
-      log.info("flock unlocked", { id });
+      // "Unlock to make changes" — clear the three section locks only, so a
+      // self-locked runner survives the cycle (its runnerLocks entry is preserved).
+      session.locks = { run: false, route: false, runners: false };
+      log.info("plan unlocked", { id });
+      break;
+    }
+
+    case "setSectionLock": {
+      session.locks = { ...session.locks, [action.section]: action.locked };
+      log.info("section lock set", { id, section: action.section, locked: action.locked });
+      break;
+    }
+
+    case "setRunnerLock": {
+      if (!session.participants.some((x) => x.id === action.participantId))
+        return { ok: false, status: 404, error: "Participant not found" };
+      session.runnerLocks = { ...session.runnerLocks, [action.participantId]: action.locked };
+      log.info("runner lock set", { id, participantId: action.participantId, locked: action.locked });
       break;
     }
 
@@ -447,24 +480,6 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
 
   await save(session);
   return { ok: true, status: 200, session };
-}
-
-async function verifyToken(
-  flockId: string,
-  participantId: string,
-  token: string,
-): Promise<ApplyResult> {
-  const stored = await getStore().getTokenHash(flockId, participantId);
-  if (!stored) {
-    // No token on record — allow (legacy/edge), but log it loudly.
-    log.warn("no edit token on record; allowing edit", { flockId, participantId });
-    return { ok: true, status: 200 };
-  }
-  if (!token || hashToken(token) !== stored) {
-    log.info("edit token mismatch — rejecting", { flockId, participantId });
-    return { ok: false, status: 403, error: "You can only edit the entry you created." };
-  }
-  return { ok: true, status: 200 };
 }
 
 async function save(session: FlockSession): Promise<void> {

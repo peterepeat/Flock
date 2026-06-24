@@ -8,10 +8,32 @@ import RunSettings from "@/components/Panel/RunSettings";
 import Section from "@/components/Panel/Section";
 import TogetherStat from "@/components/Panel/TogetherStat";
 import WaypointsSection from "@/components/Panel/WaypointsSection";
+import LockToggle from "@/components/ui/LockToggle";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import type { FlockSession } from "@/lib/types";
+import { setSectionLock } from "@/lib/flockApi";
+import type { FlockSession, LockSection } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
+
+// Shared label + toggle wiring for a section's advisory lock.
+const SECTION_TITLE: Record<LockSection, string> = { run: "The run", route: "The route", runners: "The runners" };
+function useSectionLock() {
+  const flockId = useFlockStore((s) => s.flockId)!;
+  const apply = useFlockStore((s) => s.applyServerSession);
+  const locks = useFlockStore((s) => s.session?.locks);
+  return (section: LockSection) => {
+    const locked = !!locks?.[section];
+    return {
+      locked,
+      label: locked ? `Unlock ${SECTION_TITLE[section]}` : `Lock ${SECTION_TITLE[section]}`,
+      onToggle: () => {
+        void setSectionLock(flockId, section, !locked)
+          .then((s) => apply(s, true))
+          .catch(() => {});
+      },
+    };
+  };
+}
 
 // "07:00" → "7am", "07:30" → "7:30am" — a friendly glance value for the summaries.
 function clockLabel(hhmm: string): string {
@@ -55,8 +77,10 @@ function DesktopPanel() {
   const openAddForm = useFlockStore((s) => s.openAddForm);
   const calcError = useFlockStore((s) => s.calcError);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lockFor = useSectionLock();
 
-  const locked = session?.lockedAt != null;
+  const routeLocked = session?.locks?.route ?? false;
+  const runnersLocked = session?.locks?.runners ?? false;
   const tooFarApart =
     !!session?.computedRoutes &&
     (session?.participants.length ?? 0) >= 2 &&
@@ -80,17 +104,18 @@ function DesktopPanel() {
         ) : (
           <div className="space-y-3">
             {session && (
-              <Section title="The run" summary={runSummary(session)} sectionKey="run">
+              <Section title="The run" summary={runSummary(session)} sectionKey="run" lock={lockFor("run")}>
                 <RunSettings />
               </Section>
             )}
 
-            {session && !(locked && session.waypoints.length === 0) && (
+            {session && (
               <Section
                 title="The route"
                 summary={routeSummary(session)}
                 sectionKey="route"
-                defaultOpen={session.waypoints.length === 0}
+                defaultOpen={session.waypoints.length === 0 && !routeLocked}
+                lock={lockFor("route")}
               >
                 <WaypointsSection />
               </Section>
@@ -102,9 +127,14 @@ function DesktopPanel() {
                 summary={runnersSummary(session)}
                 sectionKey="runners"
                 defaultOpen={session.participants.length < 2}
+                lock={lockFor("runners")}
               >
                 <ParticipantList />
-                {!locked && (
+                {runnersLocked ? (
+                  <div className="mt-3 rounded-lg bg-surface-mid px-3 py-2.5 text-sm text-text-dim">
+                    The runners are locked. Unlock the section to add or change people.
+                  </div>
+                ) : (
                   <button
                     type="button"
                     onClick={openAddForm}
@@ -112,11 +142,6 @@ function DesktopPanel() {
                   >
                     + Join the flock
                   </button>
-                )}
-                {locked && (
-                  <div className="mt-3 rounded-lg bg-surface-mid px-3 py-2.5 text-sm text-text-dim">
-                    The plan is locked. Download your route below.
-                  </div>
                 )}
               </Section>
             )}
@@ -152,8 +177,9 @@ function MobilePanel() {
   const placingFinish = useFlockStore((s) => s.placingFinish);
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lockFor = useSectionLock();
 
-  const locked = session?.lockedAt != null;
+  const runnersLocked = session?.locks?.runners ?? false;
   const placing = placingPin || placingFinish || placingWaypoint;
   const tooFarApart =
     !!session?.computedRoutes &&
@@ -181,14 +207,14 @@ function MobilePanel() {
           <div ref={scrollRef} className="flock-scroll flex-1 overflow-y-auto px-5 py-4">
             {activeTab === "run" && (
               <>
-                <TabHeader title="The run" subtitle={runSummary(session)} />
+                <TabHeader title="The run" subtitle={runSummary(session)} lock={lockFor("run")} />
                 <RunSettings />
               </>
             )}
 
             {activeTab === "route" && (
               <>
-                <TabHeader title="The route" subtitle={routeSummary(session)} />
+                <TabHeader title="The route" subtitle={routeSummary(session)} lock={lockFor("route")} />
                 <WaypointsSection />
               </>
             )}
@@ -203,9 +229,13 @@ function MobilePanel() {
                 </>
               ) : (
                 <>
-                  <TabHeader title="The runners" subtitle={runnersSummary(session)} />
+                  <TabHeader title="The runners" subtitle={runnersSummary(session)} lock={lockFor("runners")} />
                   <ParticipantList />
-                  {!locked && (
+                  {runnersLocked ? (
+                    <div className="mt-3 rounded-lg bg-surface px-3 py-2.5 text-sm text-text-dim">
+                      The runners are locked. Unlock the section to add or change people.
+                    </div>
+                  ) : (
                     <button
                       type="button"
                       onClick={openAddForm}
@@ -213,11 +243,6 @@ function MobilePanel() {
                     >
                       + Join the flock
                     </button>
-                  )}
-                  {locked && (
-                    <div className="mt-3 rounded-lg bg-surface px-3 py-2.5 text-sm text-text-dim">
-                      The plan is locked. Download your route below.
-                    </div>
                   )}
                   {calcError && (
                     <div className="mt-3 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-text">
@@ -243,11 +268,22 @@ function MobilePanel() {
   );
 }
 
-function TabHeader({ title, subtitle }: { title: string; subtitle: string }) {
+function TabHeader({
+  title,
+  subtitle,
+  lock,
+}: {
+  title: string;
+  subtitle: string;
+  lock?: { locked: boolean; onToggle: () => void; label: string };
+}) {
   return (
-    <div className="mb-4 flex items-baseline justify-between gap-2">
+    <div className="mb-4 flex items-center justify-between gap-2">
       <h2 className="text-lg font-semibold">{title}</h2>
-      <span className="text-xs text-fog">{subtitle}</span>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-fog">{subtitle}</span>
+        {lock && <LockToggle locked={lock.locked} onToggle={lock.onToggle} label={lock.label} />}
+      </div>
     </div>
   );
 }

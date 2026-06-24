@@ -41,7 +41,7 @@ export function usePolling(flockId: string) {
             reason,
             updatedAt: session.updatedAt,
             participants: session.participants.length,
-            locked: session.lockedAt != null,
+            locks: session.locks,
           });
         }
       } catch (err) {

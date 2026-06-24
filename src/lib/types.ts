@@ -108,11 +108,22 @@ export interface SharedSegment {
   isConvergence?: boolean;
 }
 
+// The three editable sections of a plan. Locks are an ADVISORY signal among a
+// trusted group — anyone can flip any lock, and anyone can edit anything that's
+// unlocked (the shared URL is the real access boundary). Per-section here; a
+// per-runner layer (runnerLocks) sits under the "runners" section.
+export type LockSection = "run" | "route" | "runners";
+export type SectionLocks = Record<LockSection, boolean>;
+
 export interface FlockSession {
   id: string; // 6-char nanoid, e.g. "abc123"
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp — used for polling change detection
-  lockedAt: string | null; // set when group locks the plan
+  // Advisory section locks (default all false = open). "Lock the plan" sets all
+  // three; "Unlock" clears them. Per-runner locks are an INDEPENDENT layer the
+  // global toggle never touches, so a self-locked runner survives a lock/unlock.
+  locks: SectionLocks;
+  runnerLocks: Record<string, boolean>; // participantId → locked (within the runners section)
   unitPreference: Unit; // set by first participant, shown to all
   // Run-level config (defaults, never mandatory). The flock's departure anchor and its
   // intended distance; per-runner constraints are optional overrides.
@@ -159,14 +170,15 @@ export interface ReverseGeocodeResult {
 export type PatchAction =
   | { action: "setUnit"; unitPreference: Unit }
   | { action: "setRunConfig"; startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }
-  | { action: "addParticipant"; participant: NewParticipantInput; editToken: string }
+  // Participants carry no ownership — anyone may add/edit/remove one that isn't locked
+  // (gated by the runners section lock + that runner's lock, server-side).
+  | { action: "addParticipant"; participant: NewParticipantInput }
   | {
       action: "updateParticipant";
       participantId: string;
       updates: Partial<ParticipantConstraints>;
-      editToken: string;
     }
-  | { action: "removeParticipant"; participantId: string; editToken: string }
+  | { action: "removeParticipant"; participantId: string }
   | {
       action: "setRoutes";
       computedRoutes: ComputedRoute[];
@@ -201,8 +213,13 @@ export type PatchAction =
       waypoints: Omit<FlockWaypoint, "id">[];
       gpxPassthrough: string | null;
     }
+  // "Lock the plan" / "Unlock to make changes" — set/clear ALL three section locks
+  // (runnerLocks untouched). Anyone may do this.
   | { action: "lock" }
-  | { action: "unlock" };
+  | { action: "unlock" }
+  // Granular advisory toggles — anyone may flip these.
+  | { action: "setSectionLock"; section: LockSection; locked: boolean }
+  | { action: "setRunnerLock"; participantId: string; locked: boolean };
 
 // The constraint subset a client may set/update on a participant. Server owns
 // id / color / addedAt.

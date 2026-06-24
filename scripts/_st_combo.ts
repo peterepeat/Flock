@@ -605,7 +605,7 @@ async function genMetamorphic() {
     curSig = "MR-U-Lk/ignored";
     const s = seedFor();
     const r1 = await calculateRoutes(s);
-    const r2 = await calculateRoutes(session(s.participants, s.waypoints, { startAnchor: s.startAnchor, intendedDistanceKm: s.intendedDistanceKm, unitPreference: "miles", lockedAt: "2026-01-01T00:00:00Z" }));
+    const r2 = await calculateRoutes(session(s.participants, s.waypoints, { startAnchor: s.startAnchor, intendedDistanceKm: s.intendedDistanceKm, unitPreference: "miles", locks: { run: true, route: true, runners: true } }));
     okH(JSON.stringify(canon(r1)) === JSON.stringify(canon(r2)), `MR-U/Lk unit/locked changed result`);
   }
 }

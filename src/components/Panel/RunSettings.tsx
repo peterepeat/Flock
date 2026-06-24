@@ -29,6 +29,7 @@ export default function RunSettings() {
 
   if (!session || !flockId) return null;
   const { waypoints, unitPreference } = session;
+  const locked = session.locks?.run ?? false;
   const startAnchor = draftAnchor ?? session.startAnchor;
   const distance = draftDistance ? draftDistance.v : session.intendedDistanceKm;
 
@@ -59,7 +60,10 @@ export default function RunSettings() {
     save({ startAnchor: target === "departure" ? { kind: "departure", time } : { kind: "waypoint", waypointId: target, time } });
 
   return (
-    <div className="space-y-4">
+    <fieldset disabled={locked} className="m-0 space-y-4 border-0 p-0 disabled:opacity-60">
+      {locked && (
+        <p className="text-xs text-fog">The run is locked. Tap the lock above to make changes.</p>
+      )}
       <Field label="When does the run start?" optional>
         <Toggle
           options={[{ value: "off", label: "Auto" }, { value: "on", label: "Set a time" }]}
@@ -103,6 +107,6 @@ export default function RunSettings() {
           </div>
         )}
       </Field>
-    </div>
+    </fieldset>
   );
 }

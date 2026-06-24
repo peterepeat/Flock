@@ -15,7 +15,6 @@ import {
 } from "react-leaflet";
 
 import { initial } from "@/lib/colors";
-import { ownsParticipant } from "@/lib/editTokens";
 import { renameWaypoints } from "@/lib/flockApi";
 import { waypointNameIsAuto } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
@@ -236,12 +235,12 @@ function RouteEditor({ grabRef, suppressClickRef }: { grabRef: GrabRef; suppress
   const placing = useFlockStore((s) => s.placingPin || s.placingFinish || s.placingWaypoint);
 
   const flockRoute = session?.flockRoute ?? null;
-  const locked = session?.lockedAt != null;
+  const routeLocked = session?.locks?.route ?? false;
   const spine = useMemo<LatLng[]>(
     () => (flockRoute ? flockRoute.coordinates.map(([lng, lat]) => ({ lat, lng })) : []),
     [flockRoute],
   );
-  const active = !!flockRoute && spine.length >= 2 && !locked && !placing;
+  const active = !!flockRoute && spine.length >= 2 && !routeLocked && !placing;
 
   // Live data the imperative drag handlers read — held in a ref so the handlers we
   // add to the map are STABLE (matched on remove) yet never read stale state.
@@ -400,7 +399,7 @@ function ClickHandler() {
       //     "tap empty map to add a waypoint" gesture). On mobile this is deliberately a
       //     button instead (the "+ Add a waypoint" flow), so a stray tap while panning the
       //     review map can't create an accidental waypoint.
-      if (!isMobileViewport() && !st.formOpen && st.waypointEditor.mode === "closed" && st.session?.lockedAt == null) {
+      if (!isMobileViewport() && !st.formOpen && st.waypointEditor.mode === "closed" && !st.session?.locks?.route) {
         log.debug("map click → append waypoint", { lat: ll.lat, lng: ll.lng });
         st.setWaypointPin(ll);
       }
@@ -492,7 +491,11 @@ export default function MapCanvas() {
   const sharedSegments = session?.sharedSegments ?? [];
   const flockRoute = session?.flockRoute ?? null;
   const waypoints = session?.waypoints ?? [];
-  const locked = session?.lockedAt != null;
+  // Advisory section locks govern map editing: route ops gate on the route lock; a
+  // start pin gates on the runners section + that runner's own lock (no ownership).
+  const routeLocked = session?.locks?.route ?? false;
+  const runnersLocked = session?.locks?.runners ?? false;
+  const runnerLocks = session?.runnerLocks ?? {};
   const nameOf = (id: string) => participants.find((p) => p.id === id)?.name ?? "Someone";
 
   // Drag-to-reshape plumbing (see RouteEditor): the route/together polylines that can
@@ -842,13 +845,13 @@ export default function MapCanvas() {
           );
         })}
 
-        {/* Participant markers — tapping your OWN opens you for editing (same as
-            tapping a waypoint), and you can drag it to move your start. Tapping
-            someone else's (or anyone's once locked) just focuses their route. */}
+        {/* Participant markers — anyone may drag a runner's start to move it (and tap
+            to edit them) unless the runners section or that runner is locked; a locked
+            runner's pin just focuses their route. */}
         {participants.map((p) => {
           const loc = pinLoc(p.startPin);
           if (!loc) return null;
-          const canDrag = !locked && !!flockId && ownsParticipant(flockId, p.id);
+          const canDrag = !!flockId && !runnersLocked && !runnerLocks[p.id];
           return (
             <Marker
               key={`start-${p.id}`}
@@ -908,8 +911,8 @@ export default function MapCanvas() {
           <Marker
             key={`wp-${w.id}`}
             position={stablePos(`wp-${w.id}`, w.location)}
-            icon={waypointIcon(i + 1, w.stopMinutes > 0, !locked, highlightWaypointId === w.id)}
-            draggable={!locked}
+            icon={waypointIcon(i + 1, w.stopMinutes > 0, !routeLocked, highlightWaypointId === w.id)}
+            draggable={!routeLocked}
             zIndexOffset={highlightWaypointId === w.id ? 600 : 400}
             eventHandlers={{
               dragend: (e) => {
@@ -922,19 +925,19 @@ export default function MapCanvas() {
                   void moveWaypoint(w.id, m, w);
                 } else {
                   m.setLatLng(toLeaflet(w.location));
-                  if (!locked) useFlockStore.getState().openEditWaypoint(w.id);
+                  if (!routeLocked) useFlockStore.getState().openEditWaypoint(w.id);
                 }
               },
               click: () => {
                 // A clean tap (Leaflet suppresses the click after a drag).
-                if (!locked) useFlockStore.getState().openEditWaypoint(w.id);
+                if (!routeLocked) useFlockStore.getState().openEditWaypoint(w.id);
               },
             }}
           >
             <Tooltip direction="top" offset={[0, -22]}>
               <span className="mono">{w.name}</span>
               {w.stopMinutes > 0 ? ` · ${w.stopMinutes} min stop` : ""}
-              {!locked ? " · tap to edit · drag to move" : ""}
+              {!routeLocked ? " · tap to edit · drag to move" : ""}
             </Tooltip>
           </Marker>
         ))}
@@ -955,7 +958,7 @@ export default function MapCanvas() {
       </MapContainer>
 
       {/* Gentle prompt when there isn't enough to compare yet */}
-      {participants.length < 2 && !session?.lockedAt && (
+      {participants.length < 2 && !runnersLocked && (
         <div className="pointer-events-none absolute left-1/2 top-4 z-[500] -translate-x-1/2 rounded-full bg-surface-mid/90 px-4 py-2 text-xs text-text-dim shadow-panel backdrop-blur">
           Add another person to see where your routes overlap.
         </div>

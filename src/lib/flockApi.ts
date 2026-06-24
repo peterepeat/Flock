@@ -1,16 +1,15 @@
 // ---------------------------------------------------------------------------
 // Client-side wrappers around PATCH /api/flocks/[id]. Each returns the updated
 // session so the caller can force-sync the store immediately (no waiting for the
-// next poll). Edit-token plumbing lives here so callers don't have to think
-// about it.
+// next poll). There is no per-user ownership: anyone with the link may edit
+// anything that isn't locked (the server enforces the advisory section/runner locks).
 // ---------------------------------------------------------------------------
 
 import { createLogger } from "./logger";
-import { createToken, getToken } from "./editTokens";
-import { newParticipantId } from "./ids";
 import type {
   FlockSession,
   FlockWaypoint,
+  LockSection,
   ParticipantConstraints,
   PatchAction,
   TimeAnchor,
@@ -65,16 +64,12 @@ export async function addParticipant(
   flockId: string,
   constraints: ParticipantConstraints,
 ): Promise<{ session: FlockSession; participantId: string }> {
-  // Generate the id + token up front so localStorage and the server agree.
-  const participantId = newParticipantId();
-  const editToken = createToken(flockId, participantId);
-  const { session } = await patch(flockId, {
+  const { session, participantId } = await patch(flockId, {
     action: "addParticipant",
-    participant: { ...constraints, id: participantId },
-    editToken,
+    participant: { ...constraints },
   });
   log.info("participant added", { flockId, participantId });
-  return { session, participantId };
+  return { session, participantId: participantId ?? "" };
 }
 
 export async function updateParticipant(
@@ -82,16 +77,7 @@ export async function updateParticipant(
   participantId: string,
   updates: Partial<ParticipantConstraints>,
 ): Promise<FlockSession> {
-  const editToken = getToken(flockId, participantId);
-  if (!editToken) {
-    throw new FlockApiError("You can only edit the entry you created on this device.", 403);
-  }
-  const { session } = await patch(flockId, {
-    action: "updateParticipant",
-    participantId,
-    updates,
-    editToken,
-  });
+  const { session } = await patch(flockId, { action: "updateParticipant", participantId, updates });
   return session;
 }
 
@@ -99,12 +85,7 @@ export async function removeParticipant(
   flockId: string,
   participantId: string,
 ): Promise<FlockSession> {
-  const editToken = getToken(flockId, participantId) || "";
-  const { session } = await patch(flockId, {
-    action: "removeParticipant",
-    participantId,
-    editToken,
-  });
+  const { session } = await patch(flockId, { action: "removeParticipant", participantId });
   return session;
 }
 
@@ -161,12 +142,34 @@ export async function renameWaypoints(
   return session;
 }
 
+/** "Lock the plan" — set all three section locks (per-runner locks untouched). */
 export async function lockFlock(flockId: string): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "lock" });
   return session;
 }
 
+/** "Unlock to make changes" — clear the three section locks (per-runner locks survive). */
 export async function unlockFlock(flockId: string): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "unlock" });
+  return session;
+}
+
+/** Toggle a single section's advisory lock (anyone may do this). */
+export async function setSectionLock(
+  flockId: string,
+  section: LockSection,
+  locked: boolean,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "setSectionLock", section, locked });
+  return session;
+}
+
+/** Toggle a single runner's advisory lock (anyone may do this). */
+export async function setRunnerLock(
+  flockId: string,
+  participantId: string,
+  locked: boolean,
+): Promise<FlockSession> {
+  const { session } = await patch(flockId, { action: "setRunnerLock", participantId, locked });
   return session;
 }

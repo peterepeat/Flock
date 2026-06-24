@@ -122,7 +122,7 @@ export default function WaypointsSection() {
   const editorAnchorRef = useRef<HTMLDivElement | HTMLLIElement | null>(null);
   const editorKey = editor.mode === "edit" ? `edit:${editor.id}` : editor.mode;
 
-  const locked = session?.lockedAt != null;
+  const locked = session?.locks?.route ?? false;
   const waypoints = session?.waypoints ?? [];
   const waypointEtas = session?.waypointEtas ?? {};
 
@@ -153,7 +153,7 @@ export default function WaypointsSection() {
   useEffect(() => {
     const ed = useFlockStore.getState().waypointEditor;
     const wps = session?.waypoints ?? [];
-    const isLocked = session?.lockedAt != null;
+    const isLocked = session?.locks?.route ?? false;
     if (ed.mode === "edit" && (isLocked || !wps.some((w) => w.id === ed.id))) close();
     else if (ed.mode === "add" && isLocked) close();
   }, [session, close]);

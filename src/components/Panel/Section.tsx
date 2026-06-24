@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 
+import LockToggle from "@/components/ui/LockToggle";
 import { useFlockStore } from "@/store/flockStore";
 
 /**
@@ -10,42 +11,52 @@ import { useFlockStore } from "@/store/flockStore";
  * lives in the store keyed by `sectionKey`, so it survives polling and the join form
  * opening/closing. Until the user toggles it, each section falls back to `defaultOpen`
  * (content-aware — e.g. open while a section is still empty/forming).
+ *
+ * `lock`, when given, renders an advisory section-lock padlock in the header (between
+ * the title and the chevron). It's its own button, so the header is split into two
+ * expand-buttons either side of the lock rather than one (no nested buttons).
  */
 export default function Section({
   title,
   summary,
   sectionKey,
   defaultOpen = false,
+  lock,
   children,
 }: {
   title: string;
   summary: string;
   sectionKey: string;
   defaultOpen?: boolean;
+  lock?: { locked: boolean; onToggle: () => void; label: string };
   children: ReactNode;
 }) {
   const open = useFlockStore((s) => s.openSections[sectionKey] ?? defaultOpen);
   const setSectionOpen = useFlockStore((s) => s.setSectionOpen);
+  const toggleOpen = () => setSectionOpen(sectionKey, !open);
 
   return (
     <div className="rounded-xl bg-surface">
       {/* Round the header's own corners (not overflow-hidden on the card) so an absolutely
           positioned child — e.g. the address-search dropdown in the waypoint editor — is
           never clipped by the section. */}
-      <button
-        type="button"
-        onClick={() => setSectionOpen(sectionKey, !open)}
-        aria-expanded={open}
-        className={`flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-surface-lift/40 ${open ? "rounded-t-xl" : "rounded-xl"}`}
-      >
-        <span className="min-w-0 flex-1">
-          <span className="text-sm font-medium text-text">{title}</span>
-          {!open && summary && (
-            <span className="ml-2 text-xs text-fog">{summary}</span>
-          )}
-        </span>
-        <Chevron open={open} />
-      </button>
+      <div className={`flex items-center pr-2 transition hover:bg-surface-lift/40 ${open ? "rounded-t-xl" : "rounded-xl"}`}>
+        <button
+          type="button"
+          onClick={toggleOpen}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+        >
+          <span className="min-w-0 flex-1">
+            <span className="text-sm font-medium text-text">{title}</span>
+            {!open && summary && <span className="ml-2 text-xs text-fog">{summary}</span>}
+          </span>
+        </button>
+        {lock && <LockToggle locked={lock.locked} onToggle={lock.onToggle} label={lock.label} className="mr-1" />}
+        <button type="button" onClick={toggleOpen} aria-label={open ? "Collapse" : "Expand"} className="px-1.5 py-3">
+          <Chevron open={open} />
+        </button>
+      </div>
       {open && <div className="px-4 pb-4">{children}</div>}
     </div>
   );
