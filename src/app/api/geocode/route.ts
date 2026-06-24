@@ -75,6 +75,45 @@ function parseFocus(searchParams: URLSearchParams): LatLng | null {
   return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
 }
 
+// Min half-extent (deg) of the local search box, so even a zoomed-in view still
+// searches the surrounding metro area rather than just the streets on screen
+// (~0.25° ≈ 25–28 km half-extent → a ~55 km box).
+const LOCAL_MIN_HALF_DEG = 0.25;
+// At or above this many in-view hits we trust the local box alone; below it we ALSO
+// run an unconstrained query and append the rest, so a clearly-distant address the
+// user fully types still surfaces.
+const MIN_LOCAL_RESULTS = 4;
+const LIMIT = 6;
+
+/** A Photon bbox (minLon,minLat,maxLon,maxLat) around `focus`, at least
+ *  LOCAL_MIN_HALF_DEG but never tighter than the current view. */
+function localBbox(focus: LatLng, viewbox: string | null): string {
+  let halfLat = LOCAL_MIN_HALF_DEG;
+  let halfLng = LOCAL_MIN_HALF_DEG;
+  if (viewbox) {
+    const [mnLng, mnLat, mxLng, mxLat] = viewbox.split(",").map(Number);
+    if ([mnLng, mnLat, mxLng, mxLat].every((n) => Number.isFinite(n))) {
+      halfLat = Math.max(halfLat, Math.abs(mxLat - mnLat) / 2);
+      halfLng = Math.max(halfLng, Math.abs(mxLng - mnLng) / 2);
+    }
+  }
+  return `${focus.lng - halfLng},${focus.lat - halfLat},${focus.lng + halfLng},${focus.lat + halfLat}`;
+}
+
+/** Append `extra` after `primary`, de-duping by rounded coordinate, capped at `limit`. */
+function mergeDedupe(primary: GeocodeResult[], extra: GeocodeResult[], limit: number): GeocodeResult[] {
+  const key = (r: GeocodeResult) => `${r.lat.toFixed(4)},${r.lng.toFixed(4)}`;
+  const seen = new Set(primary.map(key));
+  const out = [...primary];
+  for (const r of extra) {
+    if (out.length >= limit) break;
+    if (seen.has(key(r))) continue;
+    seen.add(key(r));
+    out.push(r);
+  }
+  return out.slice(0, limit);
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const q = (searchParams.get("q") || "").trim();
@@ -87,18 +126,32 @@ export async function GET(request: Request) {
     return NextResponse.json({ results: [] });
   }
 
-  const cacheKey = `${q.toLowerCase()}|${focus ? `${focus.lat.toFixed(2)},${focus.lng.toFixed(2)}` : ""}`;
+  // Constrain to the current view (the only proximity lever Photon honours — see
+  // photonSearch). The cache key carries a coarse bbox so a wide-view and a
+  // zoomed-in search at the same centre don't share an entry.
+  const bbox = focus ? localBbox(focus, viewbox) : null;
+  const bboxKey = bbox ? bbox.split(",").map((n) => Number(n).toFixed(2)).join(",") : "global";
+  const cacheKey = `${q.toLowerCase()}|${bboxKey}`;
   const cached = cacheGet(cacheKey);
   if (cached) {
     done({ count: cached.length, cached: true });
     return NextResponse.json({ results: cached });
   }
 
-  // Primary: Photon (type-ahead, focus-biased).
+  // Primary: Photon. Search the local box first; only when it's sparse do we ALSO
+  // run an unconstrained query and append the rest (local-first, distant reachable).
   try {
-    const results = await photonSearch(q, { focus });
+    let results = await photonSearch(q, { focus, bbox, limit: LIMIT });
+    if (bbox && results.length < MIN_LOCAL_RESULTS) {
+      try {
+        const global = await photonSearch(q, { focus, limit: LIMIT });
+        results = mergeDedupe(results, global, LIMIT);
+      } catch {
+        /* keep whatever the local box gave us */
+      }
+    }
     cacheSet(cacheKey, results);
-    done({ count: results.length, provider: "photon" });
+    done({ count: results.length, provider: "photon", bounded: !!bbox });
     return NextResponse.json({ results });
   } catch (err) {
     log.warn("photon failed — falling back to nominatim", { q, error: String(err) });

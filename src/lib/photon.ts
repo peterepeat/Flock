@@ -110,25 +110,28 @@ async function fetchPhoton(path: string, params: URLSearchParams, signal?: Abort
 }
 
 /**
- * Forward autocomplete. `focus` (the current map centre) softly biases results
- * toward that point — local matches rank first, but distant ones still appear.
+ * Forward autocomplete.
+ *
+ * `bbox` (minLon,minLat,maxLon,maxLat — the current map view) HARD-constrains the
+ * result set to that box. This is the only proximity lever that actually works on
+ * Photon: its soft `location_bias_scale`/`zoom` focus weighting is too weak to pull
+ * a nearby match ahead of a prominent global one — a distinctive street name returns
+ * the same worldwide hits whether focused or not, so the nearby match never even
+ * enters the set. /api/geocode therefore constrains to the view and falls back to an
+ * UNCONSTRAINED query when the local box is sparse, keeping distant matches reachable.
+ * `focus` (lat/lon) still orders results within whatever set Photon returns.
  */
 export async function photonSearch(
   q: string,
-  opts: { focus?: LatLng | null; limit?: number; lang?: string; signal?: AbortSignal } = {},
+  opts: { focus?: LatLng | null; bbox?: string | null; limit?: number; lang?: string; signal?: AbortSignal } = {},
 ): Promise<GeocodeResult[]> {
   const params = new URLSearchParams({ q, limit: String(opts.limit ?? 6), lang: opts.lang ?? "en" });
   if (opts.focus) {
     params.set("lat", String(opts.focus.lat));
     params.set("lon", String(opts.focus.lng));
-    // Photon defaults (zoom 12, location_bias_scale 0.4) let global prominence outrank
-    // proximity, so the focus point barely shifts results. Tighten the radius and lean the
-    // weighting toward proximity so the current map view genuinely biases the autocomplete —
-    // while still letting a clearly-distant match through (it's a bias, not a hard bound).
-    params.set("zoom", "14");
-    params.set("location_bias_scale", "0.8");
   }
-  const done = log.time("photon-search", { q, focused: !!opts.focus });
+  if (opts.bbox) params.set("bbox", opts.bbox);
+  const done = log.time("photon-search", { q, focused: !!opts.focus, bounded: !!opts.bbox });
   const features = await fetchPhoton("/api", params, opts.signal);
   const results: GeocodeResult[] = features.map((f) => {
     const { shortName, displayName } = labels(f.properties);
