@@ -19,9 +19,10 @@ import { ownsParticipant } from "@/lib/editTokens";
 import { renameWaypoints } from "@/lib/flockApi";
 import { isAutoWaypointName } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
-import { uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
+import { uAddWaypoint, uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
 import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
+import { insertionIndex } from "@/lib/routeEdit";
 import type { LatLng, LocationPin } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { isMobileViewport } from "@/lib/viewport";
@@ -201,6 +202,134 @@ function ViewportTracker() {
   // Seed the store with the initial view (no move event fires on first load).
   useEffect(() => publish(map), [map, publish]);
   return null;
+}
+
+// The dot that follows the cursor while reshaping the route (created once).
+const GHOST_ICON = L.divIcon({
+  className: "",
+  html: `<div style="width:18px;height:18px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.55)"></div>`,
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+});
+// Pointer travel (px) below which a press-release is treated as a click, not a drag
+// — so a stray click on the line never drops a waypoint.
+const DRAG_COMMIT_PX = 6;
+
+/**
+ * Drag-to-reshape. A transparent thick "grab" line laid over the flock spine lets
+ * you grab the route ANYWHERE and pull; on release a new waypoint is dropped at that
+ * point, spliced into the right ORDER position (insertionIndex), so the corridor
+ * bends through it on the next recompute. A ghost dot tracks the cursor mid-drag.
+ * Inactive while locked or while placing a pin (those own the map's click).
+ */
+function RouteEditor() {
+  const map = useMap();
+  const flockId = useFlockStore((s) => s.flockId);
+  const session = useFlockStore((s) => s.session);
+  const placing = useFlockStore((s) => s.placingPin || s.placingFinish || s.placingWaypoint);
+
+  const flockRoute = session?.flockRoute ?? null;
+  const locked = session?.lockedAt != null;
+  const spine = useMemo<LatLng[]>(
+    () => (flockRoute ? flockRoute.coordinates.map(([lng, lat]) => ({ lat, lng })) : []),
+    [flockRoute],
+  );
+
+  // Live data the imperative drag handlers read — held in a ref so the handlers we
+  // add to the map are STABLE (matched on remove) yet never read stale state.
+  const ctx = useRef<{ flockId: string | null; spine: LatLng[]; waypoints: { location: LatLng }[] }>({
+    flockId: null,
+    spine: [],
+    waypoints: [],
+  });
+  ctx.current = { flockId, spine, waypoints: session?.waypoints ?? [] };
+
+  const dragging = useRef(false);
+  const ghost = useRef<L.Marker | null>(null);
+  const downPt = useRef<L.Point | null>(null);
+  const insertAt = useRef(0);
+
+  // Stable map listeners that delegate to the latest closure via refs.
+  const moveRef = useRef<(e: L.LeafletMouseEvent) => void>(() => {});
+  const upRef = useRef<(e: L.LeafletMouseEvent) => void>(() => {});
+  const stableMove = useRef((e: L.LeafletMouseEvent) => moveRef.current(e)).current;
+  const stableUp = useRef((e: L.LeafletMouseEvent) => upRef.current(e)).current;
+
+  const teardown = () => {
+    map.off("mousemove", stableMove);
+    map.off("mouseup", stableUp);
+    map.dragging.enable();
+    if (ghost.current) {
+      map.removeLayer(ghost.current);
+      ghost.current = null;
+    }
+    dragging.current = false;
+    downPt.current = null;
+  };
+
+  moveRef.current = (e) => ghost.current?.setLatLng(e.latlng);
+  upRef.current = async (e) => {
+    if (!dragging.current) return;
+    const moved = downPt.current ? e.containerPoint.distanceTo(downPt.current) : 0;
+    const { flockId: fid } = ctx.current;
+    const at = insertAt.current;
+    teardown();
+    if (moved < DRAG_COMMIT_PX || !fid) return; // a click, not a reshape
+    const ll: LatLng = { lat: e.latlng.lat, lng: e.latlng.lng };
+    try {
+      await uAddWaypoint(fid, { location: ll, address: "", name: "Dropped pin", stopMinutes: 0 }, at);
+      log.info("route reshaped → waypoint inserted", { index: at, lat: round4(ll.lat), lng: round4(ll.lng) });
+      // Name it from its place like a tapped pin (best-effort; keeps the placeholder otherwise).
+      const label = pinLabel(await reverseGeocode(ll.lat, ll.lng));
+      if (label) {
+        const w = (useFlockStore.getState().session?.waypoints ?? []).find(
+          (x) =>
+            x.name === "Dropped pin" &&
+            Math.abs(x.location.lat - ll.lat) < 1e-9 &&
+            Math.abs(x.location.lng - ll.lng) < 1e-9,
+        );
+        if (w) await renameWaypoints(fid, { [w.id]: { name: label, address: label } });
+      }
+    } catch (err) {
+      log.error("route reshape insert failed", { error: String(err) });
+    }
+  };
+
+  const onDown = (e: L.LeafletMouseEvent) => {
+    if (dragging.current) return;
+    L.DomEvent.stop(e.originalEvent); // don't pan the map or fire the click handler
+    const { spine: sp, waypoints } = ctx.current;
+    if (sp.length < 2) return;
+    dragging.current = true;
+    downPt.current = e.containerPoint;
+    insertAt.current = insertionIndex(sp, waypoints, { lat: e.latlng.lat, lng: e.latlng.lng });
+    map.dragging.disable();
+    ghost.current = L.marker(e.latlng, { icon: GHOST_ICON, interactive: false, keyboard: false, zIndexOffset: 2000 }).addTo(map);
+    map.on("mousemove", stableMove);
+    map.on("mouseup", stableUp);
+  };
+
+  // Clean up listeners / re-enable panning if we unmount mid-gesture.
+  useEffect(
+    () => () => {
+      map.off("mousemove", stableMove);
+      map.off("mouseup", stableUp);
+      if (dragging.current) {
+        map.dragging.enable();
+        if (ghost.current) map.removeLayer(ghost.current);
+      }
+    },
+    [map, stableMove, stableUp],
+  );
+
+  if (!flockRoute || spine.length < 2 || locked || placing) return null;
+  return (
+    <Polyline
+      positions={spine.map((p) => [p.lat, p.lng] as [number, number])}
+      pathOptions={{ className: "route-grab", color: "#000", opacity: 0, weight: 26, lineCap: "round", lineJoin: "round" }}
+      eventHandlers={{ mousedown: onDown }}
+    />
+  );
 }
 
 /** Click-to-place handler for the start pin, finish pin, or a shared waypoint. */
@@ -494,6 +623,11 @@ export default function MapCanvas() {
             />
           </>
         )}
+
+        {/* Grab-anywhere reshape handle over the spine (transparent; just above the
+            non-interactive casing, below the together-halos/routes so their tooltips
+            survive). Drag a point off the line to splice a waypoint in. */}
+        <RouteEditor />
 
         {/* Direction chevrons (non-interactive, below pins). Spine chevrons at rest;
             the focused runner's route chevrons when one is focused. */}

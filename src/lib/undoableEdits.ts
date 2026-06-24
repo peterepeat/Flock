@@ -56,17 +56,27 @@ const fullConstraints = (p: ParticipantConstraints): ParticipantConstraints => (
   latestFinishTime: p.latestFinishTime,
 });
 
-export async function uAddWaypoint(flockId: string, data: WaypointInput): Promise<FlockSession> {
-  const s = await addWaypoint(flockId, data);
+export async function uAddWaypoint(
+  flockId: string,
+  data: WaypointInput,
+  index?: number,
+): Promise<FlockSession> {
+  // Detect the new id by DIFF (the one not present before), so it's correct whether
+  // the server appended or spliced it mid-list — appendedId only holds for an append.
+  const newId = (before: Set<string>, after: FlockSession) =>
+    after.waypoints.find((w) => !before.has(w.id))?.id ?? appendedId(after);
+  const beforeIds = new Set((store().session?.waypoints ?? []).map((w) => w.id));
+  const s = await addWaypoint(flockId, data, index);
   apply(s);
-  let id = appendedId(s);
+  let id = newId(beforeIds, s);
   if (id) {
     store().recordHistory({
       label: "Add waypoint",
       undo: () => removeWaypoint(flockId, id!),
       redo: async () => {
-        const r = await addWaypoint(flockId, data);
-        id = appendedId(r);
+        const priorIds = new Set((store().session?.waypoints ?? []).map((w) => w.id));
+        const r = await addWaypoint(flockId, data, index);
+        id = newId(priorIds, r);
         return r;
       },
     });

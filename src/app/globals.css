@@ -120,6 +120,14 @@ body {
   border-radius: 50%;
 }
 
+/* The invisible "grab" line laid over the flock spine. Its stroke is painted
+   (black, fully transparent), so visiblePainted hit-testing lets you grab the route
+   anywhere along it to pull out a new waypoint. The selector outspecifies Leaflet's
+   own `.leaflet-interactive { cursor: pointer }` so the grab affordance shows. */
+.leaflet-pane path.route-grab {
+  cursor: grab;
+}
+
 /* --- Form controls ----------------------------------------------------- */
 input[type="range"] {
   -webkit-appearance: none;

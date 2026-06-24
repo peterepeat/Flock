@@ -176,7 +176,10 @@ export type PatchAction =
       expectedUpdatedAt?: string;
     }
   // Shared waypoints are universal — anyone can manage them (no edit token).
-  | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id"> }
+  // `index` (optional) splices the waypoint into the ordered list at that position
+  // — used when dragging a new point out of the route so it lands between the right
+  // neighbours; omitted (the default) appends.
+  | { action: "addWaypoint"; waypoint: Omit<FlockWaypoint, "id">; index?: number }
   | { action: "updateWaypoint"; waypointId: string; updates: Partial<Omit<FlockWaypoint, "id">> }
   | { action: "removeWaypoint"; waypointId: string }
   | { action: "reorderWaypoints"; waypointIds: string[] }

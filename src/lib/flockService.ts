@@ -277,9 +277,17 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         // the lossless round-trip — mirrors the importRoute handler.
         ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
       };
-      session.waypoints.push(waypoint);
+      // Splice at `index` (clamped) when given — a drag pulled a new point out of
+      // the route and it must land between the right neighbours so the corridor stays
+      // ordered; otherwise append.
+      if (action.index != null) {
+        const at = Math.max(0, Math.min(Math.floor(action.index), session.waypoints.length));
+        session.waypoints.splice(at, 0, waypoint);
+      } else {
+        session.waypoints.push(waypoint);
+      }
       clearComputed(session);
-      log.info("waypoint added", { id, waypointId: waypoint.id, stopMinutes: waypoint.stopMinutes });
+      log.info("waypoint added", { id, waypointId: waypoint.id, index: action.index ?? null, stopMinutes: waypoint.stopMinutes });
       break;
     }
 

@@ -111,8 +111,13 @@ export async function removeParticipant(
 export async function addWaypoint(
   flockId: string,
   waypoint: Omit<FlockWaypoint, "id">,
+  index?: number,
 ): Promise<FlockSession> {
-  const { session } = await patch(flockId, { action: "addWaypoint", waypoint });
+  const { session } = await patch(flockId, {
+    action: "addWaypoint",
+    waypoint,
+    ...(index != null ? { index } : {}),
+  });
   return session;
 }
 
