@@ -6,7 +6,7 @@ import AddressSearch from "@/components/ui/AddressSearch";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import { FlockApiError, renameWaypoints } from "@/lib/flockApi";
-import { buildFlockGpx, isAutoWaypointName, parseFlockGpx } from "@/lib/flockGpx";
+import { buildFlockGpx, parseFlockGpx, waypointNameIsAuto } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
 import type { FlockWaypoint, LatLng } from "@/lib/types";
@@ -44,7 +44,7 @@ async function nameImportedInBackground(
   waypoints: FlockWaypoint[],
   onProgress: (msg: string | null) => void,
 ): Promise<void> {
-  const targets = waypoints.filter((w) => isAutoWaypointName(w.name)).slice(0, REVERSE_NAME_CAP);
+  const targets = waypoints.filter((w) => waypointNameIsAuto(w)).slice(0, REVERSE_NAME_CAP);
   if (targets.length === 0) return;
 
   const store = useFlockStore;

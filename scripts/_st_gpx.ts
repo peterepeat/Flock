@@ -18,6 +18,7 @@ import {
   mergeNamedIntoRoute,
   projectOnPolyline,
   simplifyTrackIdx,
+  waypointNameIsAuto,
   type RouteItem,
 } from "../src/lib/flockGpx";
 import { distanceMeters } from "../src/lib/geo";
@@ -252,6 +253,31 @@ function main() {
     ok(isAutoWaypointName("Waypoint"), "'Waypoint' (no <name>) is auto → excluded from merge");
     ok(isAutoWaypointName("Start") && isAutoWaypointName("Finish") && isAutoWaypointName("Point 7"), "shape placeholders are auto");
     ok(!isAutoWaypointName("Francis Winifred") && !isAutoWaypointName("Fawkner Bakery"), "real POI names are NOT auto → merged");
+  }
+
+  // ── waypointNameIsAuto — governs whether a moved pin's name refreshes ──────
+  suite("waypointNameIsAuto — refresh auto/geocoded names, keep user names");
+  {
+    // Explicit flag wins, regardless of the name string.
+    ok(waypointNameIsAuto({ name: "24 Cubitt St, Cremorne", autoNamed: true }), "autoNamed:true (geocoded) → refreshes on move");
+    ok(!waypointNameIsAuto({ name: "Point 3", autoNamed: false }), "autoNamed:false wins even over a placeholder-looking name → kept");
+    // Legacy data (no flag) falls back to the name heuristic.
+    ok(waypointNameIsAuto({ name: "Dropped pin" }), "legacy 'Dropped pin' (no flag) → auto");
+    ok(waypointNameIsAuto({ name: "Point 5" }), "legacy shape placeholder (no flag) → auto");
+    ok(!waypointNameIsAuto({ name: "Fawkner Bakery" }), "legacy real name (no flag) → user-owned, kept");
+  }
+
+  // ── the coincidence fold carries the POI's autoNamed onto the placeholder ──
+  suite("mergeNamedIntoRoute — folded name inherits the POI's autoNamed");
+  {
+    const raw = chain([START, FRANCIS, FAWKNER, FINISH], 30);
+    const { base, cum } = shapeBase(raw);
+    const interior = base.find((b) => /^Point \d+$/.test(b.wp.name))!;
+    interior.wp.autoNamed = true; // a shape placeholder
+    const poi: Omit<FlockWaypoint, "id"> = { ...named("Real Cafe", interior.wp.location), autoNamed: false };
+    const { waypoints } = mergeNamedIntoRoute(base, { coords: raw, cum, totalKm: cum[cum.length - 1] }, [poi]);
+    const folded = waypoints.find((w) => w.name === "Real Cafe");
+    ok(folded != null && folded.autoNamed === false, "folding a user POI onto a placeholder makes it user-owned (autoNamed false)");
   }
 
   finish();

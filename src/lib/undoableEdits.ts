@@ -43,6 +43,7 @@ const toInput = (w: FlockWaypoint): WaypointInput => ({
   address: w.address,
   name: w.name,
   stopMinutes: w.stopMinutes,
+  ...(w.autoNamed != null ? { autoNamed: w.autoNamed } : {}),
   ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
 });
 

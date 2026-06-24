@@ -44,6 +44,11 @@ export interface FlockWaypoint {
   address: string;
   name: string; // user label, falls back to address
   stopMinutes: number; // 0 = pass through, >0 = everyone stops
+  // True when the name was AUTO-derived (a placeholder, a reverse-geocoded label, an
+  // imported shape point) — so moving the pin refreshes it to the new place. False
+  // once the user names it themselves (we never clobber that). Undefined on legacy
+  // data → callers fall back to the name heuristic (see waypointNameIsAuto).
+  autoNamed?: boolean;
   // GPX round-trip: verbatim XML children of the source <rtept> we didn't model
   // (elevation, time, foreign extensions, …), re-emitted on export. Undefined
   // for waypoints created in-app.

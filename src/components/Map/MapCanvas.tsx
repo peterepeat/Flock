@@ -17,13 +17,13 @@ import {
 import { initial } from "@/lib/colors";
 import { ownsParticipant } from "@/lib/editTokens";
 import { renameWaypoints } from "@/lib/flockApi";
-import { isAutoWaypointName } from "@/lib/flockGpx";
+import { waypointNameIsAuto } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { uAddWaypoint, uUpdateParticipant, uUpdateWaypoint } from "@/lib/undoableEdits";
 import { bearingRad, distanceMeters, toLeaflet } from "@/lib/geo";
 import { createLogger } from "@/lib/logger";
 import { insertionIndex } from "@/lib/routeEdit";
-import type { LatLng, LocationPin } from "@/lib/types";
+import type { FlockWaypoint, LatLng, LocationPin } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { isMobileViewport } from "@/lib/viewport";
 import { useFlockStore } from "@/store/flockStore";
@@ -300,7 +300,7 @@ function RouteEditor({ grabRef, suppressClickRef }: { grabRef: GrabRef; suppress
     if (!fid) return;
     const ll: LatLng = { lat: e.latlng.lat, lng: e.latlng.lng };
     try {
-      await uAddWaypoint(fid, { location: ll, address: "", name: "Dropped pin", stopMinutes: 0 }, at);
+      await uAddWaypoint(fid, { location: ll, address: "", name: "Dropped pin", stopMinutes: 0, autoNamed: true }, at);
       log.info("route reshaped → waypoint inserted", { index: at, lat: round4(ll.lat), lng: round4(ll.lng) });
       // Name it from its place like a tapped pin (best-effort; keeps the placeholder otherwise).
       const label = pinLabel(await reverseGeocode(ll.lat, ll.lng));
@@ -507,22 +507,22 @@ export default function MapCanvas() {
   // already moved the marker; we persist the drop and the server echo re-pins it.
   // On failure we snap the marker back to `origin` (the store position) so the map
   // never shows a phantom location the server doesn't have.
-  async function moveWaypoint(id: string, marker: L.Marker, origin: LatLng, currentName: string) {
+  async function moveWaypoint(id: string, marker: L.Marker, origin: FlockWaypoint) {
     if (!flockId) return;
     const ll = marker.getLatLng();
     try {
       await uUpdateWaypoint(flockId, id, { location: { lat: ll.lat, lng: ll.lng } });
       log.info("waypoint moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
       // An auto-named pin's place label belongs to the OLD spot — re-derive it for the new
-      // location. Skip user-typed names. Run AFTER the move write so the two patches can't race;
-      // renameWaypoints does NOT recompute the route and the server re-guards on isAutoWaypointName
+      // location. Skip user-named pins. Run AFTER the move write so the two patches can't race;
+      // renameWaypoints does NOT recompute the route and the server re-guards on waypointNameIsAuto
       // at write time, so a name a user (or another device) set meanwhile is never clobbered.
-      if (isAutoWaypointName(currentName) || currentName === "Dropped pin") {
+      if (waypointNameIsAuto(origin)) {
         const label = pinLabel(await reverseGeocode(ll.lat, ll.lng));
         if (label) await renameWaypoints(flockId, { [id]: { name: label, address: label } });
       }
     } catch (err) {
-      marker.setLatLng(toLeaflet(origin));
+      marker.setLatLng(toLeaflet(origin.location));
       log.error("waypoint move failed — reverted", { error: String(err) });
     }
   }
@@ -533,9 +533,15 @@ export default function MapCanvas() {
   async function moveStart(id: string, marker: L.Marker, origin: LatLng) {
     if (!flockId) return;
     const ll = marker.getLatLng();
+    const loc = { lat: ll.lat, lng: ll.lng };
+    // Name the new spot FIRST so the move persists in ONE write — updateParticipant
+    // recomputes, so a second cosmetic write would burn another route calc. The pin's
+    // address is purely locational, so always refresh it to where it now sits (a slow /
+    // failed lookup just leaves it blank). reverseGeocode never throws.
+    const address = pinLabel(await reverseGeocode(loc.lat, loc.lng)) ?? "";
     try {
-      await uUpdateParticipant(flockId, id, { startPin: { kind: "manual", location: { lat: ll.lat, lng: ll.lng }, address: "" } }, "Move start");
-      log.info("start moved", { id: id.slice(0, 4), lat: round4(ll.lat), lng: round4(ll.lng) });
+      await uUpdateParticipant(flockId, id, { startPin: { kind: "manual", location: loc, address } }, "Move start");
+      log.info("start moved", { id: id.slice(0, 4), lat: round4(loc.lat), lng: round4(loc.lng), named: !!address });
     } catch (err) {
       marker.setLatLng(toLeaflet(origin));
       log.error("start move failed — reverted", { error: String(err) });
@@ -913,7 +919,7 @@ export default function MapCanvas() {
                 // back and open the editor here (Leaflet eats the post-drag click).
                 const moved = distanceMeters(w.location, { lat: ll.lat, lng: ll.lng }) > 3;
                 if (moved) {
-                  void moveWaypoint(w.id, m, w.location, w.name);
+                  void moveWaypoint(w.id, m, w);
                 } else {
                   m.setLatLng(toLeaflet(w.location));
                   if (!locked) useFlockStore.getState().openEditWaypoint(w.id);

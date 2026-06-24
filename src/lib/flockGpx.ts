@@ -265,7 +265,7 @@ export function mergeNamedIntoRoute(
         bi = k;
       }
     }
-    if (bd <= COINCIDE_TOL_M && bi >= 0 && isAutoWaypointName(items[bi].wp.name)) {
+    if (bd <= COINCIDE_TOL_M && bi >= 0 && waypointNameIsAuto(items[bi].wp)) {
       const keepExtra = poi.gpxExtra ?? items[bi].wp.gpxExtra;
       items[bi] = {
         ...items[bi],
@@ -273,6 +273,7 @@ export function mergeNamedIntoRoute(
           ...items[bi].wp,
           name: poi.name,
           address: poi.address || poi.name,
+          autoNamed: poi.autoNamed, // the placeholder now carries the POI's real (user) name
           ...(keepExtra ? { gpxExtra: keepExtra } : {}),
         },
       };
@@ -331,6 +332,18 @@ export function isAutoWaypointName(name: string): boolean {
   );
 }
 
+/**
+ * Whether a waypoint's NAME is auto-managed — a placeholder, a reverse-geocoded
+ * label, or an imported shape point — so a move/background pass may refresh it,
+ * vs. one the user chose (which we never clobber). Prefers the explicit `autoNamed`
+ * flag; falls back to the name heuristic for waypoints created before it existed
+ * ("Dropped pin" is the map's manual-pin placeholder, alongside the GPX placeholders).
+ */
+export function waypointNameIsAuto(w: { name: string; autoNamed?: boolean }): boolean {
+  if (w.autoNamed != null) return w.autoNamed;
+  return isAutoWaypointName(w.name) || w.name === "Dropped pin";
+}
+
 function pointFromEl(el: Element): Omit<FlockWaypoint, "id"> | null {
   const lat = Number(el.getAttribute("lat"));
   const lng = Number(el.getAttribute("lon"));
@@ -339,7 +352,8 @@ function pointFromEl(el: Element): Omit<FlockWaypoint, "id"> | null {
   const stopMinutes = stopEl ? Math.max(0, parseInt(stopEl.textContent ?? "0", 10) || 0) : 0;
   const name = childByName(el, "name")?.textContent?.trim() || AUTO_WAYPOINT_NAME;
   const extra = captureExtra(el, stopMinutes > 0);
-  return { location: { lat, lng }, address: name, name, stopMinutes, ...(extra ? { gpxExtra: extra } : {}) };
+  // A real <name> is the author's — keep it on a move; a bare/auto one refreshes.
+  return { location: { lat, lng }, address: name, name, stopMinutes, autoNamed: isAutoWaypointName(name), ...(extra ? { gpxExtra: extra } : {}) };
 }
 
 /** "A", "A and B", "A, B and C" — for naming placed/skipped waypoints in a warning. */
@@ -439,6 +453,7 @@ export function parseFlockGpx(xml: string): ParsedGpx {
         address: j === 0 ? "Start" : j === keptIdx.length - 1 ? "Finish" : `Point ${j + 1}`,
         name: j === 0 ? "Start" : j === keptIdx.length - 1 ? "Finish" : `Point ${j + 1}`,
         stopMinutes: 0,
+        autoNamed: true, // shape placeholders — reverse-geocoded later / refreshed on move
       },
     }));
     const merged = mergeNamedIntoRoute(base, { coords: raw, cum, totalKm: cum[cum.length - 1] ?? 0 }, namedPois);

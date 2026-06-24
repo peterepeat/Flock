@@ -9,7 +9,7 @@
 
 import { createLogger } from "./logger";
 import { nextColor } from "./colors";
-import { isAutoWaypointName } from "./flockGpx";
+import { waypointNameIsAuto } from "./flockGpx";
 import { newFlockId, newParticipantId, newWaypointId } from "./ids";
 import { getStore, hashToken } from "./store";
 import type {
@@ -267,12 +267,17 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       const w = action.waypoint;
       if (!isValidLatLng(w?.location))
         return { ok: false, status: 400, error: "A waypoint location is required" };
+      const wpName = w.name?.trim() || w.address || "Waypoint";
       const waypoint: FlockWaypoint = {
         id: newWaypointId(),
         location: w.location,
         address: w.address ?? "",
-        name: w.name?.trim() || w.address || "Waypoint",
+        name: wpName,
         stopMinutes: Math.max(0, w.stopMinutes ?? 0),
+        // Whether the name auto-refreshes on a move: honour an explicit flag (a
+        // map-dropped / route-dragged pin sets true; a re-add of a user-named one keeps
+        // false), else infer from the name (a placeholder/"Dropped pin" is auto).
+        autoNamed: w.autoNamed ?? waypointNameIsAuto({ name: wpName }),
         // Preserve foreign GPX data so re-adding (e.g. an undo of a remove) keeps
         // the lossless round-trip — mirrors the importRoute handler.
         ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
@@ -296,12 +301,23 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       if (idx === -1) return { ok: false, status: 404, error: "Waypoint not found" };
       const cur = session.waypoints[idx];
       const u = action.updates;
+      const newName = u.name?.trim() || cur.name;
+      // A user-supplied name change makes the name THEIRS — stop auto-refreshing it on
+      // moves. An explicit autoNamed in the update wins (lets a programmatic re-geocode
+      // keep it auto); a non-name edit (location, stop) leaves the flag untouched.
+      const nextAutoNamed =
+        u.autoNamed != null
+          ? u.autoNamed
+          : u.name != null && newName !== cur.name
+            ? false
+            : cur.autoNamed;
       session.waypoints[idx] = {
         ...cur,
         location: isValidLatLng(u.location) ? u.location : cur.location,
         address: u.address ?? cur.address,
-        name: u.name?.trim() || cur.name,
+        name: newName,
         stopMinutes: u.stopMinutes != null ? Math.max(0, u.stopMinutes) : cur.stopMinutes,
+        autoNamed: nextAutoNamed,
       };
       clearComputed(session);
       log.info("waypoint updated", { id, waypointId: action.waypointId });
@@ -362,13 +378,15 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
         const n = action.names[w.id];
         const name = n?.name?.trim();
         if (!name) continue;
-        // Only fill in names that are STILL auto-generated placeholders. This is
-        // the authoritative guard against background naming clobbering a name the
-        // user (or another device) set while we were geocoding — checked here at
-        // write time, so it's immune to client-side staleness.
-        if (!isAutoWaypointName(w.name)) continue;
+        // Only fill names that are STILL auto-managed (a placeholder OR a previously
+        // geocoded label) — the authoritative guard against clobbering a name the user
+        // set, checked at write time so it's immune to client-side staleness. The
+        // result is itself auto-derived, so keep autoNamed true: a later move refreshes
+        // it again, but a user rename (autoNamed=false) is never touched.
+        if (!waypointNameIsAuto(w)) continue;
         w.name = name;
         w.address = n.address?.trim() || name;
+        w.autoNamed = true;
         renamed++;
       }
       log.info("waypoints renamed", { id, renamed });
@@ -381,14 +399,20 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       // through unchanged for lossless re-export.
       const imported: FlockWaypoint[] = (action.waypoints ?? [])
         .filter((w) => isValidLatLng(w?.location))
-        .map((w) => ({
-          id: newWaypointId(),
-          location: w.location,
-          address: w.address ?? "",
-          name: w.name?.trim() || w.address || "Waypoint",
-          stopMinutes: Math.max(0, w.stopMinutes ?? 0),
-          ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
-        }));
+        .map((w) => {
+          const name = w.name?.trim() || w.address || "Waypoint";
+          return {
+            id: newWaypointId(),
+            location: w.location,
+            address: w.address ?? "",
+            name,
+            stopMinutes: Math.max(0, w.stopMinutes ?? 0),
+            // Carry the parse's flag (a shape point is auto, a real <name> POI isn't), so
+            // dragging a shape point later refreshes its name but a named stop keeps its.
+            autoNamed: w.autoNamed ?? waypointNameIsAuto({ name }),
+            ...(w.gpxExtra ? { gpxExtra: w.gpxExtra } : {}),
+          };
+        });
       if (imported.length === 0)
         return { ok: false, status: 400, error: "That GPX had no usable route points." };
       session.waypoints = imported;
