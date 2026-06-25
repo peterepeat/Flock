@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import type { ActiveTab } from "@/store/flockStore";
 import { useFlockStore } from "@/store/flockStore";
+import { usePartyStore } from "@/store/partyStore";
 
 /**
  * Mobile-only bottom nav. Toggles full-screen panels over the persistent map; "Map" shows the
@@ -18,6 +19,9 @@ export default function MobileTabBar() {
   const placingFinish = useFlockStore((s) => s.placingFinish);
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   const peopleCount = useFlockStore((s) => s.session?.participants.length ?? 0);
+  // While Flock Party plays, the disco takes over the map — hide the nav so a tab
+  // tap can't slide a panel over the running show (exit is the party's own ✕/Esc).
+  const partyActive = usePartyStore((s) => s.active);
 
   // Hide while the on-screen keyboard is up (a text field is focused) — the fixed bar would
   // otherwise float over the field, and the address dropdown wants the room.
@@ -35,7 +39,7 @@ export default function MobileTabBar() {
     };
   }, []);
 
-  if (placingPin || placingFinish || placingWaypoint || inputFocused) return null;
+  if (placingPin || placingFinish || placingWaypoint || inputFocused || partyActive) return null;
 
   const tabs: { key: ActiveTab; label: string; icon: ReactNode; badge?: number }[] = [
     { key: "run", label: "Run", icon: <RunIcon /> },

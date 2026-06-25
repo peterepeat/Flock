@@ -14,6 +14,7 @@ import {
   useMapEvents,
 } from "react-leaflet";
 
+import PartyController from "@/components/Party/PartyController";
 import { initial } from "@/lib/colors";
 import { renameWaypoints } from "@/lib/flockApi";
 import { waypointNameIsAuto } from "@/lib/flockGpx";
@@ -956,6 +957,11 @@ export default function MapCanvas() {
             icon={divMarker("var(--accent)", "⚑", "finish")}
           />
         )}
+
+        {/* Flock Party — a self-contained, read-only disco replay of the plan. Lives
+            inside the map (needs useMap) but never touches the model or the store's
+            plan; it only paints over what's already computed. */}
+        <PartyController />
       </MapContainer>
 
       {/* Gentle prompt when there isn't enough to compare yet */}

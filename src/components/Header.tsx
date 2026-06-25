@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import PartyLaunch from "@/components/Party/PartyLaunch";
 import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
@@ -141,6 +142,7 @@ export default function Header() {
         >
           {copied ? "Link copied ✓" : "Copy link"}
         </button>
+        <PartyLaunch />
         <button
           type="button"
           onClick={toggleLock}
