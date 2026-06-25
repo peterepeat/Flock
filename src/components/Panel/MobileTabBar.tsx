@@ -19,8 +19,9 @@ export default function MobileTabBar() {
   const placingFinish = useFlockStore((s) => s.placingFinish);
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   const peopleCount = useFlockStore((s) => s.session?.participants.length ?? 0);
-  // While Flock Party plays (the flock is locked), the disco takes over the map —
-  // hide the nav so a tab tap can't slide a panel over the running show.
+  // Keep the nav up during Flock Party (the flock is locked) so you can still reach
+  // every screen — watch the show on Map, grab a GPX from Runners, etc. A 🪩 on the
+  // Map tab shows where the party is playing.
   const partyActive = useFlockStore((s) => isPartyActive(s.session));
 
   // Hide while the on-screen keyboard is up (a text field is focused) — the fixed bar would
@@ -39,13 +40,13 @@ export default function MobileTabBar() {
     };
   }, []);
 
-  if (placingPin || placingFinish || placingWaypoint || inputFocused || partyActive) return null;
+  if (placingPin || placingFinish || placingWaypoint || inputFocused) return null;
 
-  const tabs: { key: ActiveTab; label: string; icon: ReactNode; badge?: number }[] = [
+  const tabs: { key: ActiveTab; label: string; icon: ReactNode; badge?: number; party?: boolean }[] = [
     { key: "run", label: "Run", icon: <RunIcon /> },
     { key: "route", label: "Route", icon: <RouteIcon /> },
     { key: "runners", label: "Runners", icon: <RunnersIcon />, badge: peopleCount || undefined },
-    { key: "map", label: "Map", icon: <MapIcon /> },
+    { key: "map", label: "Map", icon: <MapIcon />, party: partyActive },
   ];
 
   return (
@@ -73,8 +74,16 @@ export default function MobileTabBar() {
                   {t.badge}
                 </span>
               )}
+              {t.party && (
+                <span
+                  className="party-launch__ball absolute -right-2.5 -top-2 text-[11px] leading-none"
+                  aria-hidden="true"
+                >
+                  🪩
+                </span>
+              )}
             </span>
-            <span>{t.label}</span>
+            <span>{t.label}{t.party ? <span className="sr-only"> — party playing</span> : null}</span>
           </button>
         );
       })}
