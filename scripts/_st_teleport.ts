@@ -49,29 +49,48 @@ async function main() {
     );
   }
 
-  section("mirror: manual FINISH far off-route + a tight latest (egress side)");
+  section("mirror: manual FINISH off-route + a binding latest (egress side) → must PARK, not teleport-survive");
+  // A fixed (manual) finish anchors the egress connector to the spine ENDPOINT. With a binding latest the
+  // OLD engine slid the exit earlier to "make the deadline" but left the egress at the endpoint — so the
+  // runner SURVIVED on a route that teleports back ~5 km to the connector. The fix (enforceDeadlines skips
+  // a fixed exit) instead PARKS her honestly. The earlier mirror used a far-NW finish whose huge egress
+  // made her park EITHER WAY (vacuous — it never exercised the exit skip). This finish sits ~1 km off the
+  // spine's EAST end: with a fixed 07:00 departure she'd finish the full ~12 km spine + egress at ~08:18,
+  // so 07:48 is binding. WITHOUT the fix, trimming leaves her a feasible ~7 km run whose drawn egress
+  // jumps ~5 km back to the endpoint; WITH it she's parked. The guard catches that regression two ways.
   const s2 = session(
     [
-      person("zoe", {
-        startPin: atPlace(-37.8142, 144.9632, "Melbourne"),
-        finishPin: atPlace(-37.7707, 144.9924, "Northcote"),
-        latestFinishTime: "07:35",
-      }),
-      person("dan", { startPin: atPlace(-37.8142, 144.9632, "Melbourne"), finishPin: auto }),
+      person("zoe", { finishPin: atPlace(-37.776, 145.14, "near east end"), latestFinishTime: "07:48" }),
+      person("dan", { finishPin: auto }),
     ],
-    [wp("bakery", -37.8025, 145.0035, 0), wp("balwyn", -37.792, 145.0842, 0)],
+    [wp("bakery", -37.8025, 145.0035, 0), wp("east", -37.785, 145.14, 0)],
+    { startAnchor: { kind: "departure", time: "07:00" } },
   );
   const r2 = await calculateRoutes(s2);
   ok(r2.skipped !== true, "mirror: not skipped");
+  // (1) No PLACED runner teleports — drawn geometry length matches schedule distance for any real run.
   for (const cr of r2.routes) {
     const geomKm = lineKm(cr.geometry.coordinates);
     const schedKm = cr.distanceKm;
-    section(`mirror runner "${cr.participantId}"  geom=${geomKm.toFixed(2)}km  sched=${schedKm}km`);
+    section(`mirror "${cr.participantId}"  geom=${geomKm.toFixed(2)}km  sched=${schedKm}km`);
     ok(
       Math.abs(geomKm - schedKm) < 0.5,
       `${cr.participantId}: geometry length (${geomKm.toFixed(2)}km) matches schedule distance (${schedKm}km) — no teleport`,
     );
   }
+  // (2) The DIRECT egress-side guard (the half the old mirror left untested): a fixed-finish runner who
+  //     can't finish by her deadline must be PARKED, never SLID onto a feasible-but-teleporting route.
+  //     A positive-distance zoe route here == the enforceDeadlines fixed-exit skip regressed.
+  const zoeRoute = r2.routes.find((cr) => cr.participantId === "zoe");
+  const zoeWarn = r2.warnings.find((w) => w.participantId === "zoe");
+  ok(
+    zoeWarn != null && /finish by your deadline/i.test(zoeWarn.message),
+    `zoe is parked with the honest latest-unreachable message, not slid onto a teleporting route: "${zoeWarn?.message ?? "(no warning)"}"`,
+  );
+  ok(
+    zoeRoute == null || zoeRoute.distanceKm < 0.1,
+    `zoe has no positive-distance route (a placed zoe == the egress teleport regressed): ${zoeRoute ? zoeRoute.distanceKm + "km" : "no route"}`,
+  );
 
   section("Auto-flock earliest-unreachable PARK → the remedy must be Auto-aware (not 'try Auto')");
   // `early`'s 07:00 latest pins the Auto flock to depart early; `late` is pinned at the bakery but
