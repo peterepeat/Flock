@@ -68,5 +68,17 @@ async function main() {
     person("Dana"),
     person("Eli", { startPin: atPlace(51.5190, -0.1230, "near home"), finishPin: atPlace(51.5380, -0.0650, "far office") }),
   ], [w1, w2], { intendedDistanceKm: 6 }));
+
+  // CORRIDOR (the kwhw9x shape): a 2-waypoint organizer route (Convent → East Richmond) with two
+  // manual-start / free-finish runners whose homes sit before/beside the first waypoint. Both must
+  // now traverse the Convent and meet for the whole corridor (the endpoint-anchoring fix). Also
+  // exercises the place-named schedule ("Set off from 13 Hawthorn Road").
+  await seed("convnt", session([
+    person("Peter", { startPin: atPlace(-37.7706783, 144.9924143, "13 Hawthorn Road, Northcote") }),
+    person("Collin", { startPin: atPlace(-37.8142454, 144.9631732, "Melbourne, Victoria") }),
+  ], [
+    { ...wp("convent", -37.8025203, 145.0035085), name: "Convent Bakery", address: "Convent Bakery, St Heliers St" },
+    { ...wp("richmond", -37.8263517, 144.9966361), name: "East Richmond", address: "East Richmond, Church St" },
+  ]));
 }
 main().catch((e) => { console.error(e); process.exit(1); });

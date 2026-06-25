@@ -58,6 +58,13 @@ export interface Runner {
   // distance cap sees them together (the sum).
   approachKm: number; // home → enter point
   egressKm: number; // exit point → home
+  // True iff this end's arc position is a HARD user pin — a WAYPOINT the runner pinned and the engine
+  // must honour exactly. A manual pin is NOT hard here: it fixes the runner's HOME, but where they JOIN
+  // the spine is an engine choice (placed to maximise togetherness within the cap). Only two HARD ends
+  // can be a genuine cap-vs-pin contradiction; a chosen manual join must never be. Undefined ⇒ hard
+  // (back-compat for planRun callers that build Runners directly). Set by index.ts from the pin kind.
+  hardEnter?: boolean;
+  hardExit?: boolean;
 }
 
 export interface RunInput {

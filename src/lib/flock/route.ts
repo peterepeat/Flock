@@ -176,12 +176,18 @@ export interface SpineRunner {
  *   ≥1 fixed start AND ≥1 fixed finish → corridor centroid(starts) → centroid(finishes).   [A]
  *   some fixed anchor but free ends    → a loop at the meeting point (centroid of anchors). [B]
  *   no fixed anchor at all             → null (nothing to route from).                     [D]
+ *
+ * In EVERY case a manual/auto end anchors to the spine's ENDPOINT (km 0 start / km L finish) and the
+ * cap is the only thing that pulls a free end in — see resolve() in index.ts. A pin is a CONNECTOR
+ * origin (home), never a mid-spine join: the flock gathers at the spine's start and runs to its end,
+ * so being present for the WHOLE spine is always the most-together place. Projecting a pin to its
+ * nearest pass instead would silently skip the leading/trailing waypoints when a home sits beside or
+ * past one (the kwhw9x "nobody traverses the Convent" defect) and break the COVERAGE invariant.
  */
-export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: SpineRunner[]; targetKm: number | null }): Promise<{ route: Route | null; anchored: boolean }> {
+export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: SpineRunner[]; targetKm: number | null }): Promise<{ route: Route | null }> {
   const { waypoints, runners, targetKm } = opts;
-  // [W] ≥2 waypoints = the organizer's route; a runner JOINS it at their nearest point (their chosen
-  // join), so manual pins are PROJECTED, not anchored to the ends. `anchored: false`.
-  if (waypoints.length >= 2) return { route: await buildRoute({ waypoints, targetKm }), anchored: false };
+  // [W] ≥2 waypoints = the organizer's corridor (WP1→…→WPn) — a one-way shared journey runners join.
+  if (waypoints.length >= 2) return { route: await buildRoute({ waypoints, targetKm }) };
 
   const wp = waypoints[0]?.location ?? null;
   const fixedStarts = runners.map((r) => r.startLoc).filter((l): l is LatLng => l != null);
@@ -207,8 +213,5 @@ export async function buildSpine(opts: { waypoints: WaypointSpec[]; runners: Spi
     if (base) geom = await loopFrom(base, wp, targetKm);
   }
 
-  // A/B/C build the spine FROM the runners, so a manual fixed pin anchors to the spine's ENDPOINT
-  // (km 0 start / km L finish) — everyone meets at the base and runs the FULL route — rather than
-  // projecting to wherever the pin happens to be nearest (which truncated a pinned runner mid-loop).
-  return { route: geom ? withStops(geom, waypoints) : null, anchored: true }; // route null = [D] no geography
+  return { route: geom ? withStops(geom, waypoints) : null }; // route null = [D] no geography
 }

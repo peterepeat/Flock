@@ -9,6 +9,7 @@
 // social-first model doesn't have.
 // ---------------------------------------------------------------------------
 
+import { distanceMeters } from "../geo";
 import { getRoute } from "../ors";
 import type { FlockSession, LatLng, LocationPin } from "../types";
 import { timeToSec } from "../units";
@@ -44,35 +45,90 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
 
   // The shared spine is an OUTPUT of the runners: chosen from their anchors, not from the
   // waypoints alone. null = no geography at all (no waypoints, no pins) → a NAMED no-route.
-  const { route, anchored } = await buildSpine({
+  const { route } = await buildSpine({
     waypoints: waypoints.map((w) => ({ id: w.id, location: w.location, name: w.name, stopMinutes: w.stopMinutes })),
     runners: participants.map((p) => ({ startLoc: pinLoc(p.startPin), finishLoc: pinLoc(p.finishPin), maxDistanceKm: p.maxDistanceKm })),
     targetKm,
   });
   if (!route) return empty({ reason: "no-location" });
 
-  // Resolve a pin to an arc bound; a manual pin also yields a connector point off the route.
-  const resolve = (pin: LocationPin, role: "start" | "finish"): { bound: Bound; connector?: LatLng } => {
-    if (pin.kind === "auto") return { bound: { kind: "free" } };
+  // Resolve a NON-manual pin (auto = free; waypoint = fixed at its pass; a vanished waypoint = free).
+  // A FINISH waypoint uses lastNearKm (its LATEST pass) so a finish at the loop's base lands at km L,
+  // not km 0 (which would collapse the window). A MANUAL pin is decided cap-aware in the loop below.
+  const resolveFixed = (pin: LocationPin, role: "start" | "finish"): Bound => {
     if (pin.kind === "waypoint") {
       const w = wpById.get(pin.waypointId);
-      if (!w) return { bound: { kind: "free" } };
-      // A FINISH at a waypoint that is ALSO the loop's base (km 0 = km L) must resolve to km L — the
-      // end of the loop, back at the landmark — not km 0, which would collapse the window to nothing.
-      // lastNearKm gives the LATEST pass; for a mid-route landmark it's the same single pass (the
-      // dwell stop), so a café-reunion finish still lands exactly on its stop.
-      const km = role === "finish" ? lastNearKm(route, w.location) : nearestKm(route, w.location);
-      return { bound: { kind: "fixed", km } };
+      if (w) return { kind: "fixed", km: role === "finish" ? lastNearKm(route, w.location) : nearestKm(route, w.location) };
     }
-    // A manual pin is OFF the route. When the spine was built FROM the runners (`anchored`), it
-    // anchors to the spine's END — km 0 for a start, km L for a finish — so the runner meets the
-    // flock at the base and runs the FULL route (connecting home↔base). On an organizer route it
-    // PROJECTS to its nearest pass (a finish to its LATEST pass, so a return-to-start finish doesn't
-    // collapse the window).
-    const km = anchored
-      ? role === "finish" ? route.totalKm : 0
-      : role === "finish" ? lastNearKm(route, pin.location) : nearestKm(route, pin.location);
-    return { bound: { kind: "fixed", km }, connector: pin.location };
+    return { kind: "free" };
+  };
+  // Arc position a bound sits at, for the "does the whole shared route fit your cap?" span: a fixed
+  // bound is its km; a FREE end reaches the spine's far endpoint (0 for a start, L for a finish).
+  const boundKm = (b: Bound, role: "start" | "finish"): number => (b.kind === "fixed" ? b.km : role === "finish" ? route.totalKm : 0);
+  // The ORS connector leg between a manual home pin and an arc point — home→enter (approach) or
+  // exit→home (egress) — with its distance + geometry. Best-effort: a failed calc leaves it implicit.
+  const legTo = async (home: LatLng, km: number, role: "start" | "finish"): Promise<{ km: number; geom?: LatLng[] }> => {
+    try {
+      const r = await getRoute(role === "finish" ? [pointAtKm(route, km), home] : [home, pointAtKm(route, km)]);
+      return { km: r.distanceKm, geom: geomToLatLng(r.geometry) };
+    } catch {
+      return { km: 0 };
+    }
+  };
+  // Where a manual pin joins the spine, chosen to MAXIMISE shared distance within the runner's cap —
+  // ONE continuous rule, no waypoint-count cases. At each candidate arc point the runner can share
+  // min(reach, cap − commute − otherCommute) of the route, where `reach` is the arc from that point to
+  // the OTHER end and `commute` is the home→point hop (a cheap straight-line proxy; the real road leg
+  // is computed once, for the winner). Sweeping it lands the join exactly where coverage peaks:
+  //   • no cap → the spine ENDPOINT (commute is free to ignore, so reach is maximal → the whole route);
+  //   • a slack cap → still the endpoint (reach saturates before the budget bites);
+  //   • a tight cap → pulled toward home (shorter commute buys more shared arc), i.e. a sub-segment;
+  //   • too tight for any shared arc → coverage 0 everywhere → classify() parks them, named.
+  const totalKm = route.totalKm;
+  const optimalManualKm = (home: LatLng, role: "start" | "finish", otherEndKm: number, otherCommuteKm: number, cap: number | null): number => {
+    const endpoint = role === "finish" ? totalKm : 0;
+    if (cap == null) return endpoint;
+    const lo = role === "finish" ? Math.max(0, Math.min(otherEndKm, totalKm)) : 0;
+    const hi = role === "finish" ? totalKm : Math.max(0, Math.min(otherEndKm, totalKm));
+    const N = 64;
+    let bestKm = endpoint;
+    let bestCov = -Infinity;
+    for (let i = 0; i <= N; i++) {
+      const km = lo + ((hi - lo) * i) / N;
+      const commute = distanceMeters(home, pointAtKm(route, km)) / 1000;
+      const reach = role === "finish" ? km - otherEndKm : otherEndKm - km;
+      const cov = Math.min(Math.max(0, reach), cap - commute - otherCommuteKm);
+      if (cov > bestCov + 1e-9) { bestCov = cov; bestKm = km; }
+    }
+    return bestKm;
+  };
+  // BOTH ends are off-route homes: choose the two join points TOGETHER (a greedy per-end choice drifts
+  // them apart and trips a false cap conflict). Sweep (enter ≤ exit), keeping the longest shared arc
+  // whose total — commute(start→enter) + arc + commute(exit→finish) — fits the cap. No cap → the whole
+  // spine. If NOTHING fits (even zero arc), park them at the point nearest BOTH homes so classify's
+  // cap-too-short names it (their commute alone busts the cap). Straight-line commute proxy; real road
+  // legs are ORS'd for the winners.
+  const jointManualKm = (startHome: LatLng, finishHome: LatLng, cap: number | null, scaleS = 1, scaleF = 1): { enterKm: number; exitKm: number } => {
+    if (cap == null) return { enterKm: 0, exitKm: totalKm };
+    const N = 48;
+    const ce: number[] = [], cx: number[] = [];
+    for (let i = 0; i <= N; i++) {
+      const p = pointAtKm(route, (totalKm * i) / N);
+      // scaleS/scaleF inflate the straight-line proxy to the measured road-detour ratio (1 = raw).
+      ce.push((scaleS * distanceMeters(startHome, p)) / 1000);
+      cx.push((scaleF * distanceMeters(finishHome, p)) / 1000);
+    }
+    let best = { enterKm: 0, exitKm: 0, arc: -1 };
+    for (let i = 0; i <= N; i++)
+      for (let j = i; j <= N; j++) {
+        const arc = (totalKm * (j - i)) / N;
+        if (ce[i] + arc + cx[j] > cap + 1e-9) continue;
+        if (arc > best.arc) best = { enterKm: (totalKm * i) / N, exitKm: (totalKm * j) / N, arc };
+      }
+    if (best.arc >= 0) return { enterKm: best.enterKm, exitKm: best.exitKm };
+    let p = { km: 0, c: Infinity };
+    for (let i = 0; i <= N; i++) if (ce[i] + cx[i] < p.c) p = { km: (totalKm * i) / N, c: ce[i] + cx[i] };
+    return { enterKm: p.km, exitKm: p.km };
   };
 
   const connectors = new Map<string, Connectors>();
@@ -81,36 +137,71 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
       // Guard against non-finite / non-positive pace (UI-unreachable, but pathological API input
       // would otherwise flow NaN/Infinity into the clock math and break HH:MM).
       const pace = Number.isFinite(p.pace) && (p.pace as number) > 0 ? (p.pace as number) : DEFAULT_PACE;
-      const s = resolve(p.startPin, "start");
-      const f = resolve(p.finishPin, "finish");
+      const cap = p.maxDistanceKm != null ? Math.max(0, p.maxDistanceKm) : null; // clamp pathological negatives
+      const startHome = p.startPin.kind === "manual" ? p.startPin.location : null;
+      const finishHome = p.finishPin.kind === "manual" ? p.finishPin.location : null;
+
+      let enter = resolveFixed(p.startPin, "start");
+      let exit = resolveFixed(p.finishPin, "finish");
+      const conn: Connectors = {};
       let approachKm = 0;
       let egressKm = 0;
-      const conn: Connectors = {};
-      if (s.connector && s.bound.kind === "fixed") {
-        try {
-          const r = await getRoute([s.connector, pointAtKm(route, s.bound.km)]);
-          conn.approach = geomToLatLng(r.geometry);
-          approachKm += r.distanceKm;
-        } catch { /* leave the connector implicit */ }
-      }
-      if (f.connector && f.bound.kind === "fixed") {
-        try {
-          const r = await getRoute([pointAtKm(route, f.bound.km), f.connector]);
-          conn.egress = geomToLatLng(r.geometry);
-          egressKm += r.distanceKm;
-        } catch { /* leave the connector implicit */ }
+
+      // A manual pin marks where the runner comes FROM (home), off the shared route — where they JOIN
+      // the spine is an engine CHOICE, placed to spend as much of the route with the flock as the cap
+      // allows. BOTH manual → choose the two joins JOINTLY (jointManualKm); ONE manual → the single
+      // join, the other (free) end resolved later (optimalManualKm). A straight-line commute proxy
+      // steers the choice; the real road leg is ORS'd for the winner.
+      if (startHome && finishHome) {
+        let { enterKm, exitKm } = jointManualKm(startHome, finishHome, cap);
+        let sLeg = await legTo(startHome, enterKm, "start");
+        let fLeg = await legTo(finishHome, exitKm, "finish");
+        // jointManualKm chose with a STRAIGHT-LINE commute proxy; the REAL road legs are longer, so the
+        // arc can overrun the cap. Correct ONCE (not an ORS-hungry loop — the quota is tight): measure
+        // the road-detour ratio from these two legs, re-pick the joins with the proxy scaled to it, and
+        // recompute the legs there. ≤2 extra calls, and only when a cap actually binds on real roads.
+        if (cap != null && sLeg.km + (exitKm - enterKm) + fLeg.km > cap + 1e-6) {
+          const havS = distanceMeters(startHome, pointAtKm(route, enterKm)) / 1000;
+          const havF = distanceMeters(finishHome, pointAtKm(route, exitKm)) / 1000;
+          const scaleS = havS > 1e-6 ? sLeg.km / havS : 1;
+          const scaleF = havF > 1e-6 ? fLeg.km / havF : 1;
+          ({ enterKm, exitKm } = jointManualKm(startHome, finishHome, cap, scaleS, scaleF));
+          sLeg = await legTo(startHome, enterKm, "start");
+          fLeg = await legTo(finishHome, exitKm, "finish");
+        }
+        enter = { kind: "fixed", km: enterKm };
+        exit = { kind: "fixed", km: exitKm };
+        approachKm = sLeg.km;
+        egressKm = fLeg.km;
+        if (sLeg.geom) conn.approach = sLeg.geom;
+        if (fLeg.geom) conn.egress = fLeg.geom;
+      } else if (startHome) {
+        const km = optimalManualKm(startHome, "start", boundKm(exit, "finish"), 0, cap);
+        const leg = await legTo(startHome, km, "start");
+        enter = { kind: "fixed", km };
+        approachKm = leg.km;
+        if (leg.geom) conn.approach = leg.geom;
+      } else if (finishHome) {
+        const km = optimalManualKm(finishHome, "finish", boundKm(enter, "start"), 0, cap);
+        const leg = await legTo(finishHome, km, "finish");
+        exit = { kind: "fixed", km };
+        egressKm = leg.km;
+        if (leg.geom) conn.egress = leg.geom;
       }
       if (conn.approach || conn.egress) connectors.set(p.id, conn);
       return {
         id: p.id,
         pace,
-        enter: s.bound,
-        exit: f.bound,
-        maxDistanceKm: p.maxDistanceKm != null ? Math.max(0, p.maxDistanceKm) : null, // clamp pathological negatives
+        enter,
+        exit,
+        maxDistanceKm: cap,
         earliestSec: p.earliestStartTime != null ? timeToSec(p.earliestStartTime) : null,
         latestSec: p.latestFinishTime != null ? timeToSec(p.latestFinishTime) : null,
         approachKm,
         egressKm,
+        // A WAYPOINT pin is a HARD arc constraint; a manual join is the engine's choice (not hard).
+        hardEnter: p.startPin.kind === "waypoint",
+        hardExit: p.finishPin.kind === "waypoint",
       };
     }),
   );

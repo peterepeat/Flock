@@ -514,8 +514,11 @@ function classify(r: Runner, t0: number, L: number): Conflict | null {
   // (cap≈0 with BOTH ends free is the intended zero-arc co-arriver, MIN-F3 — left feasible.)
   if (r.maxDistanceKm != null && (r.approachKm + r.egressKm > r.maxDistanceKm + EPS || (r.maxDistanceKm < EPS && (r.enter.kind === "fixed" || r.exit.kind === "fixed"))))
     return { kind: "cap-too-short", capKm: r.maxDistanceKm, commuteKm: r.approachKm + r.egressKm };
-  // Both ends pinned but their separation exceeds the distance cap — neither can be honoured.
-  if (r.enter.kind === "fixed" && r.exit.kind === "fixed" && r.maxDistanceKm != null) {
+  // Both ends are HARD WAYPOINT pins but their separation exceeds the distance cap — neither can be
+  // honoured. Only hard pins count: a manual pin's join point is an engine CHOICE (placed feasibly
+  // within the cap — see index.ts jointManualKm), so two manual ends never trip this; if a manual
+  // commute genuinely busts the cap it's caught above as cap-too-short, with the right message.
+  if (r.enter.kind === "fixed" && r.exit.kind === "fixed" && (r.hardEnter ?? true) && (r.hardExit ?? true) && r.maxDistanceKm != null) {
     const lo = clamp(r.enter.km, 0, L), hi = clamp(r.exit.km, 0, L);
     if (Math.abs(hi - lo) > (arcCapOf(r) ?? 0) + EPS)
       return { kind: "cap-vs-pin", capKm: r.maxDistanceKm, enterPinKm: lo, exitPinKm: hi };

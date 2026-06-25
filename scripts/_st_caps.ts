@@ -378,6 +378,95 @@ async function run(): Promise<void> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // The kwhw9x follow-up: a CAPPED manual-start runner on an organizer corridor must join the BEST
+  // affordable sub-segment — coverage scaling CONTINUOUSLY with the cap — never forced to the route
+  // start (endpoint-anchoring, whose long commute busts the cap → parked) NOR dumped at its nearest
+  // pass (a short tail that wastes the budget). One join-point rule; this guards both over-corrections.
+  section("capped manual start joins the best affordable sub-segment (scales with cap)");
+  {
+    const HOME = atPlace(-37.82, 144.95); // west of a N–S corridor; nearest pass is mid/far, ~3.5 km commute
+    const corridor2 = () => [wp("w1", -37.80, 144.99), wp("w2", -37.84, 144.99)];
+    const sharedKm = (r: CalcResult, id: string) =>
+      routeOf(r, id)?.schedule.filter((s) => s.companionIds.length > 0).reduce((a, s) => a + s.distanceKm, 0) ?? 0;
+    const calc = async (cap: number | null): Promise<CalcResult> => {
+      let res!: CalcResult;
+      await tryOk(async () => {
+        res = await calculateRoutes(session([person("free"), person("m", { startPin: HOME, maxDistanceKm: cap })], corridor2()));
+      }, `manual-cap=${cap} compute`);
+      return res;
+    };
+    // uncapped / slack cap → the WHOLE corridor (the coverage invariant holds for capped manual pins too)
+    ok(sharedKm(await calc(null), "m") >= 4.1, "uncapped manual start: shares the whole ~4.45 km corridor");
+    ok(sharedKm(await calc(9), "m") >= 4.1, "slack cap: still the whole corridor");
+    // a binding cap → a real sub-segment that USES the budget (not a wasted nearest-tail, not parked)
+    const c6 = await calc(6);
+    const m6 = routeOf(c6, "m");
+    ok(!!m6 && m6.distanceKm > 0.01, "cap 6: runner joins (not parked)");
+    ok(!!m6 && m6.distanceKm <= 6 + EPS, `cap 6: distanceKm <= cap (${m6?.distanceKm})`);
+    ok(sharedKm(c6, "m") >= 2.0, `cap 6: shares a substantial sub-segment ${sharedKm(c6, "m").toFixed(2)} km (not a wasted tail)`);
+    // coverage is MONOTONIC non-decreasing in the cap
+    const s7 = sharedKm(await calc(7), "m"), s6 = sharedKm(c6, "m"), s5 = sharedKm(await calc(5), "m"), s4 = sharedKm(await calc(4), "m");
+    ok(s7 >= s6 - EPS && s6 >= s5 - EPS && s5 >= s4 - EPS, `coverage grows with cap (7:${s7.toFixed(2)} 6:${s6.toFixed(2)} 5:${s5.toFixed(2)} 4:${s4.toFixed(2)})`);
+    // too tight even for the minimal commute → PARKED, with a named warning
+    const tight = await calc(3);
+    const mt = routeOf(tight, "m");
+    ok(!!mt && mt.distanceKm < 0.01, "cap 3: too tight to reach the route → parked (distance ~0)");
+    const wt = warnOf(tight, "m");
+    ok(!!wt && /distance limit/.test(wt.message), `cap 3: parked with a named distance warning (${wt?.message ?? "none"})`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The zyb39g defect: a runner with BOTH ends manual (off-route homes) + a roomy cap was PARKED by a
+  // false cap-vs-pin conflict — the two join points were placed greedily/independently and drifted far
+  // apart, then flagged "can't both hold" even though the cap was ample. A manual join is an engine
+  // CHOICE, never a hard pin: the joins must be chosen JOINTLY (feasible by construction), and cap-vs-pin
+  // must apply only to real WAYPOINT pins. Guards both faults.
+  section("both-ends-manual joins the best sub-segment; never a false cap-vs-pin park");
+  {
+    // zyb39g's exact shape: a 2-waypoint corridor (Convent → East Richmond, grown to 10 km) and a
+    // runner whose start (Carlton) AND finish (Melbourne CBD) are off-route homes close together. The
+    // greedy engine placed their joins ~8 km apart → false cap-vs-pin park even at a 12 km cap.
+    const SH = atPlace(-37.8004228, 144.9684343), FH = atPlace(-37.8142454, 144.9631732);
+    const corridor2 = () => [wp("convent", -37.7953, 145.0012), wp("richmond", -37.8332, 144.9955)];
+    const sharedKm = (r: CalcResult, id: string) =>
+      routeOf(r, id)?.schedule.filter((s) => s.companionIds.length > 0).reduce((a, s) => a + s.distanceKm, 0) ?? 0;
+    const calc = async (cap: number | null): Promise<CalcResult> => {
+      let res!: CalcResult;
+      await tryOk(async () => {
+        res = await calculateRoutes(session([person("free"), person("m", { startPin: SH, finishPin: FH, maxDistanceKm: cap })], corridor2(), { intendedDistanceKm: 10 }));
+      }, `both-manual cap=${cap} compute`);
+      return res;
+    };
+    // uncapped → the whole corridor
+    ok(sharedKm(await calc(null), "m") >= 9, "uncapped both-manual: shares the whole ~10 km corridor");
+    // the reported ROOMY cap → JOINS, never the "can't both hold" park (the headline zyb39g defect)
+    const c12 = await calc(12);
+    const m12 = routeOf(c12, "m"), w12 = warnOf(c12, "m");
+    ok(!!m12 && m12.distanceKm > 0.01, "cap 12: both-manual runner JOINS (not parked) — the zyb39g fix");
+    ok(!(w12 && /can.t both hold/.test(w12.message)), "cap 12: NO false cap-vs-pin 'can't both hold' warning");
+    ok(!!m12 && m12.distanceKm <= 12 + EPS, `cap 12: distanceKm <= cap (${m12?.distanceKm})`);
+    // a binding cap → a real sub-segment, monotonic in the cap
+    const s12 = sharedKm(c12, "m"), s8 = sharedKm(await calc(8), "m");
+    ok(s8 > 0.5, `cap 8: still joins a real sub-segment (${s8.toFixed(2)} km)`);
+    ok(s12 >= s8 - EPS, `coverage grows with cap (12:${s12.toFixed(2)} >= 8:${s8.toFixed(2)})`);
+    // genuinely too tight (commute alone busts the cap) → parked, but via cap-too-short, NOT cap-vs-pin
+    const tight = await calc(4);
+    const wt = warnOf(tight, "m");
+    ok(!!wt && /Getting to and from|distance limit of/.test(wt.message) && !/can.t both hold/.test(wt.message),
+      `cap 4: parked by an honest commute message, not a false cap-vs-pin (${wt?.message?.slice(0, 40) ?? "none"})`);
+
+    // The fix must NOT over-broaden: two genuine WAYPOINT pins farther apart than the cap are STILL a
+    // real cap-vs-pin contradiction (the join points ARE the hard pins).
+    let wp2!: CalcResult;
+    await tryOk(async () => {
+      wp2 = await calculateRoutes(session([person("free"), person("pin", { startPin: atWp("a"), finishPin: atWp("b"), maxDistanceKm: 3 })],
+        [wp("a", -37.80, 144.96), wp("b", -37.88, 144.96)]));
+    }, "waypoint cap-vs-pin compute");
+    const wpw = warnOf(wp2, "pin");
+    ok(!!wpw && /can.t both hold/.test(wpw.message), `two waypoint pins 9 km apart, cap 3: STILL cap-vs-pin parked (${wpw?.message?.slice(0, 40) ?? "none"})`);
+  }
+
   finish();
 }
 

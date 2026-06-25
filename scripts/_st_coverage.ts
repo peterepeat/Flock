@@ -28,7 +28,9 @@ async function main() {
   section("one manual fixed end + a free companion → full coverage");
   const offsets: Array<[number, number]> = [[0, 0], [0.01, 0.0], [0.0, 0.03], [0.02, 0.05], [-0.015, 0.04]];
   for (const end of ["start", "finish"] as const) {
-    for (const wps of [[], [wp("w", B.lat + 0.02, B.lng + 0.02)]] as const) {
+    // 0 waypoints (loop), 1 (loop through a landmark), AND 2 (the organizer's one-way corridor — the
+    // untested regime where a pin used to PROJECT and skip the leading/trailing waypoint, the kwhw9x bug).
+    for (const wps of [[], [wp("w", B.lat + 0.02, B.lng + 0.02)], [wp("w1", B.lat + 0.02, B.lng + 0.02), wp("w2", B.lat + 0.05, B.lng + 0.04)]] as const) {
       for (const [dLat, dLng] of offsets) {
         const pin = atPlace(B.lat + dLat, B.lng + dLng);
         const P: Participant = person("p", end === "start" ? { startPin: pin } : { finishPin: pin });
@@ -70,6 +72,25 @@ async function main() {
     ok(collin >= 0.9 * spine, `Collin runs the whole route (${collin.toFixed(2)} ≥ 0.9×${spine.toFixed(2)} km)`);
     ok(Math.abs(collin - peter) < 0.5, `Collin and Peter run ~the same distance (${collin.toFixed(2)} vs ${peter.toFixed(2)} km)`);
   }, "collin-exact");
+
+  // ── kwhw9x's exact reported shape: a TWO-waypoint organizer corridor (Convent → East Richmond) with
+  //    two manual-start / free-finish runners whose homes sit BESIDE / BEFORE the first waypoint. Under
+  //    the old projection model both joined the corridor PAST the Convent, so NOBODY traversed the first
+  //    waypoint (its ETA collapsed to 00:00) and they barely overlapped. With endpoint-anchoring both
+  //    meet at the Convent (km 0) and run the whole corridor together — every waypoint a true passage.
+  section("two-waypoint corridor: every waypoint is traversed (the kwhw9x defect)");
+  await tryOk(async () => {
+    const r = await calculateRoutes(session([
+      person("peter", { startPin: atPlace(-37.7706783, 144.9924143) }),  // north of the Convent
+      person("collin", { startPin: atPlace(-37.8142454, 144.9631732) }), // west of the corridor
+    ], [wp("convent", -37.8025203, 145.0035085), wp("richmond", -37.8263517, 144.9966361)]));
+    const f = fullyOverlaps(r);
+    ok(f.ok, `both run the whole corridor together (together ${f.got.toFixed(1)} ≥ 0.9×${f.expect.toFixed(1)} min)`);
+    // The FIRST waypoint is genuinely traversed — its ETA is a real flock-clock time, not the 00:00 that
+    // arrivalAt() returns when no block covers km 0 (the tell-tale that the corridor's head was skipped).
+    const conventEta = r.waypointEtas?.["convent"];
+    ok(conventEta != null && conventEta !== "00:00", `the Convent (first waypoint) is traversed (ETA ${conventEta})`);
+  }, "kwhw9x-corridor");
 
   // ── A runner who pins their FINISH to the sole waypoint (which becomes the loop's anchor) must
   //    still run the whole loop and finish there — not collapse to km 0 = 0 coverage. (Audit edge.)
