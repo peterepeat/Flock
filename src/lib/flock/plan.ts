@@ -222,6 +222,7 @@ function enforceDeadlines(wins: Map<string, Window>, route: Route, runners: Runn
     let changed = false;
     for (const r of runners) {
       if (r.latestSec == null) continue;
+      if (r.exit.kind === "fixed") continue; // a fixed exit (manual/waypoint finish) is connector-anchored
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
       const span = runnerSpan(blocks, r.id);
@@ -263,6 +264,7 @@ function enforceEarliest(wins: Map<string, Window>, route: Route, runners: Runne
     let changed = false;
     for (const r of runners) {
       if (r.earliestSec == null) continue;
+      if (r.enter.kind === "fixed") continue; // a fixed enter (manual/waypoint start) is connector-anchored
       const w = wins.get(r.id)!;
       if (w.exitKm - w.enterKm < EPS) continue;
       const span = runnerSpan(blocks, r.id);

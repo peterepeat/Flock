@@ -780,12 +780,26 @@ async function genEdge() {
     }
   }
   {
-    const far = await check("R-earliest/far-approach-honest-msg",
+    // A far-pinned earliest runner the fixed flock can't wait for → parks. The join stays at their
+    // REAL connector point (it's no longer slid forward — that desynced the connector and drew a
+    // teleport, see _st_teleport), so the honest cause turns on the TIMING at that join:
+    //  • a 07:00 flock has already PASSED the join (near the route start) by the 08:00 earliest;
+    const passed = await check("R-earliest/far-approach-passed-msg",
       session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("b")],
         [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "departure", time: "07:00" }, intendedDistanceKm: 18 }));
+    if (passed) {
+      const fw = passed.warnings.find((w) => w.participantId === "far");
+      if (fw && /couldn't place/.test(fw.message))
+        okH(/passes your join point before your earliest/.test(fw.message),
+          `R-earliest/far-approach (07:00 flock) must name the PASSED cause (got "${fw.message}")`);
+    }
+    //  • a flock departing AT the earliest reaches the join in time, so the long APPROACH is the
+    //    binding cause (they'd still have to set off before earliest to make the commute).
+    const far = await check("R-earliest/far-approach-honest-msg",
+      session([person("far", { startPin: FAR, earliestStartTime: "08:00" }), person("b")],
+        [wpAt(1), wpAt(2), wpAt(3)], { startAnchor: { kind: "departure", time: "08:00" }, intendedDistanceKm: 18 }));
     if (far) {
       const fw = far.warnings.find((w) => w.participantId === "far");
-      // far parks here (fixed t0 can't wait); the approach wording must stay accurate for this case.
       if (fw && /couldn't place/.test(fw.message))
         okH(/too far from the route/.test(fw.message), `R-earliest/far-approach message must name the approach cause (got "${fw.message}")`);
     }
