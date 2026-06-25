@@ -72,6 +72,7 @@ function clearComputed(session: FlockSession): void {
   session.sharedSegments = null;
   session.flockRoute = null;
   session.waypointEtas = null;
+  session.routeWarnings = null;
 }
 
 export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSession> {
@@ -92,6 +93,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     sharedSegments: null,
     flockRoute: null,
     waypointEtas: null,
+    routeWarnings: null,
     gpxPassthrough: null,
   };
   await store.createFlock(session);
@@ -115,6 +117,7 @@ function normalizeSession(session: FlockSession): void {
   if (!session.waypoints) session.waypoints = [];
   if (!session.startAnchor) session.startAnchor = { kind: "auto" };
   if (session.intendedDistanceKm === undefined) session.intendedDistanceKm = null;
+  if (session.routeWarnings === undefined) session.routeWarnings = null;
   // Migrate the old single global lock (lockedAt) to the three section locks.
   if (!session.locks) {
     const wasLocked = (session as unknown as { lockedAt?: string | null }).lockedAt != null;
@@ -272,6 +275,7 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
       session.sharedSegments = action.sharedSegments;
       session.flockRoute = action.flockRoute;
       session.waypointEtas = action.waypointEtas;
+      session.routeWarnings = action.warnings;
       log.info("routes updated", {
         id,
         routes: action.computedRoutes.length,

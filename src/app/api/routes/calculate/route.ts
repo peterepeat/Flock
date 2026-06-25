@@ -71,6 +71,7 @@ export async function POST(request: Request) {
         sharedSegments: result.sharedSegments,
         flockRoute: result.flockRoute,
         waypointEtas: result.waypointEtas,
+        warnings: result.warnings,
         expectedUpdatedAt: basedOn,
       });
       if (!applied.stale) {

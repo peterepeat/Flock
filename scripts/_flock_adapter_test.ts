@@ -41,7 +41,7 @@ function wp(id: string, lat: number, lng: number, stop = 0): FlockWaypoint {
   return { id, location: { lat, lng }, address: id, name: id, stopMinutes: stop };
 }
 function session(participants: Participant[], waypoints: FlockWaypoint[], extra: Partial<FlockSession> = {}): FlockSession {
-  return { id: "t", createdAt: "", updatedAt: "", locks: { run: false, route: false, runners: false }, runnerLocks: {}, unitPreference: "km", startAnchor: { kind: "auto" }, intendedDistanceKm: null, participants, waypoints, computedRoutes: null, sharedSegments: null, flockRoute: null, waypointEtas: null, gpxPassthrough: null, ...extra };
+  return { id: "t", createdAt: "", updatedAt: "", locks: { run: false, route: false, runners: false }, runnerLocks: {}, unitPreference: "km", startAnchor: { kind: "auto" }, intendedDistanceKm: null, participants, waypoints, computedRoutes: null, sharedSegments: null, flockRoute: null, waypointEtas: null, routeWarnings: null, gpxPassthrough: null, ...extra };
 }
 
 async function main() {

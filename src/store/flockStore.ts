@@ -220,6 +220,10 @@ export const useFlockStore = create<FlockState>((set, get) => ({
       session,
       status: "ready",
       lastSyncedUpdatedAt: session.updatedAt,
+      // Seed the warning badges from the PERSISTED warnings so a parked runner's reason
+      // shows on a fresh load (the client only recomputes — and re-fetches warnings — when
+      // routes are null). Null (an un-recomputed legacy session) keeps whatever's in memory.
+      calcWarnings: session.routeWarnings ?? get().calcWarnings,
     });
     return true;
   },

@@ -59,7 +59,7 @@ export function session(participants: Participant[], waypoints: FlockWaypoint[] 
   return {
     id: "t", createdAt: "", updatedAt: "", locks: { run: false, route: false, runners: false }, runnerLocks: {}, unitPreference: "km",
     startAnchor: { kind: "auto" }, intendedDistanceKm: null,
-    participants, waypoints, computedRoutes: null, sharedSegments: null, flockRoute: null, waypointEtas: null, gpxPassthrough: null,
+    participants, waypoints, computedRoutes: null, sharedSegments: null, flockRoute: null, waypointEtas: null, routeWarnings: null, gpxPassthrough: null,
     ...opts,
   };
 }

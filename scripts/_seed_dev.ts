@@ -23,6 +23,7 @@ async function seed(id: string, s: FlockSession) {
     sharedSegments: res.sharedSegments,
     flockRoute: res.flockRoute,
     waypointEtas: res.waypointEtas,
+    routeWarnings: res.warnings,
   };
   const dir = path.join(process.cwd(), ".flock-data");
   await fs.mkdir(dir, { recursive: true });

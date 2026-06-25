@@ -47,6 +47,9 @@ export default function ParticipantList() {
         const editable = !runnersLocked && !runnerLocked;
         const isExpanded = expandedId === p.id;
         const warnings = calcWarnings.filter((w) => w.participantId === p.id).map((w) => w.message);
+        // A parked / unplaceable runner is emitted as a 0-km degenerate route. Surface it as
+        // "couldn't place you" (with the reason) instead of a phantom 0-km teleport schedule.
+        const parked = !!route && route.distanceKm === 0;
         return (
           <li key={p.id}>
             <div
@@ -74,12 +77,14 @@ export default function ParticipantList() {
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="truncate text-sm text-text">{p.name}</span>
-                    {route && (
+                    {route && (parked ? (
+                      <span className="block text-xs text-accent/90">{"Couldn’t place you on this run"}</span>
+                    ) : (
                       <span className="mono block text-xs text-fog">
                         {formatDistance(route.distanceKm, unit)} ·{" "}
                         {route.departureTime}–{route.arrivalTime}
                       </span>
-                    )}
+                    ))}
                   </span>
                 </button>
                 {warnings.length > 0 && <WarningBadge messages={warnings} />}
@@ -93,8 +98,9 @@ export default function ParticipantList() {
                   </button>
                 )}
                 {/* A locked row can't be edited, so surface its GPX right here (no need
-                    to expand the schedule). In edit mode the download lives in the drawer. */}
-                {!editable && route && (
+                    to expand the schedule). In edit mode the download lives in the drawer.
+                    Parked runners have no real route, so no GPX. */}
+                {!editable && route && !parked && (
                   <a
                     href={`/api/gpx/${flockId}/${p.id}`}
                     download
@@ -114,14 +120,23 @@ export default function ParticipantList() {
               </div>
               {isExpanded && (
                 <div className="px-2 pb-2">
-                  <ScheduleView participantId={p.id} />
-                  {route && (
-                    <a
-                      href={`/api/gpx/${flockId}/${p.id}`}
-                      className="mt-2 block rounded-full bg-together px-4 py-2 text-center text-sm font-medium text-[#0c1413] hover:brightness-110"
-                    >
-                      Download your route
-                    </a>
+                  {parked ? (
+                    <p className="rounded-lg border border-accent/25 bg-surface-mid px-3 py-2 text-xs leading-snug text-text">
+                      {warnings[0] ??
+                        "We couldn’t place you on this run — your start may be too far to reach the flock within your time window. Try moving your start closer or widening the window."}
+                    </p>
+                  ) : (
+                    <>
+                      <ScheduleView participantId={p.id} />
+                      {route && (
+                        <a
+                          href={`/api/gpx/${flockId}/${p.id}`}
+                          className="mt-2 block rounded-full bg-together px-4 py-2 text-center text-sm font-medium text-[#0c1413] hover:brightness-110"
+                        >
+                          Download your route
+                        </a>
+                      )}
+                    </>
                   )}
                 </div>
               )}

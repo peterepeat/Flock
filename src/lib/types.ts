@@ -135,6 +135,9 @@ export interface FlockSession {
   sharedSegments: SharedSegment[] | null;
   flockRoute: GeoJSON.LineString | null; // the shared backbone spine, for the map
   waypointEtas: Record<string, string> | null; // waypointId → "HH:MM" the flock passes
+  // Per-runner calc warnings (e.g. "couldn't place you …"), persisted alongside the routes
+  // so the explanation survives a page reload — the client only recomputes when routes are null.
+  routeWarnings: { participantId: string; message: string }[] | null;
   // GPX round-trip: verbatim top-level elements from an imported GPX that we
   // didn't consume (foreign metadata, extra tracks/routes, POI waypoints, gpx
   // extensions), re-emitted on export so nothing is lost. Null when never imported.
@@ -185,6 +188,7 @@ export type PatchAction =
       sharedSegments: SharedSegment[];
       flockRoute: GeoJSON.LineString | null;
       waypointEtas: Record<string, string> | null;
+      warnings: { participantId: string; message: string }[];
       // The session.updatedAt these routes were computed from. If the plan has
       // changed since (a waypoint/participant edit landed during the calc), the
       // routes are stale and must NOT overwrite the newer plan — they'd silently
