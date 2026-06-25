@@ -11,9 +11,9 @@ import WaypointsSection from "@/components/Panel/WaypointsSection";
 import LockToggle from "@/components/ui/LockToggle";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { setSectionLock } from "@/lib/flockApi";
-import type { FlockSession, LockSection } from "@/lib/types";
+import type { FlockSession, LockSection, Unit } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
-import { useFlockStore } from "@/store/flockStore";
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 // Shared label + toggle wiring for a section's advisory lock.
 const SECTION_TITLE: Record<LockSection, string> = { run: "The run", route: "The route", runners: "The runners" };
@@ -44,13 +44,13 @@ function clockLabel(hhmm: string): string {
 }
 
 // One-line summaries — desktop concertina chips + mobile tab subtitles.
-function runSummary(s: FlockSession): string {
+function runSummary(s: FlockSession, unit: Unit): string {
   const a = s.startAnchor;
   const time = a.kind === "auto" ? "7am" : clockLabel(a.time);
   // Only show distance when it's an explicit value — a bare "Auto" token next to a concrete
   // time reads ambiguously, so omit it when the distance is left automatic.
   return s.intendedDistanceKm != null
-    ? `${time} · ${formatDistance(s.intendedDistanceKm, s.unitPreference)}`
+    ? `${time} · ${formatDistance(s.intendedDistanceKm, unit)}`
     : time;
 }
 function routeSummary(s: FlockSession): string {
@@ -78,6 +78,7 @@ function DesktopPanel() {
   const calcError = useFlockStore((s) => s.calcError);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lockFor = useSectionLock();
+  const unit = useUnit();
 
   const routeLocked = session?.locks?.route ?? false;
   const runnersLocked = session?.locks?.runners ?? false;
@@ -104,7 +105,7 @@ function DesktopPanel() {
         ) : (
           <div className="space-y-3">
             {session && (
-              <Section title="The run" summary={runSummary(session)} sectionKey="run" lock={lockFor("run")}>
+              <Section title="The run" summary={runSummary(session, unit)} sectionKey="run" lock={lockFor("run")}>
                 <RunSettings />
               </Section>
             )}
@@ -177,6 +178,7 @@ function MobilePanel() {
   const placingWaypoint = useFlockStore((s) => s.placingWaypoint);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lockFor = useSectionLock();
+  const unit = useUnit();
 
   const runnersLocked = session?.locks?.runners ?? false;
   const placing = placingPin || placingFinish || placingWaypoint;
@@ -206,7 +208,7 @@ function MobilePanel() {
           <div ref={scrollRef} className="flock-scroll flex-1 overflow-y-auto px-5 py-4">
             {activeTab === "run" && (
               <>
-                <TabHeader title="The run" subtitle={runSummary(session)} lock={lockFor("run")} />
+                <TabHeader title="The run" subtitle={runSummary(session, unit)} lock={lockFor("run")} />
                 <RunSettings />
               </>
             )}

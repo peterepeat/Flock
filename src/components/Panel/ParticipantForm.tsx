@@ -14,9 +14,8 @@ import {
   updateParticipant,
 } from "@/lib/flockApi";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
-import { createLogger } from "@/lib/logger";
-import type { LatLng, LocationPin, Participant, ParticipantConstraints, Unit } from "@/lib/types";
-import { recordParticipantEdit, uSetUnit } from "@/lib/undoableEdits";
+import type { LatLng, LocationPin, Participant, ParticipantConstraints } from "@/lib/types";
+import { recordParticipantEdit } from "@/lib/undoableEdits";
 import {
   DISTANCE_MAX_KM,
   DISTANCE_MIN_KM,
@@ -27,9 +26,7 @@ import {
   secToTime,
   timeToSec,
 } from "@/lib/units";
-import { useFlockStore } from "@/store/flockStore";
-
-const log = createLogger("participant-form");
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 const TIME_MIN = 4 * 60; // 04:00
 const TIME_MAX = 22 * 60; // 22:00
@@ -118,9 +115,8 @@ export default function ParticipantForm() {
   const setDraftFinish = useFlockStore((s) => s.setDraftFinish);
   const setPendingFinish = useFlockStore((s) => s.setPendingFinish);
 
-  const unit: Unit = session?.unitPreference ?? "km";
+  const unit = useUnit();
   const waypoints = useMemo(() => session?.waypoints ?? [], [session]);
-  const isFirstParticipant = (session?.participants.length ?? 0) === 0 && !editingId;
 
   const existing = useMemo(
     () => session?.participants.find((p) => p.id === editingId) ?? null,
@@ -283,20 +279,6 @@ export default function ParticipantForm() {
 
   return (
     <div className="space-y-6">
-      {/* Units (first participant sets it for everyone) */}
-      <div className="flex items-center justify-between rounded-lg bg-surface px-3 py-2">
-        <span className="text-xs text-text-dim">This flock is using</span>
-        {isFirstParticipant ? (
-          <Toggle<Unit>
-            options={[{ value: "km", label: "km" }, { value: "miles", label: "miles" }]}
-            value={unit}
-            onChange={async (u) => { try { await uSetUnit(flockId, u); } catch (err) { log.error("set unit failed", { error: String(err) }); } }}
-          />
-        ) : (
-          <span className="mono text-sm text-text">{unit}</span>
-        )}
-      </div>
-
       {/* Name */}
       <Field label="What should we call you?">
         <input
@@ -312,7 +294,10 @@ export default function ParticipantForm() {
       <Field label="Where will you start?" optional>
         <PinPicker
           mode={draft.start.mode}
-          onMode={(m) => setStart({ mode: m })}
+          // Switching INTO "at a waypoint" defaults the id to the first option (what the select shows)
+          // — otherwise, with one waypoint there's nothing to change, onChange never fires, and the pin
+          // saves as "auto" (draftToPin needs a truthy waypointId).
+          onMode={(m) => setStart(m === "waypoint" ? { mode: m, waypointId: draft.start.waypointId || waypoints[0]?.id || "" } : { mode: m })}
           waypoints={waypoints.map((w, i) => ({ id: w.id, label: `${i + 1}. ${w.name}` }))}
           waypointId={draft.start.waypointId}
           onWaypoint={(id) => setStart({ waypointId: id })}
@@ -328,7 +313,7 @@ export default function ParticipantForm() {
       <Field label="Where will you finish?" optional>
         <PinPicker
           mode={draft.finish.mode}
-          onMode={(m) => setFinish({ mode: m })}
+          onMode={(m) => setFinish(m === "waypoint" ? { mode: m, waypointId: draft.finish.waypointId || finishWaypoints[0]?.w.id || "" } : { mode: m })}
           waypoints={finishWaypoints.map(({ w, i }) => ({ id: w.id, label: `${i + 1}. ${w.name}` }))}
           waypointId={draft.finish.waypointId}
           onWaypoint={(id) => setFinish({ waypointId: id })}

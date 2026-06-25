@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 import { createLogger } from "@/lib/logger";
 import type { CalcWarning } from "@/lib/routing-types";
-import type { FlockSession, LatLng } from "@/lib/types";
+import type { FlockSession, LatLng, Unit } from "@/lib/types";
 
 const log = createLogger("history");
 
@@ -114,6 +114,12 @@ interface FlockState {
   setHoveredWaypoint: (waypointId: string | null) => void;
   setHoveredSegment: (seg: { participantId: string; index: number } | null) => void;
   setActiveTab: (tab: ActiveTab) => void;
+  // The reader's PREFERRED display unit (km/miles) — a per-USER choice in localStorage, NOT a property
+  // of the flock (the data is always stored in km; this only changes formatting). null = no preference
+  // yet → fall back to the flock's unit. Use the `useUnit()` selector for the effective value.
+  displayUnit: Unit | null;
+  setDisplayUnit: (u: Unit) => void;
+  hydrateDisplayUnit: () => void; // read the saved preference once on mount (client-only)
   setMapView: (view: {
     center: LatLng;
     bounds: { minLat: number; minLng: number; maxLat: number; maxLng: number };
@@ -149,6 +155,7 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   mapCenter: null,
   mapBounds: null,
   activeTab: "run",
+  displayUnit: null,
 
   calcStatus: "idle",
   calcWarnings: [],
@@ -284,8 +291,21 @@ export const useFlockStore = create<FlockState>((set, get) => ({
   setHoveredWaypoint: (waypointId) => set({ hoveredWaypointId: waypointId }),
   setHoveredSegment: (seg) => set({ hoveredSegment: seg }),
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setDisplayUnit: (u) => {
+    try { localStorage.setItem("flock.displayUnit", u); } catch { /* private mode / SSR — keep it in memory only */ }
+    set({ displayUnit: u });
+  },
+  hydrateDisplayUnit: () => {
+    try {
+      const v = localStorage.getItem("flock.displayUnit");
+      if (v === "km" || v === "miles") set({ displayUnit: v });
+    } catch { /* no localStorage — stay on the flock default */ }
+  },
   setMapView: ({ center, bounds }) => set({ mapCenter: center, mapBounds: bounds }),
   setCalcStatus: (status) => set({ calcStatus: status }),
   setCalcWarnings: (warnings) => set({ calcWarnings: warnings }),
   setCalcError: (message) => set({ calcError: message }),
 }));
+
+/** The effective display unit: the reader's saved preference if set, else the flock's, else km. */
+export const useUnit = (): Unit => useFlockStore((s) => s.displayUnit ?? s.session?.unitPreference ?? "km");

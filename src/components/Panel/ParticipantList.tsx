@@ -7,7 +7,7 @@ import LockToggle from "@/components/ui/LockToggle";
 import { initial } from "@/lib/colors";
 import { setRunnerLock } from "@/lib/flockApi";
 import { formatDistance } from "@/lib/units";
-import { useFlockStore } from "@/store/flockStore";
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 export default function ParticipantList() {
   const flockId = useFlockStore((s) => s.flockId)!;
@@ -19,6 +19,7 @@ export default function ParticipantList() {
   const expandedId = useFlockStore((s) => s.expandedParticipantId);
   const setExpanded = useFlockStore((s) => s.setExpanded);
   const calcWarnings = useFlockStore((s) => s.calcWarnings);
+  const unit = useUnit();
   // No ownership anymore — anyone may edit a runner unless the runners section or that
   // runner is locked. Editing a runner reverts to the form (which holds "Leave the flock").
   const runnersLocked = session?.locks?.runners ?? false;
@@ -75,7 +76,7 @@ export default function ParticipantList() {
                     <span className="truncate text-sm text-text">{p.name}</span>
                     {route && (
                       <span className="mono block text-xs text-fog">
-                        {formatDistance(route.distanceKm, session.unitPreference)} ·{" "}
+                        {formatDistance(route.distanceKm, unit)} ·{" "}
                         {route.departureTime}–{route.arrivalTime}
                       </span>
                     )}

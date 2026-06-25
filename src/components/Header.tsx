@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
-import { useFlockStore } from "@/store/flockStore";
+import type { Unit } from "@/lib/types";
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 const log = createLogger("header");
 
@@ -18,8 +19,17 @@ export default function Header() {
   const historyBusy = useFlockStore((s) => s.historyBusy);
   const undo = useFlockStore((s) => s.undo);
   const redo = useFlockStore((s) => s.redo);
+  const unit = useUnit();
+  const setDisplayUnit = useFlockStore((s) => s.setDisplayUnit);
+  const hydrateDisplayUnit = useFlockStore((s) => s.hydrateDisplayUnit);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // Pull the reader's saved km/mi choice from localStorage once on mount (client-only, so it can't run
+  // during SSR and can't mismatch hydration — the first render uses the flock's unit until this lands).
+  useEffect(() => {
+    hydrateDisplayUnit();
+  }, [hydrateDisplayUnit]);
 
   // "Lock the plan" = all three section locks set. (Per-runner locks are independent
   // and left alone by the global toggle, so a self-locked runner survives unlock.)
@@ -88,6 +98,20 @@ export default function Header() {
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Display unit — the reader's own km/mi preference (localStorage), not a flock setting. */}
+        <div className="flex items-center rounded-full border border-white/10 p-0.5 text-xs" role="group" aria-label="Display units">
+          {(["km", "miles"] as Unit[]).map((u) => (
+            <button
+              key={u}
+              type="button"
+              onClick={() => setDisplayUnit(u)}
+              aria-pressed={unit === u}
+              className={`rounded-full px-2.5 py-1 transition ${unit === u ? "bg-surface-lift text-text" : "text-fog hover:text-text"}`}
+            >
+              {u === "km" ? "km" : "mi"}
+            </button>
+          ))}
+        </div>
         <div className="flex items-center gap-0.5">
           <button
             type="button"

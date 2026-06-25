@@ -25,7 +25,7 @@ import { insertionIndex } from "@/lib/routeEdit";
 import type { FlockWaypoint, LatLng, LocationPin } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { isMobileViewport } from "@/lib/viewport";
-import { useFlockStore } from "@/store/flockStore";
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 const log = createLogger("map");
 
@@ -451,6 +451,7 @@ function FitBounds({ points }: { points: LatLng[] }) {
 
 export default function MapCanvas() {
   const session = useFlockStore((s) => s.session);
+  const unit = useUnit();
   const hovered = useFlockStore((s) => s.hoveredParticipantId);
   const selected = useFlockStore((s) => s.selectedParticipantId);
   // The focused runner: a persistent click-selection, else the transient hover.
@@ -787,7 +788,7 @@ export default function MapCanvas() {
             >
               <Tooltip sticky>
                 <span className="mono">{p?.name}</span> ·{" "}
-                {formatDistance(r.distanceKm, session!.unitPreference)} · {r.departureTime}–
+                {formatDistance(r.distanceKm, unit)} · {r.departureTime}–
                 {r.arrivalTime}
               </Tooltip>
             </Polyline>
@@ -889,7 +890,7 @@ export default function MapCanvas() {
                 <span className="mono">{p.name}</span>
                 {(() => {
                   const r = routes.find((x) => x.participantId === p.id);
-                  return r ? ` · ${formatDistance(r.distanceKm, session!.unitPreference)}` : "";
+                  return r ? ` · ${formatDistance(r.distanceKm, unit)}` : "";
                 })()}
                 {canDrag ? " · tap to edit · drag to move" : ""}
               </Tooltip>

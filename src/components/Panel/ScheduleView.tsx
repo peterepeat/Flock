@@ -1,10 +1,17 @@
 "use client";
 
-import { type KeyboardEvent as ReactKeyboardEvent, useEffect } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
 
 import { initial } from "@/lib/colors";
+import { distanceMeters } from "@/lib/geo";
+import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { formatDistance, formatDuration, formatPaceShort } from "@/lib/units";
-import { useFlockStore } from "@/store/flockStore";
+import { useFlockStore, useUnit } from "@/store/flockStore";
+
+// Cache reverse-geocoded auto-endpoint names by ~10m cell so re-expanding a schedule (or two runners
+// ending at the same spot) never re-hits the geocoder. Module-level so it survives remounts.
+const placeCache = new Map<string, string | null>();
+const shortPlace = (s: string) => s.split(",")[0].trim() || s;
 
 /**
  * Per-participant plain-English schedule. Conversational throughout — "flocking
@@ -16,28 +23,56 @@ export default function ScheduleView({ participantId }: { participantId: string 
   const calcError = useFlockStore((s) => s.calcError);
   const hoveredSegment = useFlockStore((s) => s.hoveredSegment);
   const setHoveredSegment = useFlockStore((s) => s.setHoveredSegment);
+  const unit = useUnit();
 
   // Drop any segment emphasis when this schedule collapses, so the map doesn't keep a
   // stretch lit with no row under the pointer.
   useEffect(() => () => setHoveredSegment(null), [setHoveredSegment]);
 
-  if (!session) return null;
+  // The runner + their computed route + its arc endpoints (any may be absent until the first calc).
+  const participant = session?.participants.find((p) => p.id === participantId);
+  const route = session?.computedRoutes?.find((r) => r.participantId === participantId);
+  const startPt = route?.waypoints?.[0];
+  const finishPt = route?.waypoints?.[3];
 
-  const participant = session.participants.find((p) => p.id === participantId);
-  const route = session.computedRoutes?.find((r) => r.participantId === participantId);
-  const unit = session.unitPreference;
+  // Reverse-geocode an AUTO end the engine placed OFF any waypoint, lazily + cached, so "Home" becomes
+  // the real place (where you peel off, a loop's base). Keyed on the pins + endpoints so it re-runs only
+  // when those change — NOT on every poll (a fresh session object each time would thrash setState).
+  const [geo, setGeo] = useState<{ start: string | null; finish: string | null }>({ start: null, finish: null });
+  const geoKey = `${participantId}|${participant?.startPin.kind}|${participant?.finishPin.kind}|${startPt?.lat},${startPt?.lng}|${finishPt?.lat},${finishPt?.lng}`;
+  useEffect(() => {
+    if (!session || !participant || !startPt || !finishPt) return;
+    const offWp = (pt: { lat: number; lng: number }) => !session.waypoints.some((w) => distanceMeters(w.location, pt) < 140);
+    const jobs: Array<["start" | "finish", { lat: number; lng: number }]> = [];
+    if (participant.startPin.kind === "auto" && offWp(startPt)) jobs.push(["start", startPt]);
+    if (participant.finishPin.kind === "auto" && offWp(finishPt)) jobs.push(["finish", finishPt]);
+    if (jobs.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      jobs.map(async ([which, pt]): Promise<["start" | "finish", string | null]> => {
+        const key = `${pt.lat.toFixed(4)},${pt.lng.toFixed(4)}`;
+        if (!placeCache.has(key)) placeCache.set(key, pinLabel(await reverseGeocode(pt.lat, pt.lng)));
+        const label = placeCache.get(key) ?? null;
+        return [which, label ? shortPlace(label) : null];
+      }),
+    ).then((res) => {
+      if (!cancelled) setGeo((prev) => ({ ...prev, ...Object.fromEntries(res) }));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geoKey]);
+
+  if (!session || !participant) return null;
 
   const colorOf = (id: string) => session.participants.find((p) => p.id === id)?.color ?? "#fff";
   const nameOf = (id: string) => session.participants.find((p) => p.id === id)?.name ?? "someone";
 
-  if (!participant) return null;
-
-  // The place name we already looked up for a runner's start/finish — the address of a manual pin,
-  // or the waypoint's name — trimmed to its leading segment ("13 Hawthorn Rd, Northcote" → "13
-  // Hawthorn Rd") so it reads cleanly in a schedule line. An AUTO end has no chosen place, so it
-  // keeps the generic "home". Used to say "Set off from the Convent" instead of "Set off from home".
-  const shortPlace = (s: string) => s.split(",")[0].trim() || s;
-  const placeName = (pin: typeof participant.startPin): string | null => {
+  // The place name to show for a runner's start/finish, trimmed to its leading segment ("13 Hawthorn
+  // Rd, Northcote" → "13 Hawthorn Rd"). A MANUAL pin's address or a WAYPOINT's name comes off the plan;
+  // an AUTO end has no chosen place — name it the waypoint it landed on (you finish WITH the flock at its
+  // destination), a loop home borrows the start's name, else the geo lookup above fills it in, else "home".
+  const near = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => distanceMeters(a, b) < 140;
+  const pinName = (pin: typeof participant.startPin): string | null => {
     if (pin.kind === "manual") return shortPlace(pin.address);
     if (pin.kind === "waypoint") {
       const w = session.waypoints.find((x) => x.id === pin.waypointId);
@@ -45,8 +80,19 @@ export default function ScheduleView({ participantId }: { participantId: string 
     }
     return null;
   };
-  const startName = placeName(participant.startPin);
-  const finishName = placeName(participant.finishPin);
+  const waypointAt = (pt?: { lat: number; lng: number }): string | null => {
+    if (!pt) return null;
+    const w = session.waypoints.find((x) => near(x.location, pt));
+    return w ? shortPlace(w.name) : null;
+  };
+  // priority: a chosen pin → a waypoint it lands on → its reverse-geocoded place → (finish only) a loop
+  // back to the start → the generic "home".
+  const startName = pinName(participant.startPin) ?? waypointAt(startPt) ?? geo.start;
+  const finishName =
+    pinName(participant.finishPin) ??
+    waypointAt(finishPt) ??
+    geo.finish ??
+    (startName && startPt && finishPt && near(startPt, finishPt) ? startName : null);
 
   if (!route) {
     // A named session-level error (e.g. no geography to route) is shown above the list — don't
