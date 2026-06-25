@@ -16,6 +16,7 @@ import {
 
 import PartyController from "@/components/Party/PartyController";
 import { initial } from "@/lib/colors";
+import { isPartyActive } from "@/lib/party/simulate";
 import { renameWaypoints } from "@/lib/flockApi";
 import { waypointNameIsAuto } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
@@ -758,12 +759,11 @@ export default function MapCanvas() {
             const p = participants.find((x) => x.id === r.participantId);
             const color = p?.color ?? "#fff";
             const isFocused = focus === r.participantId;
-            // Faint at rest; the focused runner pops; the rest recede further when
-            // one is focused so the focused line reads cleanly. At-rest lines are a
-            // touch thicker (5) and slightly more opaque than the receded ones (3)
-            // so individual feeder paths to/from the flock read when nothing is selected.
-            const opacity = isFocused ? 1 : focus ? 0.16 : 0.42;
-            const weight = isFocused ? 6 : focus ? 3 : 5;
+            // Clearly visible at rest; the focused runner still pops (heaviest + its dark casing);
+            // the rest recede when one is focused but stay legible. There's plenty of headroom before
+            // the non-selected lines distract from the selected one, so keep them readable.
+            const opacity = isFocused ? 1 : focus ? 0.4 : 0.7;
+            const weight = isFocused ? 7 : focus ? 4 : 5.5;
             return (
             <Polyline
               key={r.participantId}
@@ -971,8 +971,8 @@ export default function MapCanvas() {
         </div>
       )}
 
-      {/* Legend */}
-      {participants.length > 0 && <Legend />}
+      {/* Legend — hidden during the party (we already know who's who) so the replay reads cleanly. */}
+      {participants.length > 0 && !isPartyActive(session) && <Legend />}
     </div>
   );
 }

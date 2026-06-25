@@ -9,6 +9,7 @@ import { FlockApiError, renameWaypoints } from "@/lib/flockApi";
 import { buildFlockGpx, parseFlockGpx, waypointNameIsAuto } from "@/lib/flockGpx";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
 import { createLogger } from "@/lib/logger";
+import { isPartyActive } from "@/lib/party/simulate";
 import type { FlockWaypoint, LatLng } from "@/lib/types";
 import {
   uAddWaypoint,
@@ -123,6 +124,12 @@ export default function WaypointsSection() {
   const editorKey = editor.mode === "edit" ? `edit:${editor.id}` : editor.mode;
 
   const locked = session?.locks?.route ?? false;
+  // When the flock party is enabled (fully locked), Export GPX mirrors the runner-row GPX link —
+  // same download icon + medium weight — so the two read as the same affordance.
+  const partyOn = isPartyActive(session);
+  const gpxBtnClass = partyOn
+    ? "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-text-dim transition hover:bg-surface-lift hover:text-together"
+    : "text-fog hover:text-text";
   const waypoints = session?.waypoints ?? [];
   const waypointEtas = session?.waypointEtas ?? {};
 
@@ -405,7 +412,8 @@ export default function WaypointsSection() {
               </button>
             )}
             {waypoints.length > 0 && (
-              <button type="button" onClick={handleExport} className="text-fog hover:text-text">
+              <button type="button" onClick={handleExport} className={gpxBtnClass}>
+                {partyOn && <DownloadIcon />}
                 Export GPX
               </button>
             )}
@@ -598,6 +606,17 @@ function GripIcon() {
       <circle cx="8" cy="8" r="1.3" />
       <circle cx="2" cy="13" r="1.3" />
       <circle cx="8" cy="13" r="1.3" />
+    </svg>
+  );
+}
+
+/** Download glyph — identical to ParticipantList's runner GPX icon, so the party Export GPX matches. */
+function DownloadIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 2.5v7.5" />
+      <path d="M4.8 7 8 10.2 11.2 7" />
+      <path d="M3 13h10" />
     </svg>
   );
 }

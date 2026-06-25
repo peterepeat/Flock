@@ -119,7 +119,6 @@ export default function RunSettings() {
                 <option key={w.id} value={w.id}>{i + 1}. {w.name}</option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-fog">We work back everyone&apos;s departure so the flock reaches it by then.</p>
           </>
         ))}
       </Field>
@@ -133,7 +132,6 @@ export default function RunSettings() {
         {distance != null && (
           <div className="mt-2">
             <Slider min={DISTANCE_MIN_KM} max={DISTANCE_MAX_KM} value={distance} onChange={(v) => save({ intendedDistanceKm: v }, true)} format={(v) => formatDistance(v, unit)} />
-            <p className="mt-1 text-xs text-fog">Otherwise we use the length of your waypoints (or 10 km).</p>
           </div>
         )}
       </Field>

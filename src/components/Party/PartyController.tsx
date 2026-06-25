@@ -10,8 +10,8 @@ import { initial } from "@/lib/colors";
 import { unlockFlock } from "@/lib/flockApi";
 import { buildPartySim, flockGroups, isPartyActive, type PartyFlag, type PartySim, type RunnerFrame } from "@/lib/party/simulate";
 import type { ComputedRoute, Participant } from "@/lib/types";
-import { secToTime } from "@/lib/units";
-import { useFlockStore } from "@/store/flockStore";
+import { formatPace, secToTime } from "@/lib/units";
+import { useFlockStore, useUnit } from "@/store/flockStore";
 
 import { dancerFor, phraseFor } from "./phrases";
 
@@ -128,6 +128,7 @@ function Stage({
   map: L.Map;
   onClose: () => void;
 }) {
+  const unit = useUnit();
   // Stable (memo on the frozen sim) so positionAll / the rAF loop never churn.
   const dancers = useMemo(() => sim.tracks.filter((t) => !t.parked), [sim]);
   const colorById = useMemo(() => {
@@ -428,6 +429,14 @@ function Stage({
   // Current entities (solo runners + merged flock groups) for this readout tick.
   const { entities, frames } = groupAt(clockSec);
   entitiesRef.current = entities;
+  // Pace shown under each avatar. A merged flock shows its lead's pace = the flock's pace (slowest-wins,
+  // so they move together). Reads schedule OUTPUT only (frame.paceSecPerKm), formatted per the unit pref.
+  const paceText = (f: RunnerFrame): string | undefined =>
+    f.state === "running" && f.paceSecPerKm != null
+      ? formatPace(f.paceSecPerKm, unit)
+      : f.state === "resting"
+        ? "resting"
+        : undefined;
 
   return (
     <>
@@ -453,6 +462,7 @@ function Stage({
             key={e.key}
             frame={frames[e.lead]}
             count={e.ids.length}
+            pace={paceText(frames[e.lead])}
             bubble={e.ids.map((id) => bubbles[id]?.text).find(Boolean)}
             anchorRef={refFor(e.key)}
           />
@@ -463,6 +473,7 @@ function Stage({
             color={colorById[e.id] ?? "#888"}
             name={nameById[e.id] ?? "Runner"}
             dancer={dancerFor(avatarIndex[e.id] ?? 0)}
+            pace={paceText(frames[e.id])}
             bubble={bubbles[e.id]?.text}
             anchorRef={refFor(e.key)}
           />
@@ -545,6 +556,7 @@ function Avatar({
   color,
   name,
   dancer,
+  pace,
   bubble,
   anchorRef,
 }: {
@@ -552,6 +564,7 @@ function Avatar({
   color: string;
   name: string;
   dancer: string;
+  pace?: string;
   bubble?: string;
   anchorRef: (el: HTMLDivElement | null) => void;
 }) {
@@ -574,6 +587,7 @@ function Avatar({
           <span className="party-avatar__badge">{initial(name)}</span>
         </div>
         <div className="party-avatar__name mono">{name}</div>
+        {pace && <div className="party-avatar__pace mono">{pace}</div>}
       </div>
     </div>
   );
@@ -585,11 +599,13 @@ function Avatar({
 function GroupAvatar({
   frame,
   count,
+  pace,
   bubble,
   anchorRef,
 }: {
   frame: RunnerFrame;
   count: number;
+  pace?: string;
   bubble?: string;
   anchorRef: (el: HTMLDivElement | null) => void;
 }) {
@@ -604,6 +620,7 @@ function GroupAvatar({
           <span className="party-avatar__badge party-group__badge">{count}</span>
         </div>
         <div className="party-avatar__name mono">Flock ×{count}</div>
+        {pace && <div className="party-avatar__pace mono">{pace}</div>}
       </div>
     </div>
   );

@@ -48,6 +48,8 @@ export interface RunnerFrame {
   companions: string[]; // who they're flocking with right now (participant ids)
   /** 0→1 progress through the whole personal run (start→finish), for trails / fade-in. */
   progress: number;
+  /** Current running pace (sec/km) on the active leg; null when resting / not yet running / done. */
+  paceSecPerKm: number | null;
 }
 
 export type PartyEventKind =
@@ -160,6 +162,7 @@ interface Leg {
   m1: number;
   rest: boolean;
   companions: string[];
+  paceSecPerKm: number | null; // the leg's running pace (null on a rest)
 }
 
 function buildTrack(route: ComputedRoute): RunnerTrack {
@@ -178,10 +181,13 @@ function buildTrack(route: ComputedRoute): RunnerTrack {
     const t0 = timeToSec(seg.startTime);
     const t1 = timeToSec(seg.endTime);
     if (seg.type === "rest") {
-      legs.push({ t0, t1, m0: cumM, m1: cumM, rest: true, companions: seg.companionIds });
+      legs.push({ t0, t1, m0: cumM, m1: cumM, rest: true, companions: seg.companionIds, paceSecPerKm: null });
     } else {
       const m1 = cumM + seg.distanceKm * 1000 * scale;
-      legs.push({ t0, t1, m0: cumM, m1, rest: false, companions: seg.companionIds });
+      // Pace comes straight off the schedule OUTPUT (never the engine); fall back to the leg's own
+      // duration/distance if a run segment is somehow missing its pace.
+      const paceSecPerKm = seg.paceSecPerKm ?? (seg.distanceKm > 0 ? (t1 - t0) / seg.distanceKm : null);
+      legs.push({ t0, t1, m0: cumM, m1, rest: false, companions: seg.companionIds, paceSecPerKm });
       cumM = m1;
     }
   }
@@ -195,14 +201,14 @@ function buildTrack(route: ComputedRoute): RunnerTrack {
   function frameAt(t: number): RunnerFrame {
     const progress = Math.max(0, Math.min(1, (t - startSec) / span));
     if (parked) {
-      return { pos: start, headingDeg: 0, state: t < startSec ? "before" : t >= finishSec ? "finished" : "running", moving: false, companions: [], progress };
+      return { pos: start, headingDeg: 0, state: t < startSec ? "before" : t >= finishSec ? "finished" : "running", moving: false, companions: [], progress, paceSecPerKm: null };
     }
     if (t <= startSec) {
       const h = locate(idx, 0);
-      return { pos: start, headingDeg: h.headingDeg, state: "before", moving: false, companions: [], progress: 0 };
+      return { pos: start, headingDeg: h.headingDeg, state: "before", moving: false, companions: [], progress: 0, paceSecPerKm: null };
     }
     if (t >= finishSec) {
-      return { pos: finish, headingDeg: locate(idx, idx.total).headingDeg, state: "finished", moving: false, companions: [], progress: 1 };
+      return { pos: finish, headingDeg: locate(idx, idx.total).headingDeg, state: "finished", moving: false, companions: [], progress: 1, paceSecPerKm: null };
     }
     // Active leg: the last one whose window has opened (covers minute-rounding gaps).
     let leg = legs[0];
@@ -212,12 +218,12 @@ function buildTrack(route: ComputedRoute): RunnerTrack {
     }
     if (leg.rest) {
       const h = locate(idx, leg.m0);
-      return { pos: h.pos, headingDeg: h.headingDeg, state: "resting", moving: false, companions: leg.companions, progress };
+      return { pos: h.pos, headingDeg: h.headingDeg, state: "resting", moving: false, companions: leg.companions, progress, paceSecPerKm: null };
     }
     const f = leg.t1 > leg.t0 ? Math.max(0, Math.min(1, (t - leg.t0) / (leg.t1 - leg.t0))) : 1;
     const m = leg.m0 + (leg.m1 - leg.m0) * f;
     const h = locate(idx, m);
-    return { pos: h.pos, headingDeg: h.headingDeg, state: "running", moving: leg.m1 - leg.m0 > MOVE_EPS_M, companions: leg.companions, progress };
+    return { pos: h.pos, headingDeg: h.headingDeg, state: "running", moving: leg.m1 - leg.m0 > MOVE_EPS_M, companions: leg.companions, progress, paceSecPerKm: leg.paceSecPerKm };
   }
 
   return { id: route.participantId, startSec, finishSec, start, finish, hasStops, parked, frameAt };

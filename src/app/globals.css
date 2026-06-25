@@ -448,6 +448,20 @@ input[type="range"]::-moz-range-thumb {
   white-space: nowrap;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
+/* Current pace, stacked just beneath the name — smaller + dimmer so the name still leads. */
+.party-avatar__pace {
+  position: absolute;
+  top: calc(100% + 19px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(20, 20, 26, 0.7);
+  padding: 0 5px;
+  border-radius: 7px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
 
 /* Merged "flock together" group avatar — a bigger rainbow disco disc with a head
    count, so an overlap of runners reads as a crowd, not one dancer hiding the rest. */
@@ -478,6 +492,9 @@ input[type="range"]::-moz-range-thumb {
 .party-group .party-avatar__name {
   color: var(--together);
   font-weight: 600;
+}
+.party-group .party-avatar__pace {
+  color: var(--together);
 }
 /* Per-state motion. */
 .party-avatar.is-moving .party-avatar__disc {
