@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
 import { useFlockStore } from "@/store/flockStore";
@@ -66,6 +67,7 @@ export default function Header() {
   }
 
   async function toggleLock() {
+    if (busy) return;
     setBusy(true);
     try {
       const updated = fullyLocked ? await unlockFlock(flockId) : await lockFlock(flockId);
@@ -119,12 +121,15 @@ export default function Header() {
           type="button"
           onClick={toggleLock}
           disabled={busy}
-          className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition disabled:opacity-60 ${
+          className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition disabled:opacity-60 ${
             fullyLocked
               ? "border border-white/10 text-text hover:bg-surface-lift"
               : "bg-together text-[#0c1413] hover:brightness-110"
           }`}
         >
+          <span className={fullyLocked ? "text-accent" : ""}>
+            <LockGlyph locked={fullyLocked} />
+          </span>
           {fullyLocked ? "Unlock to make changes" : "Lock the plan"}
         </button>
       </div>

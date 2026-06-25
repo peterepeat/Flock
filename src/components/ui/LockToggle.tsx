@@ -31,9 +31,16 @@ export default function LockToggle({
         locked ? "text-accent hover:bg-accent/15" : "text-fog hover:bg-surface-lift hover:text-text"
       } ${className}`}
     >
-      {locked ? <ClosedLock /> : <OpenLock />}
+      <LockGlyph locked={locked} />
     </button>
   );
+}
+
+/** The bare padlock glyph (closed when locked, open when not) — `currentColor`, so the caller
+ * tints it: accent/orange when locked, faded when open. Shared by the section/runner toggles and
+ * the global "Lock the plan" button so the lock state reads the same everywhere. */
+export function LockGlyph({ locked }: { locked: boolean }) {
+  return locked ? <ClosedLock /> : <OpenLock />;
 }
 
 function ClosedLock() {

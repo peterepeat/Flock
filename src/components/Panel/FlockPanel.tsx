@@ -129,12 +129,11 @@ function DesktopPanel() {
                 defaultOpen={session.participants.length < 2}
                 lock={lockFor("runners")}
               >
+                {runnersLocked && (
+                  <p className="mb-3 text-xs text-fog">The runners are locked. Tap the lock above to make changes.</p>
+                )}
                 <ParticipantList />
-                {runnersLocked ? (
-                  <div className="mt-3 rounded-lg bg-surface-mid px-3 py-2.5 text-sm text-text-dim">
-                    The runners are locked. Unlock the section to add or change people.
-                  </div>
-                ) : (
+                {!runnersLocked && (
                   <button
                     type="button"
                     onClick={openAddForm}
@@ -230,12 +229,11 @@ function MobilePanel() {
               ) : (
                 <>
                   <TabHeader title="The runners" subtitle={runnersSummary(session)} lock={lockFor("runners")} />
+                  {runnersLocked && (
+                    <p className="mb-3 text-xs text-fog">The runners are locked. Tap the lock above to make changes.</p>
+                  )}
                   <ParticipantList />
-                  {runnersLocked ? (
-                    <div className="mt-3 rounded-lg bg-surface px-3 py-2.5 text-sm text-text-dim">
-                      The runners are locked. Unlock the section to add or change people.
-                    </div>
-                  ) : (
+                  {!runnersLocked && (
                     <button
                       type="button"
                       onClick={openAddForm}

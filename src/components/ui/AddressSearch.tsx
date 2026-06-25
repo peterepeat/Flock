@@ -70,6 +70,13 @@ export default function AddressSearch({
       justSelected.current = false;
       return;
     }
+    // Only the user typing in a FOCUSED field triggers a lookup — never a programmatic value change
+    // (seeding the edit form from an existing pin, a reverse-geocoded drop). Otherwise opening a runner
+    // with saved start/finish places would fire a search and pop both dropdowns open on their own.
+    if (!focused.current) {
+      setOpen(false);
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const q = query.trim();
     if (q.length < MIN_CHARS) {

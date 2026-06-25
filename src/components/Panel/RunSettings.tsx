@@ -56,6 +56,10 @@ export default function RunSettings() {
   const timeSet = startAnchor.kind !== "auto";
   const anchorTime = startAnchor.kind === "departure" || startAnchor.kind === "waypoint" ? startAnchor.time : "08:00";
   const anchorTarget = startAnchor.kind === "waypoint" ? startAnchor.waypointId : "departure";
+  // The time can anchor EITHER the departure (when the first runner sets off) OR reaching a waypoint
+  // ("be at the café by 9") — the engine back-times everyone's start for the latter. Reframe the
+  // question around whichever the flock has chosen.
+  const wpAnchor = startAnchor.kind === "waypoint";
   const setAnchor = (target: string, time: string) =>
     save({ startAnchor: target === "departure" ? { kind: "departure", time } : { kind: "waypoint", waypointId: target, time } });
 
@@ -64,7 +68,10 @@ export default function RunSettings() {
       {locked && (
         <p className="text-xs text-fog">The run is locked. Tap the lock above to make changes.</p>
       )}
-      <Field label="When does the run start?" optional>
+      <Field
+        label={wpAnchor ? "When should the flock be there?" : "When does the run start?"}
+        hint={wpAnchor ? "We work back everyone’s departure so the flock reaches it by then." : undefined}
+      >
         <Toggle
           options={[{ value: "off", label: "Auto" }, { value: "on", label: "Set a time" }]}
           value={timeSet ? "on" : "off"}
@@ -78,9 +85,9 @@ export default function RunSettings() {
                 onChange={(e) => setAnchor(e.target.value, anchorTime)}
                 className="min-w-0 flex-1 rounded-lg border border-white/10 bg-surface-lift px-2 py-2 text-xs text-text outline-none focus:border-accent/60"
               >
-                <option value="departure">Leave at</option>
-                {waypoints.map((w, i) => (
-                  <option key={w.id} value={w.id}>Be at {i + 1}. {w.name} by</option>
+                <option value="departure">Set off at</option>
+                {waypoints.map((w) => (
+                  <option key={w.id} value={w.id}>Be at {w.name} by</option>
                 ))}
               </select>
             )}

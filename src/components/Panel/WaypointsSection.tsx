@@ -246,8 +246,6 @@ export default function WaypointsSection() {
     }
   }
 
-  if (locked && waypoints.length === 0) return null;
-
   const canReorder = !locked && waypoints.length > 1 && editor.mode === "closed";
   const dropLine = (gap: number) =>
     dragId != null && overIndex === gap ? (
@@ -256,10 +254,9 @@ export default function WaypointsSection() {
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-text-dim">
-        Add a shared waypoint — a café, a landmark, a meeting spot. The group’s route
-        runs through it, so you spend more time flocking together.
-      </p>
+      {locked && (
+        <p className="text-xs text-fog">The route is locked. Tap the lock above to make changes.</p>
+      )}
 
       {waypoints.length > 0 && (
         <ul className="space-y-1.5">
@@ -373,6 +370,10 @@ export default function WaypointsSection() {
           })}
           {dropLine(waypoints.length)}
         </ul>
+      )}
+
+      {!locked && waypoints.length === 0 && editor.mode === "closed" && (
+        <p className="px-1 py-2 text-sm text-text-dim">No waypoints yet. Add the first.</p>
       )}
 
       {!locked && editor.mode === "closed" && (

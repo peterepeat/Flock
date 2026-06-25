@@ -32,6 +32,22 @@ export default function ScheduleView({ participantId }: { participantId: string 
 
   if (!participant) return null;
 
+  // The place name we already looked up for a runner's start/finish — the address of a manual pin,
+  // or the waypoint's name — trimmed to its leading segment ("13 Hawthorn Rd, Northcote" → "13
+  // Hawthorn Rd") so it reads cleanly in a schedule line. An AUTO end has no chosen place, so it
+  // keeps the generic "home". Used to say "Set off from the Convent" instead of "Set off from home".
+  const shortPlace = (s: string) => s.split(",")[0].trim() || s;
+  const placeName = (pin: typeof participant.startPin): string | null => {
+    if (pin.kind === "manual") return shortPlace(pin.address);
+    if (pin.kind === "waypoint") {
+      const w = session.waypoints.find((x) => x.id === pin.waypointId);
+      return w ? shortPlace(w.name) : null;
+    }
+    return null;
+  };
+  const startName = placeName(participant.startPin);
+  const finishName = placeName(participant.finishPin);
+
   if (!route) {
     // A named session-level error (e.g. no geography to route) is shown above the list — don't
     // also sit here on a perpetual "Working out…" spinner that never resolves.
@@ -70,7 +86,7 @@ export default function ScheduleView({ participantId }: { participantId: string 
   const soloLabel = (i: number) => {
     if (!hasCompany) return "Running solo";
     if (i === firstRunIdx) return "Head out to meet the flock";
-    if (i === lastRunIdx) return "Head home";
+    if (i === lastRunIdx) return finishName ? `Head to ${finishName}` : "Head home";
     return "Your own stretch";
   };
 
@@ -78,7 +94,11 @@ export default function ScheduleView({ participantId }: { participantId: string 
     <div className="mt-2 space-y-1.5 rounded-lg bg-surface px-3 py-3">
       <p className="px-1 pb-1 text-xs leading-snug text-text-dim">{summary}</p>
 
-      <Line time={route.departureTime} text={hasCompany ? "Set off from home" : "Leave home"} emphasis />
+      <Line
+        time={route.departureTime}
+        text={hasCompany ? `Set off from ${startName ?? "home"}` : `Leave ${startName ?? "home"}`}
+        emphasis
+      />
 
       {route.schedule.map((seg, i) => {
         // Hover / focus / tap a row to light up just that stretch of the runner's route on the
@@ -165,7 +185,7 @@ export default function ScheduleView({ participantId }: { participantId: string 
 
       <Line
         time={route.arrivalTime}
-        text={`Home · ${formatDistance(route.distanceKm, unit)} · ${formatDuration(
+        text={`${finishName ?? "Home"} · ${formatDistance(route.distanceKm, unit)} · ${formatDuration(
           route.estimatedDurationMinutes,
         )} moving`}
         emphasis
