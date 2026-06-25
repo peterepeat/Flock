@@ -92,6 +92,20 @@ export default function ParticipantList() {
                     edit
                   </button>
                 )}
+                {/* A locked row can't be edited, so surface its GPX right here (no need
+                    to expand the schedule). In edit mode the download lives in the drawer. */}
+                {!editable && route && (
+                  <a
+                    href={`/api/gpx/${flockId}/${p.id}`}
+                    download
+                    className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-text-dim transition hover:bg-surface-lift hover:text-together"
+                    aria-label={`Download ${p.name}'s route as GPX`}
+                    title="Download GPX route"
+                  >
+                    <DownloadIcon />
+                    <span>GPX</span>
+                  </a>
+                )}
                 <LockToggle
                   locked={runnerLocked}
                   onToggle={() => toggleRunnerLock(p.id, runnerLocked)}
@@ -183,6 +197,16 @@ function WarningBadge({ messages }: { messages: string[] }) {
         </span>
       )}
     </span>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 2.5v7.5" />
+      <path d="M4.8 7 8 10.2 11.2 7" />
+      <path d="M3 13h10" />
+    </svg>
   );
 }
 
