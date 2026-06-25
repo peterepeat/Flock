@@ -56,7 +56,7 @@ function main() {
 
   section("1. time window matches the schedule");
   ok(sim.tStart === timeToSec("07:00"), `tStart = 07:00 (got ${sim.tStart}s)`);
-  ok(sim.tEnd === timeToSec("09:29"), `tEnd = 09:29 (got ${sim.tEnd}s)`);
+  ok(sim.tEnd === timeToSec("08:27"), `tEnd = 08:27 (got ${sim.tEnd}s)`);
   ok(sim.finaleAt === sim.tEnd, "finale fires when the last runner finishes");
 
   section("2. every runner starts at start, finishes at finish, and stays ON their geometry");
@@ -96,18 +96,18 @@ function main() {
   }
 
   section("3. companion sets + rest state agree with the schedule");
-  const mara = idOf("Mara"), cole = idOf("Cole"), tom = idOf("Tom");
-  // 07:40 — Mara, Cole, Tom running together (block 07:31–07:50).
+  const mara = idOf("Mara"), cole = idOf("Cole"), tom = idOf("Tom"), nia = idOf("Nia"), pippa = idOf("Pippa");
+  // 07:40 — Mara, Cole, Nia, Tom converging (Pippa still on her approach).
   const f0740 = sim.byId[mara].frameAt(timeToSec("07:40"));
-  ok(f0740.state === "running" && sameSet(f0740.companions, [cole, tom]), "Mara at 07:40 runs with Cole + Tom");
-  // 07:55 — all three at the café (rest 07:50–08:05).
-  for (const id of [mara, cole, tom]) {
+  ok(f0740.state === "running" && sameSet(f0740.companions, [cole, nia, tom]), "Mara at 07:40 runs with Cole + Nia + Tom");
+  // 07:55 — Mara, Cole, Nia, Tom at the café (rest 07:51–08:06).
+  for (const id of [mara, cole, nia, tom]) {
     const fr = sim.byId[id].frameAt(timeToSec("07:55"));
     ok(fr.state === "resting" && !fr.moving, `${nameOf(id)} is resting at 07:55`);
   }
-  // 08:40 — Mara + Cole are a pair again (Tom & Pippa gone); Tom is solo by then.
-  const f0840 = sim.byId[mara].frameAt(timeToSec("08:40"));
-  ok(f0840.state === "running" && sameSet(f0840.companions, [cole]), "Mara at 08:40 runs with Cole only");
+  // 08:10 — Pippa has caught up post-café, so the whole flock runs together briefly.
+  const f0810 = sim.byId[mara].frameAt(timeToSec("08:10"));
+  ok(f0810.state === "running" && sameSet(f0810.companions, [cole, nia, pippa, tom]), "Mara at 08:10 runs with the whole flock");
 
   section("4. derived events match the known run");
   const kinds = (k: string) => sim.events.filter((e) => e.kind === k);
@@ -119,23 +119,23 @@ function main() {
 
   // The stop is shared by Mara, Cole, Tom at one place → one grouped event + one flag.
   const stopIn = kinds("stop-arrive")[0];
-  ok(sameSet(stopIn.subjectIds, [mara, cole, tom]), "coffee stop groups Mara + Cole + Tom");
-  ok(stopIn.t === timeToSec("07:50"), "coffee stop arrival at 07:50");
+  ok(sameSet(stopIn.subjectIds, [mara, cole, nia, tom]), "coffee stop groups Mara + Cole + Nia + Tom");
+  ok(stopIn.t === timeToSec("07:51"), "coffee stop arrival at 07:51");
 
-  // Farewells: Tom parts ~08:22, Mara & Cole part ~09:11. Deduped per pair.
+  // Farewells: Nia finishes first and parts the flock at 08:14; Pippa parts at 08:25. Deduped per pair.
   const byes = kinds("farewell").map((e) => `${[...e.subjectIds, ...e.withIds].map(nameOf).sort().join("+")}@${Math.round(e.t / 60 - timeToSec("00:00") / 60)}`);
   const tomByes = kinds("farewell").filter((e) => e.subjectIds.includes(tom) || e.withIds.includes(tom));
-  ok(tomByes.length >= 1, `Tom says farewell when he peels off (${byes.join(", ")})`);
-  const maraColeBye = kinds("farewell").some(
-    (e) => sameSet([...e.subjectIds, ...e.withIds], [mara, cole]) && e.t === timeToSec("09:11"),
+  ok(tomByes.length >= 1, `Tom says farewell when his companions peel off (${byes.join(", ")})`);
+  const niaBye = kinds("farewell").some(
+    (e) => (e.subjectIds.includes(nia) || e.withIds.includes(nia)) && e.t === timeToSec("08:14"),
   );
-  ok(maraColeBye, "Mara & Cole part exactly once, at 09:11");
+  ok(niaBye, "Nia parts the flock when she finishes first, at 08:14");
 
   section("5. flags + sorted, in-window events");
   ok(sim.flags.filter((f) => f.kind === "finish").length === 5, "a finish flag per runner");
   ok(sim.flags.filter((f) => f.kind === "stop").length === 1, "one coffee-stop flag");
   const stopFlag = sim.flags.find((f) => f.kind === "stop")!;
-  ok(stopFlag.removeAt === timeToSec("08:05"), "coffee flag folds up when the café empties (08:05)");
+  ok(stopFlag.removeAt === timeToSec("08:06"), "coffee flag folds up when the café empties (08:06)");
   ok(sim.flags.filter((f) => f.kind === "finish").every((f) => f.removeAt === null), "finish flags stay planted");
   ok(sim.events.every((e, i) => i === 0 || sim.events[i - 1].t <= e.t), "events are time-sorted");
   ok(sim.events.every((e) => e.t >= sim.tStart && e.t <= sim.tEnd), "every event lands inside the run window");
@@ -147,14 +147,14 @@ function main() {
   ok(grpKey(flockGroups({ a: ["b"], b: ["a"], c: ["d"], d: ["c"] })) === "a,b | c,d", "two mutual pairs → two groups");
   ok(grpKey(flockGroups({ a: ["b"], b: [], c: [] })) === "a | b | c", "asymmetric edge (a→b, b↛a) → no merge");
   ok(grpKey(flockGroups({ a: ["ghost"], b: [] })) === "a | b", "companion not present → ignored");
-  // The fixture at 07:40 should fold Mara+Cole+Tom into one group; Nia + Pippa stay solo.
+  // The fixture at 07:40 should fold Mara+Cole+Nia+Tom into one group; Pippa is still on her approach.
   const fr = (id: string) => sim.byId[id].frameAt(timeToSec("07:40"));
   const companions: Record<string, string[]> = {};
   for (const r of routes) if (!sim.byId[r.participantId].parked) companions[r.participantId] = fr(r.participantId).companions;
   const groups0740 = flockGroups(companions);
-  const trio = groups0740.find((g) => g.length === 3);
-  ok(trio != null && sameSet(trio, [mara, cole, tom]), "at 07:40 the fixture merges Mara+Cole+Tom into one group");
-  ok(groups0740.filter((g) => g.length === 1).length === 2, "at 07:40 Nia + Pippa stay solo (2 singletons)");
+  const quartet = groups0740.find((g) => g.length === 4);
+  ok(quartet != null && sameSet(quartet, [mara, cole, nia, tom]), "at 07:40 the fixture merges Mara+Cole+Nia+Tom into one group");
+  ok(groups0740.filter((g) => g.length === 1).length === 1, "at 07:40 only Pippa stays solo (1 singleton)");
 
   finish();
 }

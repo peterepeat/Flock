@@ -80,5 +80,20 @@ async function main() {
     { ...wp("convent", -37.8025203, 145.0035085), name: "Convent Bakery", address: "Convent Bakery, St Heliers St" },
     { ...wp("richmond", -37.8263517, 144.9966361), name: "East Richmond", address: "East Richmond, Church St" },
   ]));
+
+  // PARTY FIXTURE (m53enq) — the flock the _st_party suite asserts against: 5 manual-start runners,
+  // staggered earliests, converging through PrincesPark → CarltonCafe (15-min coffee stop) → Abbotsford.
+  // Seeded here (deterministic fake-ORS) so it can be regenerated; _st_party reads the baked output.
+  await seed("m53enq", session([
+    person("Mara", { startPin: atPlace(-37.77, 144.999, "Mara"), pace: 330, earliestStartTime: "07:00", maxDistanceKm: 24 }),
+    person("Cole", { startPin: atPlace(-37.814, 144.963, "Cole"), pace: 300, earliestStartTime: "07:00" }),
+    person("Nia", { startPin: atPlace(-37.824, 145.0, "Nia"), pace: 390, earliestStartTime: "07:00", latestFinishTime: "08:15", maxDistanceKm: 11 }),
+    person("Tom", { startPin: atPlace(-37.767, 144.96, "Tom"), pace: 360, earliestStartTime: "07:00", maxDistanceKm: 15 }),
+    person("Pippa", { startPin: atPlace(-37.806, 145.03, "Pippa"), pace: 420, earliestStartTime: "07:00", maxDistanceKm: 7 }),
+  ], [
+    wp("PrincesPark", -37.784, 144.961, 0),
+    wp("CarltonCafe", -37.805, 144.972, 15),
+    wp("Abbotsford", -37.8, 145.005, 0),
+  ]));
 }
 main().catch((e) => { console.error(e); process.exit(1); });
