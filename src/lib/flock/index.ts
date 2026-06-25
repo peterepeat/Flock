@@ -209,6 +209,9 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
   // Resolve the flock's departure from the time anchor.
   const anchor = session.startAnchor ?? { kind: "auto" as const };
   const anchorWp = anchor.kind === "waypoint" ? wpById.get(anchor.waypointId) : undefined;
+  // The flock waits for its runners only on an Auto start (or a waypoint anchor whose waypoint vanished,
+  // which falls back to Auto) — this shapes the honest remedy in an earliest-unreachable park message.
+  const autoStart = anchor.kind === "auto" || (anchor.kind === "waypoint" && !anchorWp);
   let t0Sec: number;
   if (anchor.kind === "departure") {
     t0Sec = timeToSec(anchor.time);
@@ -232,6 +235,6 @@ export async function calculateRoutes(session: FlockSession): Promise<FlockCalcR
     t0Sec = resolveAutoStart(route, runners);
   }
 
-  const plan = planRun({ route, runners, t0Sec });
+  const plan = planRun({ route, runners, t0Sec, autoStart });
   return projectPlan({ plan, route, runners, waypoints: waypoints.map((w) => ({ id: w.id, location: w.location })), connectors });
 }

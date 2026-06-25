@@ -71,6 +71,8 @@ export interface RunInput {
   route: Route;
   runners: Runner[];
   t0Sec: number; // resolved flock departure at km 0 (absolute seconds)
+  autoStart?: boolean; // the flock start is Auto (t0 came from resolveAutoStart) — shapes the honest
+  // remedy in a park message: on Auto the flock ALREADY waits as long as it can, so "try Auto" is moot.
 }
 
 // --- output: the plan as company blocks -------------------------------------

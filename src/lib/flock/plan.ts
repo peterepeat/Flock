@@ -342,7 +342,7 @@ function dwellStartAt(blocks: Block[], km: number): number | null {
 }
 
 // A plain-English reason a runner's constraints can't be honoured — named, never silent (D3).
-function conflictMessage(c: Conflict): string {
+function conflictMessage(c: Conflict, autoStart = false): string {
   switch (c.kind) {
     case "cap-vs-pin": {
       // Name all the numbers (the spec's "don't pick a winner"): the pin separation and the cap.
@@ -359,8 +359,22 @@ function conflictMessage(c: Conflict): string {
     case "earliest-after-latest":
       return "Your earliest start is after your latest finish — there's no window to run, so we couldn't place you on this run.";
     case "earliest-unreachable":
-      // Three honest sub-cases (see earliestCause). Every branch keeps "the flock can wait for you"
-      // (the Auto-delay remedy unique to earliest-unreachable — _st_combo's G3 oracle keys on it).
+      // Three honest sub-cases (see earliestCause). On a FIXED start the remedy is "Try an Auto start
+      // (the flock can wait for you)" — _st_combo's G3 oracle keys on that phrase, and it never appears
+      // on any other conflict. But on an AUTO start the flock ALREADY waits as long as the t0-floor
+      // allows; if it still can't meet this runner (e.g. a tight latest blocks any further delay), "try
+      // Auto" is both wrong (it IS Auto) and false (it can't wait more) — so the remedy is a closer
+      // start or a wider window instead. (G3 asserts the FIXED phrase never leaks onto Auto.)
+      if (autoStart) {
+        switch (c.cause) {
+          case "approach":
+            return "Your start point is too far from the route to reach the flock by your earliest start — even with the flock waiting as long as it can, you'd have to set off before then, so we couldn't place you on this run. Move your start closer or widen your time window.";
+          case "dwell":
+            return "The flock is resting at your join point at your earliest start, but we can't add you partway through its stop, so we couldn't place you on this run. Move your start closer or widen your time window.";
+          case "passed":
+            return "The flock passes your join point before your earliest start and has moved on by the time you can set off, so we couldn't place you on this run. Move your start closer, set an earlier start, or widen your time window.";
+        }
+      }
       switch (c.cause) {
         case "approach":
           return "Your start point is too far from the route to reach the flock by your earliest start — you'd have to set off before then, so we couldn't place you on this run. Try an Auto start (the flock can wait for you) or move your start closer.";
@@ -380,14 +394,14 @@ function conflictMessage(c: Conflict): string {
 // A PARKED (infeasible) runner is named with its conflict. A short-covered FEASIBLE runner is
 // "lonely"/"with the flock" ONLY when there is a flock (≥2 feasible participants) — a solo
 // runner has no flock to be told about. A full-route runner gets no warning.
-function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number): Warning[] {
+function buildWarnings(runners: Runner[], plans: RunnerPlan[], routeKm: number, autoStart: boolean): Warning[] {
   const out: Warning[] = [];
   const byId = new Map(runners.map((r) => [r.id, r]));
   const feasibleCount = plans.filter((p) => p.conflict == null).length;
   for (const p of plans) {
     const r = byId.get(p.id)!;
     if (p.conflict != null) {
-      out.push({ id: p.id, message: conflictMessage(p.conflict) });
+      out.push({ id: p.id, message: conflictMessage(p.conflict, autoStart) });
       continue;
     }
     // A FEASIBLE runner can DISPLAY a set-off a minute or two before their earliest: the flock
@@ -530,7 +544,7 @@ function classify(r: Runner, t0: number, L: number): Conflict | null {
 
 // --- the entry point --------------------------------------------------------
 export function planRun(input: RunInput): Plan {
-  const { route, runners, t0Sec } = input;
+  const { route, runners, t0Sec, autoStart = false } = input;
   const L = route.totalKm;
 
   // Feasibility is a value, not a forgotten case. A runner with contradictory hard constraints is set
@@ -642,6 +656,6 @@ export function planRun(input: RunInput): Plan {
     blocks,
     runners: plans,
     togetherMinutes: togetherMinutes(blocks),
-    warnings: buildWarnings(runners, plans, route.totalKm),
+    warnings: buildWarnings(runners, plans, route.totalKm, autoStart),
   };
 }
