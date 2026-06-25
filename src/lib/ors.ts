@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { despurLoop, fromORS, toORS } from "./geo";
+import { cacheGet, cacheSet } from "./kv";
 import { createLogger } from "./logger";
 import type { LatLng } from "./types";
 
@@ -19,6 +20,16 @@ const log = createLogger("ors");
 
 const ORS_BASE = "https://api.openrouteservice.org/v2/directions/foot-hiking/geojson";
 const MAX_RETRIES = 2;
+
+// ORS results are a pure function of the request (coords / start+length+seed) — roads are stable — so
+// they cache hard. The cache (kv: shared Redis when configured, else in-process) collapses the repeats
+// that drive load: many clients computing the SAME flock at once, and recompute-after-recompute of the
+// same plan. Keyed on the rounded request shape; a miss just falls through to ORS. ~3.5m rounding
+// dedupes float jitter without crossing roads.
+const CACHE_TTL_SEC = 7 * 24 * 60 * 60; // 7 days
+const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
+const routeKey = (pts: LatLng[]) => `ors:p2p:${pts.map((p) => `${r6(p.lat)},${r6(p.lng)}`).join(";")}`;
+const loopKey = (s: LatLng, lengthKm: number, seed: number) => `ors:rt:${r6(s.lat)},${r6(s.lng)}:${Math.round(lengthKm * 1000)}:${seed}`;
 
 // ORS round-trips wander out-and-back; de-spur (despurLoop) trims those dead
 // folds, which SHORTENS the loop. So we over-request by this fraction to still
@@ -76,8 +87,16 @@ export async function getRoute(waypoints: LatLng[]): Promise<OrsRoute> {
   if (waypoints.length < 2) {
     throw new RouteError("ors-error", "Need at least 2 waypoints for a route");
   }
+  const key = routeKey(waypoints);
+  const hit = await cacheGet<OrsRoute>(key);
+  if (hit) {
+    log.debug("ors cache hit", { kind: "p2p", waypoints: waypoints.length });
+    return hit;
+  }
   const coordinates = waypoints.map(toORS);
-  return call({ coordinates }, { kind: "p2p", waypoints: waypoints.length });
+  const result = await call({ coordinates }, { kind: "p2p", waypoints: waypoints.length });
+  await cacheSet(key, result, CACHE_TTL_SEC);
+  return result;
 }
 
 /**
@@ -90,6 +109,12 @@ export async function getRoute(waypoints: LatLng[]): Promise<OrsRoute> {
  * so we don't burn the per-minute budget).
  */
 export async function getRoundTrip(start: LatLng, lengthKm: number, seed = 1): Promise<OrsRoute> {
+  const key = loopKey(start, lengthKm, seed);
+  const hit = await cacheGet<OrsRoute>(key);
+  if (hit) {
+    log.debug("ors cache hit", { kind: "loop", lengthKm });
+    return hit;
+  }
   const coordinates = [toORS(start)];
   const seeds = [seed, seed + 1, seed + 3, seed + 7, seed + 17];
   const requestedKm = lengthKm * (1 + DESPUR_OVERREQUEST);
@@ -101,7 +126,9 @@ export async function getRoundTrip(start: LatLng, lengthKm: number, seed = 1): P
         { coordinates, roundTrip: { lengthMeters: Math.round(requestedKm * 1000), seed: s, points: 4 } },
         { kind: "loop", lengthKm, requestedKm: Number(requestedKm.toFixed(2)), seed: s, seedAttempt: i },
       );
-      return despur(raw);
+      const result = despur(raw);
+      await cacheSet(key, result, CACHE_TTL_SEC);
+      return result;
     } catch (err) {
       if (err instanceof RouteError && err.code === "no-route") {
         lastErr = err; // unlucky seed — try the next one

@@ -94,37 +94,48 @@ export function useRouteCalculation(flockId: string) {
           persisted?: boolean; // false = computed but NOT saved (plan changed under us)
           skipped?: boolean;
           unroutable?: { reason: "no-location" | "no-participants" } | null;
+          inProgress?: boolean; // another client is already computing this version server-side
         };
-        setCalcWarnings(data.warnings ?? []);
-        if (data.unroutable) {
-          // No geography at all — a NAMED, terminal result (not a silent skip that strands the
-          // user in a perpetual spinner). Surface it and stop; the next edit re-triggers a calc.
-          setCalcError(
-            data.unroutable.reason === "no-location"
-              ? "Add a meeting point, a waypoint, or a start/finish location — there's nowhere to run yet."
-              : "Add someone to the flock to map a route.",
-          );
-          setCalcStatus("idle");
-          done({ unroutable: data.unroutable.reason });
-          return;
-        }
-        setCalcError(null);
-        if (data.persisted === false && !data.skipped) {
-          // The server computed routes but the plan kept changing while it ran, so
-          // nothing was saved (routes stay null). Retry with backoff until editing
-          // settles — otherwise we'd go idle and strand the user with no route.
-          log.debug("calc not persisted (plan still churning) — retrying", { attempt });
-          if (attempt < MAX_ATTEMPTS) {
-            setCalcStatus("working");
-            retry = true;
+        if (data.inProgress) {
+          // Single-flight on the server: someone else is computing this exact version. Leave the
+          // warnings/error we already have untouched — stay "working" and let polling deliver the routes
+          // when the holder persists them. A gentle backstop retry covers the holder dying before it
+          // saves (falls through to the scheduler below, not a return that would skip it).
+          log.debug("calc already in flight server-side — awaiting via polling", { attempt });
+          if (attempt < MAX_ATTEMPTS) retry = true;
+          done({ inProgress: true });
+        } else {
+          setCalcWarnings(data.warnings ?? []);
+          if (data.unroutable) {
+            // No geography at all — a NAMED, terminal result (not a silent skip that strands the
+            // user in a perpetual spinner). Surface it and stop; the next edit re-triggers a calc.
+            setCalcError(
+              data.unroutable.reason === "no-location"
+                ? "Add a meeting point, a waypoint, or a start/finish location — there's nowhere to run yet."
+                : "Add someone to the flock to map a route.",
+            );
+            setCalcStatus("idle");
+            done({ unroutable: data.unroutable.reason });
+            return;
+          }
+          setCalcError(null);
+          if (data.persisted === false && !data.skipped) {
+            // The server computed routes but the plan kept changing while it ran, so
+            // nothing was saved (routes stay null). Retry with backoff until editing
+            // settles — otherwise we'd go idle and strand the user with no route.
+            log.debug("calc not persisted (plan still churning) — retrying", { attempt });
+            if (attempt < MAX_ATTEMPTS) {
+              setCalcStatus("working");
+              retry = true;
+            } else {
+              setCalcError("Routes kept shifting while calculating — change anything to retry.");
+              setCalcStatus("idle");
+            }
           } else {
-            setCalcError("Routes kept shifting while calculating — change anything to retry.");
             setCalcStatus("idle");
           }
-        } else {
-          setCalcStatus("idle");
+          done({ routes: data.routeCount, shared: data.sharedCount, warnings: data.warnings?.length, persisted: data.persisted });
         }
-        done({ routes: data.routeCount, shared: data.sharedCount, warnings: data.warnings?.length, persisted: data.persisted });
       } catch (err) {
         log.error("calculation failed", { flockId, attempt, error: String(err) });
         setCalcStatus("error");

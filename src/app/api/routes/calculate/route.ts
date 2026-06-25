@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { applyPatch, getFlock } from "@/lib/flockService";
+import { BUSY, withLock } from "@/lib/kv";
 import { createLogger } from "@/lib/logger";
 import { RouteError } from "@/lib/ors";
 import { calculateRoutes } from "@/lib/flock";
@@ -27,6 +28,12 @@ export async function POST(request: Request) {
   }
 
   try {
+    // SINGLE-FLIGHT: many polling clients can all see `computedRoutes === null` for the same flock and
+    // POST here at once — coalesce them so only ONE runs the (ORS-heavy) calc. The rest get a cheap
+    // `inProgress` and pick the routes up via polling once the holder persists them. Purely an endpoint
+    // concern — the engine knows nothing of it. Lock TTL sits just above maxDuration so a crashed
+    // holder can't wedge it; it's released the moment the calc settles.
+    const locked = await withLock(`lock:calc:${flockId}`, 65, async (): Promise<NextResponse> => {
     // A calc reads the session, then makes many (slow) ORS calls, then writes the
     // routes back. If a waypoint/participant edit lands DURING that window, naively
     // writing would overwrite the newer plan with routes computed from the old one
@@ -101,6 +108,15 @@ export async function POST(request: Request) {
       },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
+    });
+
+    // Another request is already computing this flock — don't run a second calc. The client keeps the
+    // "working" state and lets polling deliver the routes the holder is about to persist.
+    if (locked === BUSY) {
+      done({ inProgress: true });
+      return NextResponse.json({ inProgress: true }, { status: 200, headers: { "Cache-Control": "no-store" } });
+    }
+    return locked;
   } catch (err) {
     // Daily quota spent → a distinct, actionable signal (won't recover until
     // reset), so the client can say so and stop hammering.
