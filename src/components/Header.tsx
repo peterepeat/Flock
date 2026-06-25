@@ -92,13 +92,13 @@ export default function Header() {
   }
 
   return (
-    <header className="z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-surface px-4">
+    <header className="z-20 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/5 bg-surface px-3 sm:gap-3 sm:px-4">
       <div className="flex items-center gap-3">
         <span className="text-base font-semibold tracking-tight">Flock</span>
         <span className="mono hidden text-xs text-fog sm:inline">flock/{flockId}</span>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5 sm:gap-2">
         {/* Display unit — the reader's own km/mi preference (localStorage), not a flock setting. */}
         <div className="flex items-center rounded-full border border-white/10 p-0.5 text-xs" role="group" aria-label="Display units">
           {(["km", "miles"] as Unit[]).map((u) => (
@@ -138,16 +138,20 @@ export default function Header() {
         <button
           type="button"
           onClick={copyLink}
-          className="rounded-full border border-white/10 px-3.5 py-1.5 text-xs text-text transition hover:bg-surface-lift"
+          aria-label={copied ? "Link copied" : "Copy link"}
+          className="inline-flex items-center justify-center rounded-full border border-white/10 px-2.5 py-1.5 text-xs text-text transition hover:bg-surface-lift sm:px-3.5"
         >
-          {copied ? "Link copied ✓" : "Copy link"}
+          {/* Icon-only on mobile to save header room; full label on desktop. */}
+          <span className="hidden sm:inline">{copied ? "Link copied ✓" : "Copy link"}</span>
+          <span className="sm:hidden" aria-hidden="true">{copied ? "✓" : <LinkIcon />}</span>
         </button>
         <PartyLaunch />
         <button
           type="button"
           onClick={toggleLock}
           disabled={busy}
-          className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition disabled:opacity-60 ${
+          aria-label={fullyLocked ? "Unlock to make changes" : "Lock the plan"}
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-60 sm:px-3.5 ${
             fullyLocked
               ? "border border-white/10 text-text hover:bg-surface-lift"
               : "bg-together text-[#0c1413] hover:brightness-110"
@@ -156,9 +160,31 @@ export default function Header() {
           <span className={fullyLocked ? "text-accent" : ""}>
             <LockGlyph locked={fullyLocked} />
           </span>
-          {fullyLocked ? "Unlock to make changes" : "Lock the plan"}
+          {/* Label hidden on mobile — the glyph carries the lock state there. */}
+          <span className="hidden sm:inline">{fullyLocked ? "Unlock to make changes" : "Lock the plan"}</span>
         </button>
       </div>
     </header>
+  );
+}
+
+// A small chain-link glyph — the mobile, icon-only form of "Copy link".
+function LinkIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9.5 14.5l5-5" />
+      <path d="M11 6.5l1.2-1.2a3.6 3.6 0 0 1 5 5L17 11.5" />
+      <path d="M13 17.5l-1.2 1.2a3.6 3.6 0 0 1-5-5L7 12.5" />
+    </svg>
   );
 }
