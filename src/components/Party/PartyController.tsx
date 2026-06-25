@@ -1,16 +1,17 @@
 "use client";
 
 import L from "leaflet";
-import { type CSSProperties, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useMap } from "react-leaflet";
 
+import { LockGlyph } from "@/components/ui/LockToggle";
 import { initial } from "@/lib/colors";
-import { buildPartySim, flockGroups, type PartyFlag, type PartySim, type RunnerFrame } from "@/lib/party/simulate";
+import { unlockFlock } from "@/lib/flockApi";
+import { buildPartySim, flockGroups, isPartyActive, type PartyFlag, type PartySim, type RunnerFrame } from "@/lib/party/simulate";
 import type { ComputedRoute, Participant } from "@/lib/types";
 import { secToTime } from "@/lib/units";
 import { useFlockStore } from "@/store/flockStore";
-import { usePartyStore } from "@/store/partyStore";
 
 import { dancerFor, phraseFor } from "./phrases";
 
@@ -20,19 +21,36 @@ const SPEEDS = [0.5, 1, 2, 4];
 const DEFAULT_SPEED_IDX = 1; // 1×
 const BUBBLE_MS = 2400; // how long a speech bubble lingers (real ms)
 const READOUT_MS = 80; // throttle for the React clock/scrubber/mode re-render (~12Hz)
+const FINALE_HOLD_MS = 2800; // hold on the fireworks before the screensaver loops back
 
 // ---------------------------------------------------------------------------
-// Controller — mounts the stage while the party is active. Re-mounts fresh each
-// time (so the clock and all refs reset cleanly on every open).
+// Controller — Flock Party IS the locked state. A fully-locked, playable flock
+// plays the looping show; unlocking ends it. No separate launch button. Mounts
+// fresh each time it activates so the clock/refs reset cleanly.
 // ---------------------------------------------------------------------------
 export default function PartyController() {
-  const active = usePartyStore((s) => s.active);
+  const active = useFlockStore((s) => isPartyActive(s.session));
   return active ? <PartyStage /> : null;
 }
 
 function PartyStage() {
   const map = useMap();
-  const close = usePartyStore((s) => s.close);
+  const flockId = useFlockStore((s) => s.flockId);
+  const applyServerSession = useFlockStore((s) => s.applyServerSession);
+
+  // "Exit the party" == unlock the flock (the party is the locked state). Once the
+  // server echo clears the locks, PartyController unmounts this. Single-flight.
+  const unlockingRef = useRef(false);
+  const onExit = useCallback(async () => {
+    if (!flockId || unlockingRef.current) return;
+    unlockingRef.current = true;
+    try {
+      const updated = await unlockFlock(flockId);
+      applyServerSession(updated, true);
+    } catch {
+      unlockingRef.current = false; // let them try again
+    }
+  }, [flockId, applyServerSession]);
 
   // Freeze the plan at open — the show is a replay; a live edit mid-playback
   // shouldn't yank the dancers around. Reads the store imperatively, once.
@@ -63,11 +81,6 @@ function PartyStage() {
     };
   }, [map]);
 
-  // Nothing playable (shouldn't happen — the launch button gates it — but never strand the user).
-  useEffect(() => {
-    if (!snap.sim) close();
-  }, [snap.sim, close]);
-
   // Frame the whole show once on open.
   useEffect(() => {
     if (!snap.sim) return;
@@ -85,7 +98,7 @@ function PartyStage() {
 
   if (!layer || !snap.sim) return null;
   return createPortal(
-    <Stage sim={snap.sim} participants={snap.participants} map={map} onClose={close} />,
+    <Stage sim={snap.sim} participants={snap.participants} map={map} onClose={onExit} />,
     layer,
   );
 }
@@ -148,6 +161,7 @@ function Stage({
   const evPtrRef = useRef(0);
   const lastTickRef = useRef(0);
   const lastReadoutRef = useRef(0);
+  const finaleHoldRef = useRef(0); // performance.now() the finale began (0 = not holding)
   const rafRef = useRef(0);
   const avatarRefs = useRef(new Map<string, HTMLDivElement>());
   const flagRefs = useRef(new Map<string, HTMLDivElement>());
@@ -293,39 +307,53 @@ function Stage({
       // frozen, so per-frame repositioning + state writes are pure waste. A paused
       // frame still tracks the map via the move/zoom listener below, not the loop.
       if (playingRef.current) {
-        const simPerReal = (span / BASE_DURATION_S) * SPEEDS[speedRef.current];
-        let c = clockRef.current + dt * simPerReal;
-        if (c >= sim.tEnd) {
-          c = sim.tEnd;
-          playingRef.current = false;
-          setPlaying(false);
-          setFinale(true);
-        }
-        clockRef.current = c;
-        fireUpTo(c, now);
-        positionAll(c);
-        if (now - lastReadoutRef.current > READOUT_MS) {
-          lastReadoutRef.current = now;
-          setClockSec(c);
-          // expire stale bubbles
-          const cur = bubblesRef.current;
-          let changed = false;
-          const next: Record<string, Bubble> = {};
-          for (const [id, b] of Object.entries(cur)) {
-            if (now - b.born < BUBBLE_MS) next[id] = b;
-            else changed = true;
+        if (finaleHoldRef.current) {
+          // Holding on the fireworks — then loop back to the top like a screensaver.
+          positionAll(clockRef.current);
+          if (now - finaleHoldRef.current > FINALE_HOLD_MS) {
+            finaleHoldRef.current = 0;
+            setFinale(false);
+            seek(sim.tStart);
+            evPtrRef.current = 0; // replay the whole event sequence each loop
           }
-          if (changed) setBubbles(next);
-          // recompute which flags are planted right now
-          const want = flagsShownAt(c);
-          setShownFlags((prev) => (sameSet(prev, want) ? prev : want));
+        } else {
+          const simPerReal = (span / BASE_DURATION_S) * SPEEDS[speedRef.current];
+          let c = clockRef.current + dt * simPerReal;
+          let reachedEnd = false;
+          if (c >= sim.tEnd) {
+            c = sim.tEnd;
+            reachedEnd = true;
+          }
+          clockRef.current = c;
+          fireUpTo(c, now);
+          positionAll(c);
+          if (reachedEnd) {
+            finaleHoldRef.current = now;
+            setFinale(true);
+          }
+          if (now - lastReadoutRef.current > READOUT_MS) {
+            lastReadoutRef.current = now;
+            setClockSec(c);
+            // expire stale bubbles
+            const cur = bubblesRef.current;
+            let changed = false;
+            const next: Record<string, Bubble> = {};
+            for (const [id, b] of Object.entries(cur)) {
+              if (now - b.born < BUBBLE_MS) next[id] = b;
+              else changed = true;
+            }
+            if (changed) setBubbles(next);
+            // recompute which flags are planted right now
+            const want = flagsShownAt(c);
+            setShownFlags((prev) => (sameSet(prev, want) ? prev : want));
+          }
         }
       }
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [sim, positionAll, fireUpTo, flagsShownAt]);
+  }, [sim, positionAll, fireUpTo, flagsShownAt, seek]);
 
   // Keep avatars/flags pinned to the map when it pans/zooms while PAUSED (the rAF
   // loop only repositions during playback). Harmless (redundant) during playback.
@@ -357,7 +385,7 @@ function Stage({
   }, []);
 
   // Move focus onto the transport on open so keyboard / screen-reader users land
-  // on the controls (PartyLaunch restores focus to itself on close).
+  // on the controls (the Header toggle reclaims focus when the party ends).
   const playBtnRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     playBtnRef.current?.focus();
@@ -368,8 +396,12 @@ function Stage({
     setPlaying(false);
   }
   function togglePlay() {
-    if (clockRef.current >= sim.tEnd) {
+    // Resuming from a pause AT the finale → restart the loop from the top.
+    if (!playingRef.current && clockRef.current >= sim.tEnd) {
+      finaleHoldRef.current = 0;
+      setFinale(false);
       seek(sim.tStart);
+      evPtrRef.current = 0;
       playingRef.current = true;
       setPlaying(true);
       return;
@@ -379,7 +411,9 @@ function Stage({
     setPlaying(next);
   }
   function restart() {
+    finaleHoldRef.current = 0;
     seek(sim.tStart);
+    evPtrRef.current = 0;
     setFinale(false);
     playingRef.current = true;
     setPlaying(true);
@@ -397,18 +431,19 @@ function Stage({
 
   return (
     <>
-      {/* Cancel — top-left, the spot the launch button used to occupy. */}
+      {/* Unlock to edit — the party IS the locked state, so the way out is to unlock.
+          Top-left, where the launch button used to sit. */}
       <button
         type="button"
         onClick={onClose}
         className="party-cancel pointer-events-auto"
-        aria-label="Exit Flock Party"
-        title="Exit Flock Party (Esc)"
+        aria-label="Unlock to edit"
+        title="Unlock to edit (Esc)"
       >
-        <span aria-hidden="true" className="party-cancel__x">
-          ✕
+        <span aria-hidden="true" className="party-cancel__x text-accent">
+          <LockGlyph locked={true} />
         </span>
-        <span className="party-cancel__label">Exit party</span>
+        <span className="party-cancel__label">Unlock to edit</span>
       </button>
 
       {/* avatars — a solo dancer, or one merged "flock together" group */}
@@ -453,10 +488,10 @@ function Stage({
             ref={playBtnRef}
             onClick={togglePlay}
             className="party-btn party-btn--primary"
-            aria-label={done ? "Replay" : playing ? "Pause" : "Play"}
+            aria-label={playing ? "Pause" : done ? "Replay" : "Play"}
             title={playing ? "Pause (space)" : "Play (space)"}
           >
-            {done ? "↺" : playing ? "⏸" : "▶"}
+            {playing ? "⏸" : done ? "↺" : "▶"}
           </button>
           <button
             type="button"

@@ -19,8 +19,23 @@
 // ---------------------------------------------------------------------------
 
 import { bearingRad, distanceMeters } from "@/lib/geo";
-import type { ComputedRoute, LatLng, Participant, SharedSegment } from "@/lib/types";
+import type { ComputedRoute, FlockSession, LatLng, Participant, SharedSegment } from "@/lib/types";
 import { timeToSec } from "@/lib/units";
+
+/**
+ * Flock Party IS the locked state: a flock that is fully locked (all three section
+ * locks) AND has a real, timed route to show. Locking starts the looping party;
+ * unlocking ends it. Shared by the controller (mount) and the mobile nav (hide).
+ */
+export function isPartyActive(session: FlockSession | null | undefined): boolean {
+  if (!session) return false;
+  const l = session.locks;
+  const locked = !!(l && l.run && l.route && l.runners);
+  const playable = !!session.computedRoutes?.some(
+    (r) => r.arrivalTime !== r.departureTime && r.geometry.coordinates.length > 1,
+  );
+  return locked && playable;
+}
 
 export type RunnerState = "before" | "running" | "resting" | "finished";
 

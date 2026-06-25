@@ -46,12 +46,16 @@ export default function LandingPage() {
         }}
       />
       <div className="relative z-10 flex max-w-xl flex-col items-center text-center">
+        <span className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium tracking-wide text-text-dim">
+          <span aria-hidden>🪩</span> Flock Party
+        </span>
         <h1 className="text-5xl font-semibold leading-[1.05] tracking-tight sm:text-6xl">
           Find your flock.
         </h1>
         <p className="mt-6 max-w-md text-lg leading-relaxed text-text-dim">
-          Everyone starts somewhere. Flock figures out the routes so you spend as
-          much time running together as possible.
+          Everyone starts somewhere. Flock Party figures out the routes so you spend
+          as much time running together as possible — then lock it in and watch the
+          whole run come to life.
         </p>
 
         <button

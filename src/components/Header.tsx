@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import PartyLaunch from "@/components/Party/PartyLaunch";
 import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
@@ -25,6 +24,7 @@ export default function Header() {
   const hydrateDisplayUnit = useFlockStore((s) => s.hydrateDisplayUnit);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
 
   // Pull the reader's saved km/mi choice from localStorage once on mount (client-only, so it can't run
   // during SSR and can't mismatch hydration — the first render uses the flock's unit until this lands).
@@ -34,8 +34,17 @@ export default function Header() {
 
   // "Lock the plan" = all three section locks set. (Per-runner locks are independent
   // and left alone by the global toggle, so a self-locked runner survives unlock.)
+  // Locking is now also what STARTS Flock Party; unlocking ends it.
   const locks = session?.locks;
   const fullyLocked = !!locks && locks.run && locks.route && locks.runners;
+
+  // When the party ends (locked → unlocked), put focus back on the toggle so a
+  // keyboard user lands somewhere sensible rather than at the top of the page.
+  const wasLocked = useRef(false);
+  useEffect(() => {
+    if (wasLocked.current && !fullyLocked) toggleRef.current?.focus();
+    wasLocked.current = fullyLocked;
+  }, [fullyLocked]);
   // No undo/redo when everything's locked (edits rejected) or mid-flight.
   const canUndo = !fullyLocked && !historyBusy && undoStack.length > 0;
   const canRedo = !fullyLocked && !historyBusy && redoStack.length > 0;
@@ -94,7 +103,7 @@ export default function Header() {
   return (
     <header className="z-20 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/5 bg-surface px-3 sm:gap-3 sm:px-4">
       <div className="flex items-center gap-3">
-        <span className="text-base font-semibold tracking-tight">Flock</span>
+        <span className="whitespace-nowrap text-base font-semibold tracking-tight">Flock Party</span>
         <span className="mono hidden text-xs text-fog sm:inline">flock/{flockId}</span>
       </div>
 
@@ -145,23 +154,31 @@ export default function Header() {
           <span className="hidden sm:inline">{copied ? "Link copied ✓" : "Copy link"}</span>
           <span className="sm:hidden" aria-hidden="true">{copied ? "✓" : <LinkIcon />}</span>
         </button>
-        <PartyLaunch />
+        {/* Locking the plan IS the party trigger — no separate button. Unlocked =
+            "Start the party" (a quiet disco invite); locked = "Unlock to edit". */}
         <button
           type="button"
+          ref={toggleRef}
           onClick={toggleLock}
           disabled={busy}
-          aria-label={fullyLocked ? "Unlock to make changes" : "Lock the plan"}
+          aria-label={fullyLocked ? "Unlock to edit" : "Start the party"}
           className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-60 sm:px-3.5 ${
             fullyLocked
               ? "border border-white/10 text-text hover:bg-surface-lift"
               : "bg-together text-[#0c1413] hover:brightness-110"
           }`}
         >
-          <span className={fullyLocked ? "text-accent" : ""}>
-            <LockGlyph locked={fullyLocked} />
-          </span>
-          {/* Label hidden on mobile — the glyph carries the lock state there. */}
-          <span className="hidden sm:inline">{fullyLocked ? "Unlock to make changes" : "Lock the plan"}</span>
+          {fullyLocked ? (
+            <span className="text-accent">
+              <LockGlyph locked={true} />
+            </span>
+          ) : (
+            <span className="party-launch__ball text-sm leading-none" aria-hidden>
+              🪩
+            </span>
+          )}
+          {/* Label hidden on mobile — the glyph carries the state there. */}
+          <span className="hidden sm:inline">{fullyLocked ? "Unlock to edit" : "Start the party"}</span>
         </button>
       </div>
     </header>

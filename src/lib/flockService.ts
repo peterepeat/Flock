@@ -158,7 +158,10 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     log.warn("patch on missing flock", { id, action: action.action });
     return { ok: false, status: 404, error: "Flock not found" };
   }
-  if (!session.waypoints) session.waypoints = [];
+  // Normalize on the patch path too (not just getFlock) — otherwise a patch on a
+  // session that lacks a defaulted field (e.g. startAnchor, common in stored data)
+  // returns AND persists a partial session, crashing clients that read it.
+  normalizeSession(session);
 
   const blocked = lockBlocks(session, action);
   if (blocked) {

@@ -16,9 +16,9 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Flock — find your flock",
+  title: "Flock Party — run together",
   description:
-    "Everyone starts somewhere. Flock figures out the routes so you spend as much time running together as possible.",
+    "Everyone starts somewhere. Flock Party figures out the routes so you spend as much time running together as possible — then locks it in and brings the whole run to life.",
 };
 
 export const viewport: Viewport = {
