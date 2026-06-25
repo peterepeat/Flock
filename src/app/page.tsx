@@ -51,7 +51,7 @@ export default function LandingPage() {
             "radial-gradient(58% 44% at 50% 47%, rgba(20,20,26,0.86) 0%, rgba(20,20,26,0.45) 38%, transparent 72%), radial-gradient(120% 80% at 50% 110%, rgba(232,97,42,0.16) 0%, rgba(58,191,176,0.09) 35%, transparent 70%)",
         }}
       />
-      <div className="relative z-10 flex max-w-xl flex-col items-center text-center">
+      <div data-hero-content className="relative z-10 flex max-w-xl flex-col items-center text-center">
         <h1 className="text-5xl font-semibold leading-[1.05] tracking-tight sm:text-6xl">
           Find your flock.
         </h1>
