@@ -87,6 +87,7 @@ export async function createFlock(unitPreference: Unit = "km"): Promise<FlockSes
     unitPreference,
     startAnchor: { kind: "auto" },
     intendedDistanceKm: null,
+    name: null,
     participants: [],
     waypoints: [],
     computedRoutes: null,
@@ -117,6 +118,7 @@ function normalizeSession(session: FlockSession): void {
   if (!session.waypoints) session.waypoints = [];
   if (!session.startAnchor) session.startAnchor = { kind: "auto" };
   if (session.intendedDistanceKm === undefined) session.intendedDistanceKm = null;
+  if (session.name === undefined) session.name = null;
   if (session.routeWarnings === undefined) session.routeWarnings = null;
   // Migrate the old single global lock (lockedAt) to the three section locks.
   if (!session.locks) {
@@ -183,7 +185,10 @@ export async function applyPatch(id: string, action: PatchAction): Promise<Apply
     case "setRunConfig": {
       if (action.startAnchor !== undefined) session.startAnchor = action.startAnchor;
       if (action.intendedDistanceKm !== undefined) session.intendedDistanceKm = action.intendedDistanceKm;
-      clearComputed(session);
+      if (action.name !== undefined) session.name = action.name;
+      // Only the routing inputs invalidate the computed plan — a name is just a label, so a name-only
+      // change must NOT trigger a recompute (keeps the label fully decoupled from the routing engine).
+      if (action.startAnchor !== undefined || action.intendedDistanceKm !== undefined) clearComputed(session);
       log.info("run config set", { id, anchor: session.startAnchor.kind, distance: session.intendedDistanceKm });
       break;
     }

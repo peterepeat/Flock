@@ -129,6 +129,7 @@ export interface FlockSession {
   // intended distance; per-runner constraints are optional overrides.
   startAnchor: TimeAnchor; // default { kind: "auto" } → logic-driven (07:00 unless constraints move it)
   intendedDistanceKm: number | null; // set, or null → waypoint-tour length / 10 km
+  name: string | null; // optional flock label shown by the title; null → auto-derived from the plan
   participants: Participant[];
   waypoints: FlockWaypoint[]; // shared waypoints everyone routes through
   computedRoutes: ComputedRoute[] | null; // null until first calculation
@@ -172,7 +173,7 @@ export interface ReverseGeocodeResult {
 // keeps last-write-wins clobbering to a minimum and makes every change loggable.
 export type PatchAction =
   | { action: "setUnit"; unitPreference: Unit }
-  | { action: "setRunConfig"; startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }
+  | { action: "setRunConfig"; startAnchor?: TimeAnchor; intendedDistanceKm?: number | null; name?: string | null }
   // Participants carry no ownership — anyone may add/edit/remove one that isn't locked
   // (gated by the runners section lock + that runner's lock, server-side).
   | { action: "addParticipant"; participant: NewParticipantInput }

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
+import { flockDisplayName } from "@/lib/flockName";
 import { createLogger } from "@/lib/logger";
 import type { Unit } from "@/lib/types";
 import { useFlockStore, useUnit } from "@/store/flockStore";
@@ -25,6 +26,13 @@ export default function Header() {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
+
+  // The flock's name — set in The run, else auto-derived from the plan. Shown by the title and as the
+  // browser tab / shared-link title, so a saved or shared flock reads as itself, not a bare slug.
+  const flockName = session ? flockDisplayName(session) : "";
+  useEffect(() => {
+    document.title = flockName ? `${flockName} · Flock Party` : "Flock Party";
+  }, [flockName]);
 
   // Pull the reader's saved km/mi choice from localStorage once on mount (client-only, so it can't run
   // during SSR and can't mismatch hydration — the first render uses the flock's unit until this lands).
@@ -102,9 +110,12 @@ export default function Header() {
 
   return (
     <header className="z-20 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/5 bg-surface px-3 sm:gap-3 sm:px-4">
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
         <span className="whitespace-nowrap text-base font-semibold tracking-tight">Flock Party</span>
-        <span className="mono hidden text-xs text-fog sm:inline">flock/{flockId}</span>
+        {flockName && (
+          <span className="hidden min-w-0 truncate text-sm text-fog sm:inline" title={flockName}>{flockName}</span>
+        )}
+        <span className="mono hidden shrink-0 text-xs text-fog/60 lg:inline">flock/{flockId}</span>
       </div>
 
       <div className="flex items-center gap-1.5 sm:gap-2">

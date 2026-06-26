@@ -54,7 +54,7 @@ export async function setUnit(flockId: string, unitPreference: Unit): Promise<Fl
 /** Run-level config: the flock's departure anchor and/or its intended distance. */
 export async function setRunConfig(
   flockId: string,
-  config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null },
+  config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null; name?: string | null },
 ): Promise<FlockSession> {
   const { session } = await patch(flockId, { action: "setRunConfig", ...config });
   return session;

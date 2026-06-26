@@ -6,6 +6,7 @@ import Field from "@/components/ui/Field";
 import Slider from "@/components/ui/Slider";
 import Toggle from "@/components/ui/Toggle";
 import { setRunConfig } from "@/lib/flockApi";
+import { deriveFlockName } from "@/lib/flockName";
 import type { TimeAnchor } from "@/lib/types";
 import { DISTANCE_MAX_KM, DISTANCE_MIN_KM, formatDistance } from "@/lib/units";
 import { useFlockStore, useUnit } from "@/store/flockStore";
@@ -35,17 +36,21 @@ export default function RunSettings() {
   // session lands (or the write fails), so server state stays the single source of truth.
   const [draftAnchor, setDraftAnchor] = useState<TimeAnchor | null>(null);
   const [draftDistance, setDraftDistance] = useState<{ v: number | null } | null>(null);
+  const [draftName, setDraftName] = useState<{ v: string | null } | null>(null);
 
   if (!session || !flockId) return null;
   const { waypoints } = session;
   const locked = session.locks?.run ?? false;
   const startAnchor = draftAnchor ?? session.startAnchor;
   const distance = draftDistance ? draftDistance.v : session.intendedDistanceKm;
+  const name = draftName ? draftName.v : session.name;
+  const autoName = deriveFlockName(session);
 
-  const save = (config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null }, debounce = false) => {
+  const save = (config: { startAnchor?: TimeAnchor; intendedDistanceKm?: number | null; name?: string | null }, debounce = false) => {
     // Reflect the change immediately, then reconcile with the server in the background.
     if (config.startAnchor !== undefined) setDraftAnchor(config.startAnchor);
     if (config.intendedDistanceKm !== undefined) setDraftDistance({ v: config.intendedDistanceKm });
+    if (config.name !== undefined) setDraftName({ v: config.name });
     const run = async () => {
       try {
         const s = await setRunConfig(flockId, config);
@@ -55,6 +60,7 @@ export default function RunSettings() {
       } finally {
         if (config.startAnchor !== undefined) setDraftAnchor(null);
         if (config.intendedDistanceKm !== undefined) setDraftDistance(null);
+        if (config.name !== undefined) setDraftName(null);
       }
     };
     if (timer.current) clearTimeout(timer.current);
@@ -92,6 +98,26 @@ export default function RunSettings() {
       {locked && (
         <p className="text-xs text-fog">The run is locked. Tap the lock above to make changes.</p>
       )}
+      <Field label="Name">
+        <Toggle
+          options={[{ value: "auto", label: "Auto" }, { value: "set", label: "Set a name" }]}
+          value={name != null ? "set" : "auto"}
+          onChange={(v) => save({ name: v === "set" ? autoName : null })}
+        />
+        {name != null ? (
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => save({ name: e.target.value }, true)}
+            placeholder={autoName}
+            maxLength={80}
+            aria-label="Flock name"
+            className="mt-2 w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none focus:border-accent/60"
+          />
+        ) : (
+          <p className="mt-2 truncate text-sm text-fog" title={autoName}>{autoName}</p>
+        )}
+      </Field>
       <Field label="Time">
         <Toggle
           options={[{ value: "auto", label: "Auto" }, { value: "at", label: "Set off at" }, { value: "by", label: "Be there by" }]}
