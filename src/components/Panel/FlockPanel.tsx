@@ -11,6 +11,7 @@ import WaypointsSection from "@/components/Panel/WaypointsSection";
 import LockToggle from "@/components/ui/LockToggle";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { setSectionLock } from "@/lib/flockApi";
+import { flockTimeLabel } from "@/lib/flockName";
 import type { FlockSession, LockSection, Unit } from "@/lib/types";
 import { formatDistance } from "@/lib/units";
 import { useFlockStore, useUnit } from "@/store/flockStore";
@@ -35,18 +36,10 @@ function useSectionLock() {
   };
 }
 
-// "07:00" → "7am", "07:30" → "7:30am" — a friendly glance value for the summaries.
-function clockLabel(hhmm: string): string {
-  const [h, m] = hhmm.split(":").map(Number);
-  const period = h < 12 ? "am" : "pm";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return m ? `${h12}:${String(m).padStart(2, "0")}${period}` : `${h12}${period}`;
-}
-
 // One-line summaries — desktop concertina chips + mobile tab subtitles.
 function runSummary(s: FlockSession, unit: Unit): string {
-  const a = s.startAnchor;
-  const time = a.kind === "auto" ? "7am" : clockLabel(a.time);
+  // Same source as the flock NAME's time (flockTimeLabel) so the title and this chip never disagree.
+  const time = flockTimeLabel(s);
   // Only show distance when it's an explicit value — a bare "Auto" token next to a concrete
   // time reads ambiguously, so omit it when the distance is left automatic.
   return s.intendedDistanceKm != null

@@ -104,7 +104,7 @@ export default function RunSettings() {
           value={name != null ? "set" : "auto"}
           onChange={(v) => save({ name: v === "set" ? autoName : null })}
         />
-        {name != null ? (
+        {name != null && (
           <input
             type="text"
             value={name}
@@ -114,8 +114,6 @@ export default function RunSettings() {
             aria-label="Flock name"
             className="mt-2 w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none focus:border-accent/60"
           />
-        ) : (
-          <p className="mt-2 truncate text-sm text-fog" title={autoName}>{autoName}</p>
         )}
       </Field>
       <Field label="Time">

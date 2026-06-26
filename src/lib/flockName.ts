@@ -28,7 +28,7 @@ export function flockDisplayName(session: FlockSession): string {
 
 /** The auto name from the plan's OUTPUT. Always returns something speakable. */
 export function deriveFlockName(session: FlockSession): string {
-  const time = runTimeLabel(session);
+  const time = flockTimeLabel(session);
   const named = (session.waypoints ?? []).filter((w) => w.name?.trim() && !waypointNameIsAuto(w));
   const line = session.flockRoute;
   const loop = isLoop(line);
@@ -55,12 +55,13 @@ function withVias(base: string, vias: FlockWaypoint[]): string {
   return `${base} via ${via}`;
 }
 
-/** "7am" / "7:30am" / "12pm" from the resolved start, falling back to a set anchor time. */
-function runTimeLabel(session: FlockSession): string {
-  const times = (session.computedRoutes ?? []).map((r) => r.departureTime).filter(Boolean);
-  if (times.length) return clock12(mostCommon(times));
+/** The flock's headline start time — IDENTICAL to The run's summary (runSummary in FlockPanel uses this
+ *  too) so the two never disagree: an Auto flock reads "7am" (the nominal default); a set departure /
+ *  "be there by" reads its own time. Deliberately NOT the per-runner computed departures — a connector
+ *  runner setting off early would make the name show a different time than The run does. */
+export function flockTimeLabel(session: FlockSession): string {
   const a = session.startAnchor;
-  return a.kind === "departure" || a.kind === "waypoint" ? clock12(a.time) : "";
+  return a.kind === "auto" ? "7am" : clock12(a.time);
 }
 
 function clock12(hhmm: string): string {
@@ -69,14 +70,6 @@ function clock12(hhmm: string): string {
   const period = h < 12 ? "am" : "pm";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return m ? `${h12}:${String(m).padStart(2, "0")}${period}` : `${h12}${period}`;
-}
-
-// Most frequent value; ties resolve to the earliest (zero-padded "HH:MM" sorts chronologically).
-// Robust to one runner setting off early on a connector to meet the flock.
-function mostCommon(xs: string[]): string {
-  const count = new Map<string, number>();
-  for (const x of xs) count.set(x, (count.get(x) ?? 0) + 1);
-  return [...count.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
 }
 
 function isLoop(line: FlockSession["flockRoute"]): boolean {
