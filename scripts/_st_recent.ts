@@ -11,7 +11,7 @@ const store = new Map<string, string>();
 
 import {
   getRecentLocations, pushRecentLocation, matchLocations, locationKey,
-  getRecentRunners, upsertRecentRunner, syncRecentRunners, matchRunners, recentRunnerToConstraints,
+  getRecentRunners, upsertRecentRunner, syncRecentRunners, matchRunners, recentRunnerToConstraints, isSameRunner,
 } from "../src/lib/recentStore";
 import type { GeocodeResult, Participant, ParticipantConstraints } from "../src/lib/types";
 import { ok, suite, section, finish } from "./_st_harness";
@@ -75,6 +75,13 @@ function main() {
   const portable = recentRunnerToConstraints(wpRunner);
   ok(portable.startPin.kind === "auto", "a waypoint start pin degrades to auto in a new flock");
   ok(portable.finishPin.kind === "manual", "a manual finish place carries across flocks");
+
+  section("runners: perfect-duplicate detection (hide someone already in the run)");
+  ok(isSameRunner(runner("Tom", { pace: 360 }), runner("Tom", { pace: 360 })) === true, "identical constraints → same runner");
+  ok(isSameRunner(runner("Tom", { pace: 360 }), runner("Tom", { pace: 300 })) === false, "same name, different pace → NOT a dup");
+  ok(isSameRunner(runner("Tom", { startPin: { kind: "manual", location: { lat: -37.8, lng: 145 }, address: "Home" } }), runner("Tom")) === false, "same name, different start → NOT a dup");
+  ok(isSameRunner(runner("Tom"), runner("Tim")) === false, "different name → NOT a dup");
+  ok(isSameRunner(runner("  Tom  "), runner("Tom")) === true, "name whitespace is trimmed before comparing");
 
   finish();
 }

@@ -120,6 +120,12 @@ export function matchRunners(recents: ParticipantConstraints[], query: string): 
   return recents.filter((r) => r.name.toLowerCase().includes(q));
 }
 
+/** A PERFECT duplicate — every constraint field matches, not just the name. Used to hide a cached
+ *  runner who is already in the current flock identically (re-adding them would just duplicate). */
+export function isSameRunner(a: ParticipantConstraints, b: ParticipantConstraints): boolean {
+  return JSON.stringify(pickConstraints(a)) === JSON.stringify(pickConstraints(b));
+}
+
 /** Make a cached runner usable in a DIFFERENT flock: a "waypoint" pin can't carry across flocks
  *  (its id is local), so it degrades to "no preference"; a manual place / auto carries fine. */
 export function recentRunnerToConstraints(c: ParticipantConstraints): ParticipantConstraints {

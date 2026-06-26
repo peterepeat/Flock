@@ -14,7 +14,7 @@ import {
   updateParticipant,
 } from "@/lib/flockApi";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
-import { getRecentRunners, matchRunners, recentRunnerToConstraints, upsertRecentRunner } from "@/lib/recentStore";
+import { getRecentRunners, isSameRunner, matchRunners, recentRunnerToConstraints, upsertRecentRunner } from "@/lib/recentStore";
 import type { LatLng, LocationPin, Participant, ParticipantConstraints } from "@/lib/types";
 import { recordParticipantEdit } from "@/lib/undoableEdits";
 import {
@@ -298,8 +298,13 @@ export default function ParticipantForm() {
     });
     setNameOpen(false);
   }
-  // Suggest saved runners only when ADDING (in edit mode the name is fixed to that person).
-  const runnerSuggestions = editingId ? [] : matchRunners(recentRunners, draft.name);
+  // Suggest saved runners only when ADDING (in edit mode the name is fixed to that person), and hide
+  // anyone already in THIS flock as a perfect duplicate (same name AND prefs) — re-adding would just clone.
+  const runnerSuggestions = editingId
+    ? []
+    : matchRunners(recentRunners, draft.name).filter(
+        (c) => !(session?.participants ?? []).some((p) => isSameRunner(toConstraints(p), c)),
+      );
 
   const toggleStartPin = () => { setPlacingFinish(false); setPlacingPin(!placingPin); };
   const toggleFinishPin = () => { setPlacingPin(false); setPlacingFinish(!placingFinish); };
@@ -388,7 +393,6 @@ export default function ParticipantForm() {
         {draft.distanceOn && (
           <div className="mt-3">
             <Slider min={DISTANCE_MIN_KM} max={DISTANCE_MAX_KM} value={draft.distanceKm} onChange={(v) => set("distanceKm", v)} format={(v) => formatDistance(v, unit)} />
-            <p className="mt-1 text-xs text-fog">The most you’ll run — you’ll peel off when you reach it.</p>
           </div>
         )}
       </Field>
@@ -408,7 +412,6 @@ export default function ParticipantForm() {
               <span>Slower</span>
               <span>Faster</span>
             </div>
-            <p className="mt-1 text-xs text-fog">The flock runs at its slowest, so everyone stays together.</p>
           </div>
         )}
       </Field>
