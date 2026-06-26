@@ -20,7 +20,9 @@ import type { GeocodeResult, LocationPin, Participant, ParticipantConstraints } 
 
 const LOCATIONS_KEY = "flock.recentLocations";
 const RUNNERS_KEY = "flock.recentRunners";
+const FLOCKS_KEY = "flock.recentFlocks";
 const MAX = 10;
+const FLOCKS_MAX = 15; // navigation history — tiny {id,name} entries, so keep a few more
 
 function readArray<T>(key: string): T[] {
   try {
@@ -133,3 +135,30 @@ export function recentRunnerToConstraints(c: ParticipantConstraints): Participan
 }
 
 const portablePin = (pin: LocationPin): LocationPin => (pin && pin.kind === "waypoint" ? { kind: "auto" } : pin ?? { kind: "auto" });
+
+// ===== recent FLOCKS ========================================================
+// Lightweight {id, name} references to flocks you've opened — for the homepage "jump back in" list
+// and the in-app switcher. The name refreshes on each visit so a renamed flock reads current.
+
+export interface RecentFlock {
+  id: string;
+  name: string;
+}
+
+const isFlock = (r: unknown): r is RecentFlock =>
+  !!r && typeof (r as RecentFlock).id === "string" && (r as RecentFlock).id.length > 0 && typeof (r as RecentFlock).name === "string";
+
+export function getRecentFlocks(): RecentFlock[] {
+  return readArray<RecentFlock>(FLOCKS_KEY).filter(isFlock);
+}
+
+/** Record a visit (or a name change): move-to-front, dedup by id, refresh the name, cap. */
+export function pushRecentFlock(id: string, name: string): void {
+  if (!id) return;
+  const entry: RecentFlock = { id, name: (name ?? "").trim() };
+  writeArray(FLOCKS_KEY, [entry, ...getRecentFlocks().filter((f) => f.id !== id)].slice(0, FLOCKS_MAX));
+}
+
+export function removeRecentFlock(id: string): void {
+  writeArray(FLOCKS_KEY, getRecentFlocks().filter((f) => f.id !== id));
+}

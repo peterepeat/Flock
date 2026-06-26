@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import FlockSwitcher from "@/components/FlockSwitcher";
 import { LockGlyph } from "@/components/ui/LockToggle";
 import { lockFlock, unlockFlock } from "@/lib/flockApi";
 import { flockDisplayName } from "@/lib/flockName";
@@ -110,13 +111,7 @@ export default function Header() {
 
   return (
     <header className="z-20 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/5 bg-surface px-3 sm:gap-3 sm:px-4">
-      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-        <span className="whitespace-nowrap text-base font-semibold tracking-tight">Flock Party</span>
-        {flockName && (
-          <span className="hidden min-w-0 truncate text-sm text-fog sm:inline" title={flockName}>{flockName}</span>
-        )}
-        <span className="mono hidden shrink-0 text-xs text-fog/60 lg:inline">flock/{flockId}</span>
-      </div>
+      <FlockSwitcher flockId={flockId} flockName={flockName} />
 
       <div className="flex items-center gap-1.5 sm:gap-2">
         {/* Display unit — the reader's own km/mi preference (localStorage), not a flock setting. */}

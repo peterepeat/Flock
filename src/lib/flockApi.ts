@@ -7,6 +7,7 @@
 
 import { createLogger } from "./logger";
 import type {
+  CreateFlockResponse,
   FlockSession,
   FlockWaypoint,
   LockSection,
@@ -17,6 +18,18 @@ import type {
 } from "./types";
 
 const log = createLogger("flock-api");
+
+/** Create a fresh flock and return its id. Used by the landing CTA + the in-app "new flock" switcher. */
+export async function createFlock(): Promise<string> {
+  const res = await fetch("/api/flocks/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new FlockApiError(`create failed: ${res.status}`, res.status);
+  const data = (await res.json()) as CreateFlockResponse;
+  return data.id;
+}
 
 export class FlockApiError extends Error {
   constructor(

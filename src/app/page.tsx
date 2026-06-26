@@ -4,8 +4,9 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import RecentFlocks from "@/components/RecentFlocks";
+import { createFlock } from "@/lib/flockApi";
 import { createLogger } from "@/lib/logger";
-import type { CreateFlockResponse } from "@/lib/types";
 
 // Decorative animated illustration — client-only (uses per-load randomness).
 const HeroScene = dynamic(() => import("@/components/HeroScene"), { ssr: false });
@@ -22,15 +23,9 @@ export default function LandingPage() {
     setError(null);
     log.info("starting a new flock");
     try {
-      const res = await fetch("/api/flocks/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) throw new Error(`create failed: ${res.status}`);
-      const data = (await res.json()) as CreateFlockResponse;
-      log.info("flock created, redirecting", { id: data.id });
-      router.push(`/flock/${data.id}`);
+      const id = await createFlock();
+      log.info("flock created, redirecting", { id });
+      router.push(`/flock/${id}`);
     } catch (err) {
       log.error("could not start flock", { error: String(err) });
       setError("Something went wrong starting your flock. Try again.");
@@ -70,6 +65,9 @@ export default function LandingPage() {
         </button>
 
         {error && <p className="mt-4 text-sm text-accent">{error}</p>}
+
+        {/* Shown only when this browser has flock history. */}
+        <RecentFlocks />
       </div>
     </main>
   );

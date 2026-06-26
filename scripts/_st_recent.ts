@@ -12,6 +12,7 @@ const store = new Map<string, string>();
 import {
   getRecentLocations, pushRecentLocation, matchLocations, locationKey,
   getRecentRunners, upsertRecentRunner, syncRecentRunners, matchRunners, recentRunnerToConstraints, isSameRunner,
+  getRecentFlocks, pushRecentFlock, removeRecentFlock,
 } from "../src/lib/recentStore";
 import type { GeocodeResult, Participant, ParticipantConstraints } from "../src/lib/types";
 import { ok, suite, section, finish } from "./_st_harness";
@@ -82,6 +83,21 @@ function main() {
   ok(isSameRunner(runner("Tom", { startPin: { kind: "manual", location: { lat: -37.8, lng: 145 }, address: "Home" } }), runner("Tom")) === false, "same name, different start → NOT a dup");
   ok(isSameRunner(runner("Tom"), runner("Tim")) === false, "different name → NOT a dup");
   ok(isSameRunner(runner("  Tom  "), runner("Tom")) === true, "name whitespace is trimmed before comparing");
+
+  section("flocks: visit order, dedup by id, name refresh, cap, remove");
+  reset();
+  pushRecentFlock("abc123", "7am run");
+  pushRecentFlock("def456", "8am loop from Fed Square");
+  ok(getRecentFlocks().map((f) => f.id).join(",") === "def456,abc123", "most-recently-visited first");
+  pushRecentFlock("abc123", "7:30am run to NGV"); // revisit + renamed
+  ok(getRecentFlocks().length === 2, "dedup by id (revisit moves to front, no duplicate)");
+  ok(getRecentFlocks()[0].id === "abc123" && getRecentFlocks()[0].name === "7:30am run to NGV", "revisit fronts it + refreshes the name");
+  removeRecentFlock("def456");
+  ok(getRecentFlocks().map((f) => f.id).join(",") === "abc123", "remove drops it from the list");
+  reset();
+  for (let i = 0; i < 18; i++) pushRecentFlock("f" + i, "flock " + i);
+  ok(getRecentFlocks().length === 15, "capped at 15");
+  ok(getRecentFlocks()[0].id === "f17", "newest kept, oldest evicted");
 
   finish();
 }
