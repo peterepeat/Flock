@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { createLogger } from "@/lib/logger";
+import { getRecentLocations, locationKey, matchLocations, pushRecentLocation } from "@/lib/recentStore";
 import type { GeocodeResult, LatLng } from "@/lib/types";
 import { useFlockStore } from "@/store/flockStore";
 
@@ -27,6 +28,7 @@ export default function AddressSearch({
 }: AddressSearchProps) {
   const [query, setQuery] = useState(initialValue);
   const [results, setResults] = useState<GeocodeResult[]>([]);
+  const [recents, setRecents] = useState<GeocodeResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,9 +81,21 @@ export default function AddressSearch({
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const q = query.trim();
+    // Your own recents come first — they may cover the query before we ever touch the server.
+    const recentNow = getRecentLocations();
+    setRecents(recentNow);
+    const localCount = matchLocations(recentNow, q).length;
+
     if (q.length < MIN_CHARS) {
+      // Below the search threshold: just offer recents (covers the empty "before typing" case too).
       setResults([]);
-      setOpen(false);
+      setOpen(localCount > 0);
+      return;
+    }
+    if (localCount >= 4) {
+      // Enough of YOUR recents already match — skip the geocoder (one fewer call + IP-ban risk).
+      setResults([]);
+      setOpen(true);
       return;
     }
 
@@ -143,8 +157,17 @@ export default function AddressSearch({
     setQuery(r.shortName);
     setResults([]);
     setOpen(false);
+    pushRecentLocation(r); // remember this TYPED + picked place for next time (not map-drops / GPX)
     onSelect(r);
   }
+
+  // Merge YOUR matching recents (first, badged) with the server results, de-duplicated by spot.
+  const localMatches = matchLocations(recents, query.trim());
+  const seenKeys = new Set(localMatches.map(locationKey));
+  const display = [
+    ...localMatches.map((r) => ({ r, recent: true })),
+    ...results.filter((r) => !seenKeys.has(locationKey(r))).map((r) => ({ r, recent: false })),
+  ];
 
   return (
     <div className="relative">
@@ -155,7 +178,10 @@ export default function AddressSearch({
         onChange={(e) => setQuery(e.target.value)}
         onFocus={() => {
           focused.current = true;
-          if (results.length > 0) setOpen(true);
+          const rec = getRecentLocations();
+          setRecents(rec);
+          // Offer recents the moment an empty/short field opens (the "top options before typing").
+          if ((rec.length > 0 && query.trim().length < MIN_CHARS) || results.length > 0) setOpen(true);
         }}
         onBlur={() => {
           focused.current = false;
@@ -167,17 +193,20 @@ export default function AddressSearch({
           …
         </span>
       )}
-      {open && results.length > 0 && (
+      {open && display.length > 0 && (
         <ul className="absolute z-[1100] mt-1 max-h-56 w-full overflow-auto rounded-lg border border-white/10 bg-surface-mid shadow-panel flock-scroll">
-          {results.map((r, i) => (
+          {display.map(({ r, recent }, i) => (
             <li key={`${r.lat}-${r.lng}-${i}`}>
               <button
                 type="button"
                 onClick={() => choose(r)}
-                className="block w-full px-3 py-2 text-left text-sm text-text hover:bg-surface-lift"
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-text hover:bg-surface-lift"
               >
-                <span className="block truncate">{r.shortName}</span>
-                <span className="block truncate text-xs text-fog">{r.displayName}</span>
+                <span className="min-w-0">
+                  <span className="block truncate">{r.shortName}</span>
+                  <span className="block truncate text-xs text-fog">{r.displayName}</span>
+                </span>
+                {recent && <span className="shrink-0 text-[10px] uppercase tracking-wider text-fog/70" aria-hidden>Recent</span>}
               </button>
             </li>
           ))}

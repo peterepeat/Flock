@@ -9,6 +9,7 @@ import FlockPanel from "@/components/Panel/FlockPanel";
 import MobileTabBar from "@/components/Panel/MobileTabBar";
 import { usePolling } from "@/hooks/usePolling";
 import { useRouteCalculation } from "@/hooks/useRouteCalculation";
+import { syncRecentRunners } from "@/lib/recentStore";
 import { useFlockStore } from "@/store/flockStore";
 
 export default function FlockClient({ flockId }: { flockId: string }) {
@@ -17,11 +18,18 @@ export default function FlockClient({ flockId }: { flockId: string }) {
   const calcStatus = useFlockStore((s) => s.calcStatus);
   const hasSession = useFlockStore((s) => s.session != null);
   const setActiveTab = useFlockStore((s) => s.setActiveTab);
+  const participants = useFlockStore((s) => s.session?.participants);
   const initialTabSet = useRef(false);
 
   useEffect(() => {
     setFlockId(flockId);
   }, [flockId, setFlockId]);
+
+  // Keep YOUR cached runners current: when anyone edits a runner whose name you've saved, refresh
+  // the local copy so they carry the latest prefs into your next flock. (No-op until you've saved one.)
+  useEffect(() => {
+    if (participants) syncRecentRunners(participants);
+  }, [participants]);
 
   // Pick the opening mobile tab once the flock loads: an empty flock starts on Run (the first
   // authoring step); an already-populated one (a joiner via the shared link) starts on Map so

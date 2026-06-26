@@ -14,6 +14,7 @@ import {
   updateParticipant,
 } from "@/lib/flockApi";
 import { pinLabel, reverseGeocode } from "@/lib/geocodeClient";
+import { getRecentRunners, matchRunners, recentRunnerToConstraints, upsertRecentRunner } from "@/lib/recentStore";
 import type { LatLng, LocationPin, Participant, ParticipantConstraints } from "@/lib/types";
 import { recordParticipantEdit } from "@/lib/undoableEdits";
 import {
@@ -127,6 +128,9 @@ export default function ParticipantForm() {
   const [targetId, setTargetId] = useState<string | null>(editingId);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Quick-add from people YOU saved before (name typeahead, ADD mode only).
+  const [nameOpen, setNameOpen] = useState(false);
+  const [recentRunners, setRecentRunners] = useState<ParticipantConstraints[]>([]);
   const initialised = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const priorConstraintsRef = useRef<ParticipantConstraints | null>(null);
@@ -153,6 +157,11 @@ export default function ParticipantForm() {
       });
     }
   }, [existing]);
+
+  // Load YOUR saved runners once when the ADD form opens, so the name typeahead is ready to suggest.
+  useEffect(() => {
+    if (!editingId) setRecentRunners(getRecentRunners());
+  }, [editingId]);
 
   // Publish a manual start/finish pin to the map so it shows live.
   useEffect(() => {
@@ -226,6 +235,7 @@ export default function ParticipantForm() {
         const updated = await updateParticipant(flockId, targetId, constraints);
         applyServerSession(updated, true);
         lastSavedConstraintsRef.current = constraints;
+        upsertRecentRunner(constraints); // remember this runner (you saved them) for other flocks
         setSaveState("saved");
       } catch (err) {
         setSaveState("error");
@@ -246,6 +256,7 @@ export default function ParticipantForm() {
       const { session: updated, participantId } = await addParticipant(flockId, constraints);
       applyServerSession(updated, true);
       setTargetId(participantId);
+      upsertRecentRunner(constraints); // remember this runner (you saved them) for other flocks
       setSaveState("saved");
       closeForm();
     } catch (err) {
@@ -269,6 +280,27 @@ export default function ParticipantForm() {
   const setFinish = (patch: Partial<PinDraft>) => setDraft((d) => ({ ...d, finish: { ...d.finish, ...patch } }));
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
+  // Picking a saved runner fills the whole draft from their stored prefs (a waypoint pin can't carry
+  // across flocks, so recentRunnerToConstraints degrades it to "no preference").
+  function applyRecentRunner(c: ParticipantConstraints) {
+    const p = recentRunnerToConstraints(c);
+    setDraft({
+      name: p.name,
+      start: pinToDraft(p.startPin),
+      finish: pinToDraft(p.finishPin),
+      distanceOn: p.maxDistanceKm != null,
+      distanceKm: p.maxDistanceKm ?? 8,
+      paceOn: p.pace != null,
+      paceSec: p.pace ?? 360,
+      timeOn: p.earliestStartTime != null || p.latestFinishTime != null,
+      earliestMin: toMin(p.earliestStartTime, 7 * 60),
+      latestMin: toMin(p.latestFinishTime, 10 * 60),
+    });
+    setNameOpen(false);
+  }
+  // Suggest saved runners only when ADDING (in edit mode the name is fixed to that person).
+  const runnerSuggestions = editingId ? [] : matchRunners(recentRunners, draft.name);
+
   const toggleStartPin = () => { setPlacingFinish(false); setPlacingPin(!placingPin); };
   const toggleFinishPin = () => { setPlacingPin(false); setPlacingFinish(!placingFinish); };
 
@@ -279,15 +311,36 @@ export default function ParticipantForm() {
 
   return (
     <div className="space-y-6">
-      {/* Name */}
+      {/* Name — with a typeahead of people you've saved before (add mode). */}
       <Field label="What should we call you?">
-        <input
-          type="text"
-          value={draft.name}
-          placeholder="What should we call you?"
-          onChange={(e) => set("name", e.target.value)}
-          className="w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none placeholder:text-fog focus:border-accent/60"
-        />
+        <div className="relative">
+          <input
+            type="text"
+            value={draft.name}
+            placeholder="What should we call you?"
+            onChange={(e) => { set("name", e.target.value); if (!editingId) setNameOpen(true); }}
+            onFocus={() => { if (editingId) return; const r = getRecentRunners(); setRecentRunners(r); if (r.length > 0) setNameOpen(true); }}
+            onBlur={() => setTimeout(() => setNameOpen(false), 120)}
+            className="w-full rounded-lg border border-white/10 bg-surface-lift px-3 py-2.5 text-sm text-text outline-none placeholder:text-fog focus:border-accent/60"
+          />
+          {nameOpen && runnerSuggestions.length > 0 && (
+            <ul className="absolute z-[1100] mt-1 max-h-56 w-full overflow-auto rounded-lg border border-white/10 bg-surface-mid shadow-panel flock-scroll">
+              {runnerSuggestions.map((c) => (
+                <li key={c.name}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => applyRecentRunner(c)}
+                    className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-text hover:bg-surface-lift"
+                  >
+                    <span className="truncate">{c.name}</span>
+                    <span className="shrink-0 text-[10px] uppercase tracking-wider text-fog/70" aria-hidden>Recent</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </Field>
 
       {/* Start pin */}
